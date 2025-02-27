@@ -45,7 +45,6 @@
 #define SDX_D0 PC8
 #define SDX_CK PC12
 #define SDX_CMD PD2
-#define FREE_SPACE_THRESHOLD 20
 
 #define FLASH_SECTOR_SIZE 4 * 1024 // 16 kb
 #define EEPROM_PAGE_SIZE 512
@@ -107,7 +106,6 @@ struct EEPROMData                             // Структура данных
     int lifter_Speed;
     uint32_t timingBudget;
     uint8_t minBattCharge;
-    uint8_t logWrite;
     uint16_t shuttleLength;
     int waitTime;
     int8_t mprOffset;
@@ -148,7 +146,6 @@ uint8_t calibrateEncoder_F[8] = {40, 40, 40, 40, 40, 40, 40, 40};            // 
 uint8_t calibrateEncoder_R[8] = {40, 40, 40, 40, 40, 40, 40, 40};            // Массив данных калибровки магнитного энкодера при движении вперед -сохранять-
 uint8_t calibrateSensor_F[3] = {100, 100, 100}; // Массив калибровки канального сенсора расстояния вперед -сохранять-
 uint8_t calibrateSensor_R[3] = {100, 100, 100}; // Массив калибровки канального сенсора расстояния назад -сохранять-
-char logFileName[20];                           // Имя логфайла
 String dataStr = "";                            // Строка для записи в логфайл
 
 uint8_t counter = 0;        // Счетчик для красивых морганий в рабочем режиме
@@ -230,10 +227,6 @@ int lifter_Speed = 3700;    // Скорость двигателя лифтер�
 int oldChannelDistanse = 0; // Канальная дистанция для фильтрации фантомных срабатываний
 int oldPalleteDistanse = 0; // Паллетная дистанция для фильтрации фантомных срабатываний
 uint32_t timingBudget = 70; // Время измерения датчиками TOF -сохранять-
-int fileNumber = 0;         // Счетчик файлов
-const int maxRetries = 3;   // Количество попыток чтения логфайла -сохранять-
-bool logWrite = false;      // Флаг инициализации SD карты
-bool logExist = false;      // Флаг наличия данных в SD буфере
 
 uint16_t mesRes[2][4];
 int countManual = millis();
@@ -323,7 +316,6 @@ void setup()
   eepromData.lifter_Speed = lifter_Speed;
   eepromData.timingBudget = timingBudget;
   eepromData.minBattCharge = minBattCharge;
-  eepromData.logWrite = logWrite;
   eepromData.shuttleLength = shuttleLength;
   eepromData.waitTime = waitTime;
   eepromData.mprOffset = mprOffset;
@@ -359,7 +351,6 @@ void setup()
     lifter_Speed = eepromData.lifter_Speed;
     timingBudget = eepromData.timingBudget;
     minBattCharge = eepromData.minBattCharge;
-    logWrite = eepromData.logWrite;
     shuttleLength = eepromData.shuttleLength;
     waitTime = eepromData.waitTime;
     mprOffset = eepromData.mprOffset;
@@ -1141,11 +1132,6 @@ uint8_t get_Cmd() //Запрос команд с пульта ДУ
       tempStr = inStr.substring(2,5);
       if (tempStr == "dNN") {shuttleNum = inStr.substring(5,8).toInt() - 1;  eepromData.shuttleNum = shuttleNum;}  // Установка номера шаттла
       else if (tempStr == "dQt") {UPQuant = inStr.substring(5,8).toInt(); statusTmp = 23;}      // Выгрузка заданного количества паллет
-      else if (tempStr == "dLg")                                                                // Журналирование
-      {
-        logWrite = inStr.substring(5,6).toInt();
-        eepromData.logWrite = logWrite;
-      }
       else if (tempStr == "dDm") {interPalleteDistance = inStr.substring(5,8).toInt(); eepromData.interPalleteDistance = interPalleteDistance;}    // Установка межпаллетного расстояния
       else if (tempStr == "dSl") {shuttleLength = inStr.substring(5,8).toInt() * 10; eepromData.shuttleLength = shuttleLength;}                    // Установка длинны шаттла
       else if (tempStr == "dSp")                                                                // Установка максимальной скорости
@@ -1252,11 +1238,6 @@ uint8_t get_Cmd() //Запрос команд с пульта ДУ
       tempStr = inStr.substring(2,5);
       if (tempStr == "dNN") {shuttleNum = inStr.substring(5,8).toInt() - 1;  eepromData.shuttleNum = shuttleNum;}  // Установка номера шаттла
       else if (tempStr == "dQt") {UPQuant = inStr.substring(5,8).toInt(); statusTmp = 23;}  // Выгрузка заданного количества паллет
-      else if (tempStr == "dLg")                                                                // Журналирование
-      {
-        logWrite = inStr.substring(5,6).toInt();
-        eepromData.logWrite = logWrite;
-      }
       else if (tempStr == "dDm") {interPalleteDistance = inStr.substring(5,8).toInt(); eepromData.interPalleteDistance = interPalleteDistance;}    // Установка межпаллетного расстояния
       else if (tempStr == "dSl") {shuttleLength = inStr.substring(5,8).toInt() * 10; eepromData.shuttleLength = shuttleLength;}                    // Установка длинны шаттла
       else if (tempStr == "dSp")                                                                // Установка максимальной скорости
@@ -1513,10 +1494,6 @@ void send_Cmd()
         break;
       case 25: // Ручной режим
         Serial2.print(tempStr + "1:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 26: // Журналирование
-        tempStr = shuttleNums[shuttleNum] + "lg";
-        Serial2.print(tempStr + logWrite + "!");
         break;
       case 29: // Время ожидания при загрузке
         tempStr = shuttleNums[shuttleNum] + "wt";
@@ -4036,8 +4013,7 @@ void read_BatteryCharge()
       /*dataStr = "Read battery fail. Data string: ";
       for (uint8_t j = 0; j < i + 1; j++) dataStr += String(dataRead[j]) + " ";
       Serial.println(dataStr);
-      Serial1.println(dataStr);
-      if (logWrite) writeToFile();*/
+      Serial1.println(dataStr);*/
       dataStr = "Calc checksumm = " + String(sum) + "  ; BMS checksumm = " + String(res);
       Serial.println(dataStr);
       Serial1.println(dataStr);
