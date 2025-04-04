@@ -1465,73 +1465,73 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
     if (tempStr == shuttleNums[shuttleNum]) {
       countPult = millis();
       tempStr = inStr.substring(2, 8);
-      if (tempStr == "dCharg") send_Cmd();              // Коннект с пультом
-      else if (tempStr == "dRight") { statusTmp = 1; }  // Движение вперед
-      else if (tempStr == "dLeft_") {
+      if (tempStr == "dCharg" || inStr == "dCharg") send_Cmd();              // Коннект с пультом
+      else if (tempStr == "dRight" || inStr == "dRight") { statusTmp = 1; }  // Движение вперед
+      else if (tempStr == "dLeft_" || inStr == "dLeft_") {
         statusTmp = 2;
       }                                                 // Движение назад
-      else if (tempStr == "dUp___") { statusTmp = 3; }  // Поднять платформу вверх
-      else if (tempStr == "dDown_") {
+      else if (tempStr == "dUp___" || inStr == "dUp___") { statusTmp = 3; }  // Поднять платформу вверх
+      else if (tempStr == "dDown_" || inStr == "dDown_") {
         statusTmp = 4;
       }  // Опустить платфоорму
-      else if (tempStr == "dStop_") {
+      else if (tempStr == "dStop_" || inStr == "dStop_") {
         statusTmp = 5;
         diffPallete = 0;
       }                                                 // Остановка
-      else if (tempStr == "dLoad_") { statusTmp = 6; }  // Выгрузка паллеты
-      else if (tempStr == "dUnld_") {
+      else if (tempStr == "dLoad_" || inStr == "dLoad_") { statusTmp = 6; }  // Выгрузка паллеты
+      else if (tempStr == "dUnld_" || inStr == "dUnld_") {
         statusTmp = 7;
       }                                                  // Загрузка паллеты
-      else if (tempStr == "dClbr_") { statusTmp = 10; }  // Калибровка
-      else if (tempStr == "dDemo_") {
+      else if (tempStr == "dClbr_" || inStr == "dClbr_") { statusTmp = 10; }  // Калибровка
+      else if (tempStr == "dDemo_" || inStr == "dDemo_") {
         statusTmp = 11;
       }                                                  // Демо режим
-      else if (tempStr == "dGetQu") { statusTmp = 12; }  // Подсчет паллет
-      else if (tempStr == "dSaveC") {
+      else if (tempStr == "dGetQu" || inStr == "dGetQu") { statusTmp = 12; }  // Подсчет паллет
+      else if (tempStr == "dSaveC" || inStr == "dSaveC") {
         statusTmp = 13;
       }                                                  // Сохранение параметров на флэш память
-      else if (tempStr == "dComFo") { statusTmp = 14; }  // Уплотнение паллет вперед
-      else if (tempStr == "dComBa") {
+      else if (tempStr == "dComFo" || inStr == "dComFo") { statusTmp = 14; }  // Уплотнение паллет вперед
+      else if (tempStr == "dComBa" || inStr == "dComBa") {
         statusTmp = 15;
       }  // Уплотнение паллет назад
-      else if (tempStr == "dSpGet") {
+      else if (tempStr == "dSpGet" || inStr == "dSpGet") {
         statusTmp = 16;
         send_Cmd();
       }  // Запрос параметров из настроек
-      else if (tempStr == "dDataP") {
+      else if (tempStr == "dDataP" || inStr == "dDataP") {
         statusTmp = 17;
         send_Cmd();
       }  // Запрос данных из отладки
-      else if (tempStr == "tError") {
+      else if (tempStr == "tError" || inStr == "tError") {
         statusTmp = 19;
         send_Cmd();
       }  // Запрос ошибок
-      else if (tempStr == "dEvOn_") {
+      else if (tempStr == "dEvOn_" || inStr == "dEvOn_") {
         statusTmp = 20;
         evacuate = 1;
       }                                                  // Включение режима эвакуации
-      else if (tempStr == "dLLoad") { statusTmp = 21; }  // Продолжительная загрузка
-      else if (tempStr == "dLUnld") {
+      else if (tempStr == "dLLoad" || inStr == "dLLoad") { statusTmp = 21; }  // Продолжительная загрузка
+      else if (tempStr == "dLUnld" || inStr == "dLUnld") {
         statusTmp = 22;
       }                                                  // Продолжительная выгрузка
-      else if (tempStr == "dReset") { statusTmp = 24; }  // Сброс ошибок
-      else if (tempStr == "dManua") {
+      else if (tempStr == "dReset" || inStr == "dReset") { statusTmp = 24; }  // Сброс ошибок
+      else if (tempStr == "dManua" || inStr == "dManua") {
         statusTmp = 25;
         countManual = millis();
         send_Cmd();
       }                                                  // Ручной режим
-      else if (tempStr == "dHome_") { statusTmp = 27; }  // В начало канала
-      else if (tempStr == "dWaitT") {
+      else if (tempStr == "dHome_" || inStr == "dHome_") { statusTmp = 27; }  // В начало канала
+      else if (tempStr == "dWaitT" || inStr == "dWaitT") {
         statusTmp = 29;
       }                                                // Время ожидания при загрузке
-      else if (tempStr == "dEvOff") { evacuate = 0; }  // Выключение режима эвакуации
-      else if (tempStr == "ngPing")
+      else if (tempStr == "dEvOff" || inStr == "dEvOff") { evacuate = 0; }  // Выключение режима эвакуации
+      else if (tempStr == "ngPing" || inStr == "ngPing")
         pingCount = millis();                          // Удержание движения
-      else if (tempStr == "dLIFO_") { fifoLifo = 0; }  // Установка режима LIFO
-      else if (tempStr == "dFIFO_") {
+      else if (tempStr == "dLIFO_" || inStr == "dLIFO_") { fifoLifo = 0; }  // Установка режима LIFO
+      else if (tempStr == "dFIFO_" || inStr == "dFIFO_") {
         fifoLifo = 1;
       }  // Установка режима FIFO
-      else if (tempStr == "dRevOn") {
+      else if (tempStr == "dRevOn" || inStr == "dRevOn") {
         inverse = 0;
         eepromData.inverse = inverse;
         sensor_channel_f = &sens_chnl_f;
@@ -1539,7 +1539,7 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
         sensor_pallete_F = &sens_plt_F;
         sensor_pallete_R = &sens_plt_R;
         currentPosition = channelLength - currentPosition - 800;
-      } else if (tempStr == "dReOff") {
+      } else if (tempStr == "dReOff" || inStr == "dReOff") {
         inverse = 1;
         eepromData.inverse = inverse;
         sensor_channel_f = &sens_chnl_r;
@@ -1550,63 +1550,63 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
       }
 
       tempStr = inStr.substring(2, 5);
-      if (tempStr == "dNN") {
+      if (tempStr == "dNN" || inStr == "dNN") {
         shuttleNum = inStr.substring(5, 8).toInt() - 1;
         eepromData.shuttleNum = shuttleNum;
       }  // Установка номера шаттла
-      else if (tempStr == "dQt") {
+      else if (tempStr == "dQt" || inStr == "dQt") {
         UPQuant = inStr.substring(5, 8).toInt();
         statusTmp = 23;
       }  // Выгрузка заданного количества паллет
-      else if (tempStr == "dDm") {
+      else if (tempStr == "dDm" || inStr == "dDm") {
         interPalleteDistance = inStr.substring(5, 8).toInt();
         eepromData.interPalleteDistance = interPalleteDistance;
       }  // Установка межпаллетного расстояния
-      else if (tempStr == "dSl") {
+      else if (tempStr == "dSl" || inStr == "dSl") {
         shuttleLength = inStr.substring(5, 8).toInt() * 10;
         eepromData.shuttleLength = shuttleLength;
       }                           // Установка длинны шаттла
-      else if (tempStr == "dSp")  // Установка максимальной скорости
+      else if (tempStr == "dSp" || inStr == )  // Установка максимальной скорости
       {
         maxSpeed = inStr.substring(5, 8).toInt();
         if (maxSpeed > 96) maxSpeed = 96;
         if (maxSpeed < minSpeed) maxSpeed = minSpeed + 5;
         eepromData.maxSpeed = maxSpeed;
-      } else if (tempStr == "dBc")  // Установка минимального заряда батареи
+      } else if (tempStr == "dBc" || inStr == "dBc")  // Установка минимального заряда батареи
       {
         minBattCharge = inStr.substring(5, 8).toInt();
         if (minBattCharge > 50) minBattCharge = 50;
         if (minBattCharge < 0) minBattCharge = 0;
         eepromData.minBattCharge = minBattCharge;
-      } else if (tempStr == "dMr")  // Движение назад на заданное расстояние
+      } else if (tempStr == "dMr" || inStr == "dMr")  // Движение назад на заданное расстояние
       {
         statusTmp = 8;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dMf")  // Движение вперед на заданное расстояние
+      } else if (tempStr == "dMf" || inStr == "dMf")  // Движение вперед на заданное расстояние
       {
         statusTmp = 9;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dWt")  // Время ожидания при выгрузке
+      } else if (tempStr == "dWt" || inStr == "dWt")  // Время ожидания при выгрузке
       {
         statusTmp = 0;
         waitTime = inStr.substring(5, 7).toInt() * 1000;
         eepromData.waitTime = waitTime;
-      } else if (tempStr == "dMo")  // Смещение МПР
+      } else if (tempStr == "dMo" || inStr == "dMo")  // Смещение МПР
       {
         statusTmp = 0;
         mprOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.mprOffset = mprOffset;
-      } else if (tempStr == "dMc")  // Смещение конца канала
+      } else if (tempStr == "dMc" || inStr == "dMc")  // Смещение конца канала
       {
         statusTmp = 0;
         chnlOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.chnlOffset = chnlOffset;
       }
-    } else if (tempStr == "GS") {
+    } else if (tempStr == "GS" || inStr == "GS") {
       Serial1.print("GS " + String(shuttleNum));
       delay(5);
       Serial1.print("GS " + String(shuttleNum));
-    } else if (tempStr == "DT") {
+    } else if (tempStr == "DT" || inStr == "DT") {
       String input = inStr.substring(3, 23);
       int hour, minute, second, day, month, year;
       if (sscanf(input.c_str(), "%d:%d:%d %d.%d.%d", &hour, &minute, &second, &day, &month, &year) == 6) {
