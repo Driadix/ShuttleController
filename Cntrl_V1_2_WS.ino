@@ -1,8 +1,6 @@
 #include <Wire.h>
 #include "AS5600.h"
-#include <vl53l0x_class.h>
-//#include <vl53l1_class.h>
-//#include <vl53l4cd_class.h>
+#include "TOF_Sense.h"
 #include <String.h>
 #include "STM32_CAN.h"
 #include <EEPROM.h>
@@ -11,10 +9,7 @@
 #include <STM32RTC.h>
 
 #pragma region Пины и дефайны...
-#define XSHUT_F PE13     // Пин включения канального сенсора расстояния вперед PE13
-#define XSHUT_R PE9      // Пин включения канального сенсора расстояния назад PE9
-#define XSHUT_PF PE11    // Пин включения паллетного сенсора расстояния вперед PE11
-#define XSHUT_PR PE7     // Пин включения паллетного сенсора расстояния назад PE7
+
 #define DL_UP PD7        // Пин датчика положения лифтера в поднятом состоянии PD7
 #define DL_DOWN PD15     // Пин датчика положения лифтера в опущенном состоянии PC7
 #define DATCHIK_F1 PC7   // Пин датчика 1 обнаружения паллета вперед
@@ -50,20 +45,16 @@
 #define EEPROM_TOTAL_PAGES FLASH_SECTOR_SIZE / EEPROM_PAGE_SIZE
 #define EEPROM_HEADER_SIZE 1
 #define EEPROM_DATA_SIZE EEPROM_PAGE_SIZE - EEPROM_HEADER_SIZE
+
+#define MEDIAN(a, b, c) ((a) + (b) + (c) - min(min(a, b), c) - max(max(a, b), c))
+
+// Адрес регистра идентификатора модели для VL53L0X
+#define VL53L0X_REG_IDENTIFICATION_MODEL_ID         0xC0
+#define VL53L0X_EXPECTED_MODEL_ID                   0xEEAA // Ожидаемый ID для VL53L0X
+
 #pragma endregion
 
 #pragma region Переменные...
-
-VL53L0X sens_chnl_f(&Wire, XSHUT_F);  // Канальный сенсор расстояния вперед
-VL53L0X sens_chnl_r(&Wire, XSHUT_R);  // Канальный сенсор расстояния назад
-VL53L0X sens_plt_F(&Wire, XSHUT_PF);  // Паллетный сенсор расстояния вперед
-VL53L0X sens_plt_R(&Wire, XSHUT_PR);  // Паллетный сенсор расстояния назад
-
-VL53L0X* sensor_channel_f = &sens_chnl_f;  // Канальный сенсор расстояния вперед
-VL53L0X* sensor_channel_r = &sens_chnl_r;  // Канальный сенсор расстояния назад
-VL53L0X* sensor_pallete_F = &sens_plt_F;   // Паллетный сенсор расстояния вперед
-VL53L0X* sensor_pallete_R = &sens_plt_R;   // Паллетный сенсор расстояния назад
-
 
 HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
 HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
@@ -180,7 +171,7 @@ AS5600 as5600;  // Магнитный энкодер на свободном к�
 const String shuttleStatus[28] = { "Stand_By", "Moove_Forward", "Moove_Back", "Lift_Up", "Lift_Down", "Moove_Stop", "Load_Pallete", "Unload_Pallete", "Moove_DistanceR", "Moove_DistanceF", "Calibrate_Sensors",
                                    "Demo_Mode", "Pallete_Counting", "Save_EEProm", "Pallete_Compacting_F", "Pallete_Compacting_R", "Get_Parametrs", "Pallete_Sensor_Test", "TOF_Sensor_Test", "Error_Request",
                                    "Shuttle_Evacuate", "Long_Load", "Long_Unload", "Long_Quantity_Unload", "Error_Reset", "Manual_Mode", "Log_Mode", "Back_To_Start" };                                                                                              // Расшифровка командных статусов
-const String shuttleNums[26] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8", "I9", "J10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26" };                                                                      // Номера шаттлов
+const String shuttleNums[32] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8", "I9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };                                   // Номера шаттлов
 const String shuttleErrors[16] = { "No_Error", "Channel_F_Error", "Channel_R_Error", "Channel_DF_Error", "Channel_DR_Error", "Pallete_F_Error", "Pallete_R_Error", "Pallete_DF_Error", "Pallete_DR_Error", "Lifter_Error", "Moove_Fault", "Low_Battery", "Crash" };  // Статусы ошибок
 const String shuttleWarnings[16] = { "No_Warning", "Out_Of_Channel", "Battery charge < 20%", "Pallete_Not_Found", "Pallete_Damaged" };                                                                                                                               // Статусы ошибок
 uint8_t status = 0;                                                                                                                                                                                                                                                  // Командный статус
@@ -198,7 +189,6 @@ String dataStr = "";                                                 // Стро
 
 uint8_t counter = 0;                   // Счетчик для красивых морганий в рабочем режиме
 uint8_t debuger = 0;                   // Счетчик для дебагера
-uint8_t sensorNum = 0;                 // Номер датчика для повторной инициализации
 uint8_t pultConnect = 0;               // Флаг подключения пульта ДУ
 uint8_t sensorFault = 1;               // Флаг сбоя сенсора TOF
 uint8_t sensorOff = 0;                 // Флаг отключения сенсоров в ручном режиме
@@ -215,6 +205,7 @@ int count2 = count;                    // Счетчик времени обще
 int countLora = count;                 // Счетчик времени радиопередатчика
 int countPult = count;                 // Счетчик времени пульта
 int countSensor = count;               // Счетчик времени опроса датчиков
+int countMoove = count;                // Счетчик времени обновления передачи скорости по Can шине
 int countBatt = count;                 // Счетчик времени батареи
 int pageAddressData = 0;               // Адрес флэш памяти с параметрами
 int pageAddressStat = 0;               // Адрес флэш памяти со статистикой
@@ -224,6 +215,7 @@ uint16_t minSpeed = 3;                 // Минимальное значени�
 uint16_t oldSpeed = 0;                 // Запомненная cкорость движения в канале для плавного разгона и торможения
 uint16_t errorCode = 0;                // Битмап ошибок
 uint16_t SDsize = 0;                   // Объем SD карты
+uint16_t sensorParam = 500;           // Параметр обратнокубической аппроксимации чувствительности датчиков расстояния
 uint16_t distance[8] = { 0 };          // Значения от сенсоров расстояния и датчиков положения
 uint8_t sensitivity[8] = { 0 };        // Чувствительность сенсовров KCPS
 uint16_t palletePosition[16] = { 0 };  // Массив расстояний до паллет в канале
@@ -272,9 +264,10 @@ int finishPosition = 0;                // Финишная позиция шат
 int lastPalletePosition = 0;           // Позиция последнего паллета после загрузки
 int firstPalletePosition = 0;          // Позиция первого паллета при уплотнении вперед
 int lifter_Speed = 3700;               // Скорость двигателя лифтера -сохранять-
+int lifterDelay = 3800;                // Задержка лифтера
 int oldChannelDistanse = 0;            // Канальная дистанция для фильтрации фантомных срабатываний
 int oldPalleteDistanse = 0;            // Паллетная дистанция для фильтрации фантомных срабатываний
-uint32_t timingBudget = 70;            // Время измерения датчиками TOF -сохранять-
+uint32_t timingBudget = 40;            // Время измерения датчиками
 uint32_t loadCounter = 0;              // Счетчик загрузок
 uint32_t unloadCounter = 0;            // Счетчик выгрузок
 uint32_t compact = 0;                  // Счетчик уплотнений
@@ -282,68 +275,30 @@ uint32_t liftUpCounter = 0;            // Счетчик поднятий пла
 uint32_t liftDownCounter = 0;          // Счетчик опусканий платформы
 uint32_t totalDist = 0;                // Счетчик пробега
 float temp = 0;                        // Температура чипа
+float weelDia = 100;                   // Диаметр колеса
 
 uint16_t mesRes[2][4];
 int countManual = millis();
 int countCrush = 0;
 int startDiff = 0;
 
-void makeReport() {
-  reportData.shuttleNumber = shuttleNum;
-  reportData.shuttleLength = shuttleLength;
-  reportData.maxSpeed = maxSpeed;
-  reportData.minSpeed = minSpeed;
-  reportData.interPalleteDistance = interPalleteDistance;
-  reportData.inverse = inverse;
-  reportData.fifoLifo = fifoLifo;
-  reportData.lifterSpeed = lifter_Speed;
-  reportData.waitTime = waitTime;
-
-  batteryData.minBattCharge = minBattCharge;
-  batteryData.batteryVoltage = batteryVoltage;
-  batteryData.batteryCharge = batteryCharge;
-  reportData.battery = batteryData;
-
-  memcpy(&reportData.calibrateEncoder_F, calibrateEncoder_F, 8);
-  memcpy(&reportData.calibrateEncoder_R, calibrateEncoder_R, 8);
-  memcpy(&reportData.calibrateSensor_F, calibrateSensor_F, 3);
-  memcpy(&reportData.calibrateSensor_R, calibrateSensor_R, 3);
-  reportData.timingBudget = timingBudget;
-  reportData.mprOffset = mprOffset;
-  reportData.chnlOffset = chnlOffset;
-  reportData.blinkTime = blinkTime;
-
-  eepromStat.load = loadCounter;
-  eepromStat.unload = unloadCounter;
-  eepromStat.compact = compact;
-  eepromStat.liftUp = liftUpCounter;
-  eepromStat.liftDown = liftDownCounter;
-  eepromStat.totalDist = totalDist;
-  memcpy(&reportData.shuttleStats, &eepromStat, sizeof(eepromStat));
-  memcpy(&reportData.dateTime, &globalDateTime, sizeof(globalDateTime));
-  reportData.temp = temp;
-
-  memcpy(&reportData.errorStatus, errorStatus, 16);
-
-  uint16_t dataSize = sizeof(reportData);
-
-  Serial1.write(0xFF);
-  Serial1.write(0xFE);
-  Serial1.write((const uint8_t*)&dataSize, sizeof(dataSize));
-  Serial1.write((const char*)&reportData, dataSize);
-  Serial1.write(0xFE);
-  Serial1.write(0xFF);
-}
+uint16_t signalRate;
+uint16_t ambientRate;
+uint16_t porog;
+uint8_t sensorIndex = 0;
+uint8_t snsrIndx = 0;
+uint16_t dist;
+uint16_t data[4][5] = {
+  {0, 0, 0, 0, 0},  // data[0]
+  {0, 0, 0, 0, 0},  // data[1]
+  {0, 0, 0, 0, 0},  // data[2]
+  {0, 0, 0, 0, 0}   // data[3]
+};
 
 #pragma endregion
 
-// the setup function runs once when you press reset or power the board
+// Инициация устройств
 void setup() {
-  IWatchdog.begin(30000000);
-  pinMode(XSHUT_F, OUTPUT);
-  pinMode(XSHUT_R, OUTPUT);
-  pinMode(XSHUT_PF, OUTPUT);
-  pinMode(XSHUT_PR, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(BOARD_LED, OUTPUT);
   pinMode(BUMPER_LED, OUTPUT);
@@ -376,103 +331,21 @@ void setup() {
   digitalWrite(ZOOMER, LOW);
   digitalWrite(RS485, LOW);
   pinMode(RS485, INPUT_PULLDOWN);
-
-  digitalWrite(XSHUT_F, LOW);
-  digitalWrite(XSHUT_R, LOW);
-  digitalWrite(XSHUT_PF, LOW);
-  digitalWrite(XSHUT_PR, LOW);
+  // digitalWrite(LORA, HIGH);
 
   Serial.begin(115200);               // USBшный UART порт
-  Serial1.begin(230400, SERIAL_8E1);  // UART порт на пинах РА2 РА3, на экранчик (LILYGO-S3)
-  Serial2.begin(9600);                // UART порт на пинах РА9 РА10, используется для радиомодуля
-  Serial3.begin(9600);                // UART порт на пинах РD9 РD8, RS485 батареи
+  Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, используется для радиомодуля
+  Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, на экранчик (LILYGO-S3)
+  Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
 
-  logEvent(LogLevel::INFO, LogSource::LOG_SYSTEM, LogMessageCode::SYSTEM_STARTUP);
+  while (!Serial1) {}
 
-  rtc.setClockSource(STM32RTC::LSE_CLOCK);
-  rtc.begin();
-
-  if (!rtc.isTimeSet())  // Инициируем часы RTC
-  {
-    rtc.setTime(0, 0, 0);
-    rtc.setDate(1, 1, 1, 23);
-    Serial.println("RTC initialized with default date and time.");
-    logEvent(LogLevel::INFO, LogSource::LOG_RTC, LogMessageCode::RTC_INITIALIZED_DEFAULT);
-  }
-
-  // Чтение параметров из EEProm
-  for (uint8_t i = 0; i < 8; i++) {
-    eepromData.calibrateEncoder_F[i] = calibrateEncoder_F[i];
-    eepromData.calibrateEncoder_R[i] = calibrateEncoder_R[i];
-  }
-  for (uint8_t i = 0; i < 3; i++) {
-    eepromData.calibrateSensor_F[i] = calibrateSensor_F[i];
-    eepromData.calibrateSensor_R[i] = calibrateSensor_R[i];
-  }
-  eepromData.shuttleNum = shuttleNum;
-  eepromData.blinkTime = blinkTime;
-  eepromData.maxSpeed = maxSpeed;
-  eepromData.minSpeed = minSpeed;
-  eepromData.interPalleteDistance = interPalleteDistance;
-  eepromData.inverse = inverse;
-  eepromData.fifoLifo = fifoLifo;
-  eepromData.lifter_Speed = lifter_Speed;
-  eepromData.timingBudget = timingBudget;
-  eepromData.minBattCharge = minBattCharge;
-  eepromData.shuttleLength = shuttleLength;
-  eepromData.waitTime = waitTime;
-  eepromData.mprOffset = mprOffset;
-  eepromData.TopLeftXF = 4;
-  eepromData.TopLeftYF = 12;
-  eepromData.BotRightXF = 12;
-  eepromData.BotRightYF = 4;
-  eepromData.TopLeftXR = 4;
-  eepromData.TopLeftYR = 12;
-  eepromData.BotRightXR = 12;
-  eepromData.BotRightYR = 4;
-  eepromData.chnlOffset = chnlOffset;
-
-  if (readEEPROMData(eepromData)) {
-    for (uint8_t i = 0; i < 8; i++) {
-      calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
-      calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
-    }
-    for (uint8_t i = 0; i < 3; i++) {
-      calibrateSensor_F[i] = eepromData.calibrateSensor_F[i];
-      calibrateSensor_R[i] = eepromData.calibrateSensor_R[i];
-    }
-    shuttleNum = eepromData.shuttleNum;
-    blinkTime = eepromData.blinkTime;
-    maxSpeed = eepromData.maxSpeed;
-    minSpeed = eepromData.minSpeed;
-    interPalleteDistance = eepromData.interPalleteDistance;
-    inverse = eepromData.inverse;
-    fifoLifo = eepromData.fifoLifo;
-    lifter_Speed = eepromData.lifter_Speed;
-    timingBudget = eepromData.timingBudget;
-    minBattCharge = eepromData.minBattCharge;
-    shuttleLength = eepromData.shuttleLength;
-    waitTime = eepromData.waitTime;
-    mprOffset = eepromData.mprOffset;
-    chnlOffset = eepromData.chnlOffset;
-  } else saveEEPROMData(eepromData);
-  if (minBattCharge > 50) minBattCharge = 20;
-  if (waitTime < 5000) waitTime = 5000;
-  else if (waitTime > 30000) waitTime = 30000;
-
-  eepromStat.load = 0;
-  eepromStat.unload = 0;
-  eepromStat.compact = 0;
-  eepromStat.liftUp = 0;
-  eepromStat.liftDown = 0;
-  eepromStat.totalDist = 0;
-
+  read_EEPROM_Data();
   analogReadResolution(12);
-  delay(2000);
 
   dataStr = "Start init board...";
   Serial.println(dataStr);
-  //Serial1.println(dataStr);
+  Serial1.println(dataStr);
 
   Can1.begin();
   Can1.setBaudRate(500000);
@@ -481,75 +354,67 @@ void setup() {
 
   Wire.setSDA(PB11);
   Wire.setSCL(PB10);
-  Wire.setClock(100000);
   Wire.begin();
+  Wire.setClock(400000);
 
   // Инициируем магнитный энкодер
   as5600.begin(4);                         //  set direction pin.
   as5600.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
   dataStr = "Init encoder success...";
   Serial.println(dataStr);
-  //Serial1.println(dataStr);
-  logEvent(LogLevel::INFO, LogSource::LOG_SENSORS_ENCODER, LogMessageCode::ENCODER_INITIALIZE);
+  Serial1.println(dataStr);
 
-  // Прописываем параметры связи радиомодуля
-  digitalWrite(LORA, HIGH);
-  delay(100);
-  dataStr = "Write LoRa settings...";
+  if (TOF_Is_Device_Present(2)) dataStr = "TOF channel sensor forward present...";
+  else dataStr = "TOF channel sensor forward failed!!!";
   Serial.println(dataStr);
-  //Serial1.println(dataStr);
-
-  Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
-  Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  Serial2.write(256);   // Нижний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  Serial2.write(0x1C);  // Параметры скорости
-  Serial2.write(0x10);  // Канал (частота), 0x00 - 410 МГц, шаг частоты - 2 МГц
-  Serial2.write(0x46);  // Служебные опции
-  delay(100);
-  digitalWrite(LORA, LOW);
-
+  Serial1.println(dataStr);
+  delay(10);
+  if (TOF_Is_Device_Present(1)) dataStr = "TOF channel sensor reverse present...";
+  else dataStr = "TOF channel sensor reverse failed!!!";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  delay(10);
+  if (TOF_Is_Device_Present(4)) dataStr = "TOF pallete sensor forward present...";
+  else dataStr = "TOF pallete sensor forward failed!!!";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  delay(10);
+  if (TOF_Is_Device_Present(3)) dataStr = "TOF pallete sensor reverse present...";
+  else dataStr = "TOF pallete sensor reverse failed!!!";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  
+  // Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
+  // Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
+  // Serial2.write(256);   // Нижний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
+  // Serial2.write(0x1C);  // Параметры скорости
+  // Serial2.write(0x10);  // Канал (частота), 0x00 - 410 МГц, шаг частоты - 2 МГц
+  // Serial2.write(0x46);  // Служебные опции
+  // delay(20);
+  // digitalWrite(LORA, LOW);
+  
   Serial.println("Total struct size = " + String(sizeof(EEPROMData) + sizeof(EEPROMStat)) + "  " + String(sizeof(EEPROMData)));
-  delay(100);
-
-  // Инициируем сенсоры расстояния
-  ITimer0.enableTimer();
-  ITimer0.attachInterruptInterval(timingBudget * 2000, NULL);
-  sensor_channel_f->dev = 0x60;
-  initialise_Sensor(sensor_channel_f);
-  sensor_channel_r->dev = 0x62;
-  initialise_Sensor(sensor_channel_r);
-  sensor_pallete_F->dev = 0x64;
-  initialise_Sensor(sensor_pallete_F);
-  sensor_pallete_R->dev = 0x66;
-  initialise_Sensor(sensor_pallete_R);
-  if (inverse) {
-    sensor_channel_f = &sens_chnl_r;
-    sensor_channel_r = &sens_chnl_f;
-    sensor_pallete_F = &sens_plt_R;
-    sensor_pallete_R = &sens_plt_F;
-  }
-  ITimer0.detachInterrupt();
-  ITimer0.disableTimer();
+  delay(10);
 
   read_BatteryCharge();
   if (!batteryCharge) {
-    delay(200);
+    delay(20);
     read_BatteryCharge();
   }
   if (!batteryCharge) {
-    delay(200);
+    delay(20);
     read_BatteryCharge();
   }
   uint8_t newBC = batteryCharge;
-  delay(100);
+  delay(10);
   read_BatteryCharge();
   if (batteryCharge != newBC || batteryCharge == 11) {
     if (batteryCharge != 0 || batteryCharge != 11) newBC = batteryCharge;
-    delay(200);
+    delay(20);
     read_BatteryCharge();
   }
   if (batteryCharge != newBC || batteryCharge == 11) {
-    delay(250);
+    delay(25);
     read_BatteryCharge();
   }
   if (!batteryCharge) batteryCharge = newBC;
@@ -558,9 +423,28 @@ void setup() {
   batteryData.minBattCharge = minBattCharge;
   batteryData.batteryVoltage = batteryVoltage;
   batteryData.batteryCharge = batteryCharge;
-  logEvent(LogLevel::INFO, LogSource::LOG_BATTERY, LogMessageCode::BATT_READ_SUCCESS, &batteryData);
-  //sensor_Report();
-  if (digitalRead(DL_DOWN) && digitalRead(CHANNEL)) lifter_Down();
+  sensor_Report();
+
+  dataStr = "Initialize RTC date and time.";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  delay(50);
+  
+  rtc.setClockSource(STM32RTC::LSE_CLOCK);
+  rtc.begin();
+  
+  if (!rtc.isTimeSet())  // Инициируем часы RTC
+  {
+    rtc.setTime(0, 0, 0);
+    rtc.setDate(1, 1, 1, 23);
+    dataStr = "RTC initialized with default date and time.";
+    Serial.println(dataStr);
+    Serial1.println(dataStr);
+  }
+
+  dataStr = "Complete initialize RTC date and time.";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
 
   delay(50);
   char report[256];
@@ -569,17 +453,25 @@ void setup() {
   rtc.getTime(&hour, &minute, &second, 0, nullptr);
   rtc.getDate(&weekDay, &day, &month, &year);
   snprintf(report, sizeof(report), "Time %02d:%02d:%02d, Date:%02d/%02d/%02d", hour, minute, second, day, month, year);
-  logEvent(LogLevel::INFO, LogSource::LOG_RTC, LogMessageCode::RTC_SET_NEW);
-  logEvent(LogLevel::INFO, LogSource::LOG_TEMPERATURE, LogMessageCode::TEMP_REPORT, (float)temp)
-    dataStr = String(report);
+  dataStr = String(report);
   dataStr += "  Temperature = " + String(temp);
   Serial.println(dataStr);
-  //Serial1.println(dataStr);
+  Serial1.println(dataStr);
+  delay(500);
+  IWatchdog.begin(10000000);
 }
 
-// the loop function runs over and over again forever
+// Основной цикл
 
 void loop() {
+
+  static int cntSns = millis();
+  static int cntBattdata = cntSns;
+  get_Distance();
+  if (millis() - cntBattdata > 2000) {
+    read_BatteryCharge();
+    cntBattdata = millis();
+  }
   if (!errorStatus[0] && status == 25) {
     uint8_t statusTmp = 0;
     if (digitalRead(CHANNEL)) statusTmp = get_Cmd_Manual();
@@ -615,10 +507,8 @@ void loop() {
       digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
       count = millis();
       IWatchdog.reload();
-      while (Can1.read(CAN_RX_msg))
-        ;
+      while (Can1.read(CAN_RX_msg)) ;
       while (Serial1.available()) Serial1.read();
-      get_Distance();
       reportCounter++;
       if (reportCounter == 3) {
         Serial.println(" ");
@@ -633,23 +523,17 @@ void loop() {
   } else if (!errorStatus[0]) {
     uint8_t statusTmp = 0;
     uint8_t inChannel = digitalRead(CHANNEL);
-    delay(25);
+    delay(5);
     inChannel = digitalRead(CHANNEL) && inChannel;
-    delay(25);
+    delay(5);
     inChannel = digitalRead(CHANNEL) && inChannel;
-    delay(25);
-    inChannel = digitalRead(CHANNEL) && inChannel;
-    delay(25);
-    inChannel = digitalRead(CHANNEL) && inChannel;
-
     statusTmp = get_Cmd();
-
     if (statusTmp != status) {
       dataStr = "Shuttle status CMD changed = " + String(shuttleStatus[statusTmp]) + "  (" + String(statusTmp) + ")";
       Serial.println(dataStr);
       Serial1.println(dataStr);
-      if (!inChannel && (statusTmp == 13 || statusTmp == 16 || statusTmp == 17 || statusTmp == 19 || statusTmp == 24)) status = statusTmp;
-      else if (!inChannel) status = 0;
+      if (!inChannel && (statusTmp == 13 || statusTmp == 16 || statusTmp == 17 || statusTmp == 19 || statusTmp == 24)) {status = statusTmp; lastPalletePosition = 0;}
+      else if (!inChannel) {status = 0; lastPalletePosition = 0;}
       else if (inChannel) status = statusTmp;
       send_Cmd();
       run_Cmd();
@@ -665,237 +549,79 @@ void loop() {
 
     if (millis() - count > 1000 && !motorStart) {
       counter = 0;
-      digitalWrite(GREEN_LED, !digitalRead(GREEN_LED));
-      digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
+      digitalToggle(GREEN_LED);
+      digitalToggle(BOARD_LED);
       reportCounter++;
       count = millis();
       IWatchdog.reload();
-      //sensor_Report();
       if (reportCounter == 10) {
         sensor_Report();
         reportCounter = 0;
       }
       send_Cmd();
-      if ((reportCounter == 3 || reportCounter == 8)) read_BatteryCharge();
-      else {
-        Serial1.println("online...");
-        delay(20);
-        Serial1.println("CB " + String(batteryCharge));
-        delay(20);
-        Serial1.println("CV " + String(batteryVoltage));
-      }
+      
+      Serial1.println("online...");
+      delay(20);
+      Serial1.println("CB " + String(batteryCharge));
+      delay(20);
+      Serial1.println("CV " + String(batteryVoltage));
+      
       if (status == 16 || status == 17 || status == 19 || status == 13) status = 0;
       uint8_t oldStatus = status;
       status = 16;
-      if (status != 25) send_Cmd();
+      send_Cmd();
       status = oldStatus;
-      if (!inChannel) Serial2.print(shuttleNums[shuttleNum] + "wc001!");
+      if (!inChannel) {Serial2.print(shuttleNums[shuttleNum] + "wc001!"); lastPalletePosition = 0;}
       else if (batteryCharge < 20) Serial2.print(shuttleNums[shuttleNum] + "wc002!");
       else Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     }
+
     if (millis() - countPult > 100000 && pultConnect) {
       pultConnect = 0;
       status = 0;
     }
-    //else if (millis() - countPult > 180000 && distance[1] > 150 && inChannel) {Serial1.println("Disconnect time off, dist = " + String(distance[1]) + " in channel = " + String(digitalRead(CHANNEL))); moove_Forward();}
+    else if (millis() - countPult > 180000 && distance[1] > 150 && inChannel && currentPosition > 200) {
+      Serial1.println("Disconnect time off, dist = " + String(distance[1]));
+      if (status != 0) status = 0;
+      moove_Forward();
+    }
+    detect_Pallete();
   } else {
-    dataStr = "Shuttle ERROR !!! Errors:";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
-    IWatchdog.reload();
-    Can1.read(CAN_RX_msg);
     if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
+    blink_Error();
     uint8_t i = 0;
-    while (errorStatus[i]) {
-      dataStr = shuttleErrors[errorStatus[i]];
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
-      i++;
-    }
-    digitalWrite(RED_LED, LOW);
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(BOARD_LED, LOW);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BOARD_LED, HIGH);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, LOW);
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(BOARD_LED, LOW);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BOARD_LED, HIGH);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, LOW);
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(BOARD_LED, LOW);
-    IWatchdog.reload();
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BOARD_LED, HIGH);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, LOW);
-    digitalWrite(GREEN_LED, LOW);
-    digitalWrite(BOARD_LED, LOW);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(GREEN_LED, HIGH);
-    digitalWrite(BOARD_LED, HIGH);
-    count = millis();
-    while (millis() - count < 200) {
-      if (status = get_Cmd() == 24) {
-        uint8_t i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-    }
-    status = 19;
-    send_Cmd();
-    sensor_Report();
-    digitalWrite(GREEN_LED, LOW);
-    IWatchdog.reload();
-    count = millis();
-    while (millis() - count < 1000) {
-      if (status = get_Cmd() == 24) {
-        i = 0;
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
-        errorCode = 0;
-      } else if (status == 100) status = 19;
-
-
-      i = 0;
+    if (status = get_Cmd() == 24) {
       while (errorStatus[i]) {
-        if (batteryCharge > minBattCharge && errorStatus[i] == 11) errorStatus[i] = 0;
-        //if (digitalRead(BUMPER_F) && digitalRead(BUMPER_R) && errorStatus[i] == 12) errorStatus[i] = 0;
+        errorStatus[i] = 0;
         i++;
       }
-    }
+      errorCode = 0;
+    } else if (status == 16) {
+      send_Cmd();
+      status = 19;
+    } else if (status == 100) status = 19;
     if (!errorStatus[0]) digitalWrite(RED_LED, LOW);
-    status = 16;
-    send_Cmd();
     status = 19;
-    read_BatteryCharge();
-  }
-  if (millis() - countSensor > timingBudget + 5) {
-    countSensor = millis();
-    get_Distance();
-    //Serial.println("Time of get distances  = " + String(millis() - countSensor));
-
-
-    /*if (mesRes[0][0] == distance[0] && distance[0] != 1500 && distance[0] != 0) mesRes[1][0]++;
-    else mesRes[1][0] = 0;
-    mesRes[0][0] = distance[0];
-    if (mesRes[1][0] >= 10) {mesRes[1][0] = 0; if (inverse) sensorNum == 0; else sensorNum == 1; Serial.println("Reinit sensor 0...");}
-
-    if (mesRes[0][1] == distance[1] && distance[1] != 1500 && distance[1] != 0) mesRes[1][1]++;
-    else mesRes[1][1] = 0;
-    mesRes[0][1] = distance[1];
-    if (mesRes[1][1] >= 10) {mesRes[1][1] = 0; if (inverse) sensorNum == 1; else sensorNum == 0; Serial.println("Reinit sensor 1...");}
-
-    if (mesRes[0][2] == distance[2] && distance[2] != 1500 && distance[2] != 0) mesRes[1][2]++;
-    else mesRes[1][2] = 0;
-    mesRes[0][2] = distance[2];
-    if (mesRes[1][2] >= 10) {mesRes[1][2] = 0; if (inverse) sensorNum == 2; else sensorNum == 3; Serial.println("Reinit sensor 2...");}
-
-    if (mesRes[0][3] == distance[3] && distance[3] != 1500 && distance[3] != 0) mesRes[1][3]++;
-    else mesRes[1][3] = 0;
-    mesRes[0][3] = distance[3];
-    if (mesRes[1][3] >= 10) {mesRes[1][3] = 0; if (inverse) sensorNum == 3; else sensorNum == 2; Serial.println("Reinit sensor 3...");}*/
+    detect_Pallete();
   }
 }
 
-// the other functions
+// Функции
 #pragma region Функции...
 
 #pragma region Функции управления двигателем движения...
+
+// Установка скорости движения
 void motor_Speed(int spd) {
-  if (motorReverse == 2) return;
-  while (Can1.read(CAN_RX_msg))
-    ;
+  if (motorReverse == 2 || millis() - countMoove < 50) return;
+  countMoove = millis();
+  while (Can1.read(CAN_RX_msg)) ;
   cracked_int_t hexSpeed;
   CAN_TX_msg.id = (100);
   CAN_TX_msg.len = 4;
   uint8_t accel = 30;
   int position;
+  int countDist = millis();
   if (spd >= 10 && spd - oldSpeed >= 10) spd = oldSpeed + 10;
   if (spd > 100) spd = 100;
   if (spd <= 100 && spd >= 0) {
@@ -903,6 +629,7 @@ void motor_Speed(int spd) {
       uint8_t steps = (spd - oldSpeed) / 2;
       for (uint8_t i = 0; i < steps; i++) {
         blink_Work();
+        get_Distance();
         hexSpeed.vint = minSpeed + oldSpeed * maxSpeed / 100 + (spd - oldSpeed) * i * maxSpeed / (steps * 100);
         if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
         hexSpeed.vint *= 1000;
@@ -914,11 +641,19 @@ void motor_Speed(int spd) {
         else accel = 35;
         while (millis() - count < accel) {
           blink_Work();
+          get_Distance();
           if (status != 25 && get_Cmd() == 5 || errorStatus[0]) {
             status = 5;
             motor_Stop();
             return;
-          }
+          } else if (status == 25)  {
+            uint8_t stm = get_Cmd_Manual();
+            if (stm == 5 || stm == 55) {
+              motor_Stop();
+              return;
+            }
+            else if (stm == 100) pingCount = millis();
+          } 
         }
       }
       if (spd) hexSpeed.vint = minSpeed + spd * maxSpeed / 100;
@@ -927,14 +662,15 @@ void motor_Speed(int spd) {
       hexSpeed.vint *= 1000;
       for (uint8_t i = 0; i < 5; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
       Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
+      while (Can1.read(CAN_RX_msg)) ;
       oldSpeed = spd;
     } else if (spd < oldSpeed) {
       uint8_t steps = (oldSpeed - spd) / 2;
+      if (distance[0] <= 400 || distance[1] <= 400) steps /= 2;
       float currentSpeed;
       for (uint8_t i = 0; i < steps; i++) {
         blink_Work();
+        get_Distance();
         hexSpeed.vint = minSpeed + oldSpeed * maxSpeed / 100 - (oldSpeed - spd) * i * maxSpeed / (steps * 100);
         if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
         hexSpeed.vint *= 1000;
@@ -944,12 +680,19 @@ void motor_Speed(int spd) {
         count = millis();
         if (lifterUp) accel = 20 + i * 30 / steps;
         while (millis() - count < accel) {
+          get_Distance();
           if (status != 25 && get_Cmd() == 5 || errorStatus[0]) {
             status = 5;
             motor_Stop();
             return;
+          } else if (status == 25)  {
+            uint8_t stm = get_Cmd_Manual();
+            if (stm == 5 || stm == 55) {
+              motor_Stop();
+              return;
+            }
+            else if (stm == 100) pingCount = millis();
           }
-          if (status == 25) get_Cmd_Manual();
           if (motorReverse == 2) return;
         }
       }
@@ -959,8 +702,7 @@ void motor_Speed(int spd) {
       hexSpeed.vint *= 1000;
       for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
       Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
+      while (Can1.read(CAN_RX_msg)) ;
       oldSpeed = spd;
     } else if (spd == oldSpeed) {
       hexSpeed.vint = minSpeed + spd * maxSpeed / 100;
@@ -968,31 +710,31 @@ void motor_Speed(int spd) {
       hexSpeed.vint *= 1000;
       for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
       Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
+      while (Can1.read(CAN_RX_msg)) ;
     }
   } else {
     hexSpeed.vint = 0;
     for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
     Can1.write(CAN_TX_msg);
-    while (Can1.read(CAN_RX_msg))
-      ;
+    while (Can1.read(CAN_RX_msg)) ;
     oldSpeed = 0;
   }
-
   set_Position();
 }
 
+// Установка движения вперед
 void motor_Start_Forward() {
   motorStart = 1;
   motorReverse = 0;
 }
 
+//Установка движения назад
 void motor_Start_Reverse() {
   motorStart = 1;
   motorReverse = 1;
 }
 
+// Остановка движения
 void motor_Stop() {
   if (motorReverse == 2) return;
   Can1.read(CAN_RX_msg);
@@ -1005,6 +747,7 @@ void motor_Stop() {
     uint8_t maxi = (uint8_t)oldSpeed / 2;
     for (uint8_t i = maxi; i > 0; i--) {
       blink_Work();
+      get_Distance();
       hexSpeed.vint = minSpeed + oldSpeed * maxSpeed * i / (maxi * 100);
       hexSpeed.vint *= 1000;
       if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
@@ -1013,6 +756,7 @@ void motor_Stop() {
       while (Can1.read(CAN_RX_msg))
         ;
       if ((status == 22 || status == 7) && lifterUp && distance[3] + 100 < distance[1]) delay(10);
+      if (status == 25 && get_Cmd_Manual() == 100) pingCount = millis();
       else if (maxi > 10) delay(10 + i * 20 / maxi);
       else delay(50);
     }
@@ -1047,6 +791,7 @@ void motor_Stop() {
   oldPosition = currentPosition;
 }
 
+// Форсмажорная остановка движения
 void motor_Force_Stop() {
   cracked_int_t hexSpeed;
   oldSpeed = 0;
@@ -1065,7 +810,16 @@ void motor_Force_Stop() {
 #pragma endregion
 
 #pragma region Функции управления лифтером
+
+// Подъем платформы
 void lifter_Up() {
+  if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
+    Serial.println(" ");
+    Serial.println("Lifter is up... status = " + String(status));
+    Serial1.println(" ");
+    Serial1.println("Lifter is up...");
+    return;
+  }
   Serial.println(" ");
   Serial.println("Moove lifter up...");
   Serial1.println(" ");
@@ -1074,12 +828,25 @@ void lifter_Up() {
   int summCurrent = 0;
   int current = 0;
   cracked_int_t hexSpeed;
-  int cnt = millis();
   int cnt2 = millis();
-  hexSpeed.vint = -50;
-  hexSpeed.vint *= 1000;
+  int cnt = millis();
   CAN_TX_msg.id = (101);
   CAN_TX_msg.len = 4;
+  for (uint8_t j = 5; j < 50; j += 5) {
+    hexSpeed.vint = -j;
+    hexSpeed.vint *= 1000;
+    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+    Can1.write(CAN_TX_msg);
+    while (millis() - cnt < 30) {
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        status = 5;
+        return;
+      }
+    }
+    cnt = millis();
+  }
+  cnt = millis();
+  hexSpeed.vint = -50000;
   for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
   if (digitalRead(DL_UP)) Can1.write(CAN_TX_msg);
   while (digitalRead(DL_UP)) {
@@ -1087,15 +854,20 @@ void lifter_Up() {
       status = 5;
       return;
     }
-    if (millis() - cnt > 5000) break;
+    if (millis() - cnt > lifterDelay) {
+      lifter_Stop();
+      add_Error(9);
+      status = 5;
+      break;
+    }
     delay(10);
     Can1.write(CAN_TX_msg);
     blink_Work();
+    get_Distance();
 
     while (Can1.read(CAN_RX_msg)) {
       if (!CAN_RX_msg.flags.remote && CAN_RX_msg.id == 2405) {
         current = CAN_RX_msg.buf[4] * 256 + CAN_RX_msg.buf[5];
-        //Serial1.println("Current UP = " + String(current) + " : " + String(CAN_RX_msg.buf[0]) + " " +  String(CAN_RX_msg.buf[1]) + " " +  String(CAN_RX_msg.buf[2]) + " " +  String(CAN_RX_msg.buf[3]));
         if (lifterCurrent < current && k > 3) lifterCurrent = current;
         k++;
         if (k > 3) summCurrent += current;
@@ -1104,27 +876,6 @@ void lifter_Up() {
     }
   }
   Can1.write(CAN_TX_msg);
-  cnt = millis();
-  if (digitalRead(DL_UP)) {
-    while (digitalRead(DL_UP)) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        status = 5;
-        return;
-      }
-      if (millis() - cnt > 5000) {
-        lifter_Stop();
-        add_Error(9);
-        status = 5;
-        break;
-      }
-      delay(10);
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
-      {}
-      blink_Work();
-    }
-  }
   if (digitalRead(DL_DOWN)) lifterUp = 1;
   lifter_Stop();
   summCurrent /= k;
@@ -1132,16 +883,38 @@ void lifter_Up() {
   Serial1.println("Summ = " + String(summCurrent));
 }
 
+// Опускание платформы
 void lifter_Down() {
+  if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
+    Serial.println(" ");
+    Serial.println("Lifter is down... status = " + String(status));
+    Serial1.println(" ");
+    Serial1.println("Lifter is down...");
+    return;
+  }
   Serial.println(" ");
   Serial.println("Moove lifter down... status = " + String(status));
   Serial1.println(" ");
   Serial1.println("Moove lifter down...");
   int cnt = millis();
   cracked_int_t hexSpeed;
-  hexSpeed.vint = 50000;
   CAN_TX_msg.id = (101);
   CAN_TX_msg.len = 4;
+  for (uint8_t j = 5; j < 50; j += 5) {
+    hexSpeed.vint = j;
+    hexSpeed.vint *= 1000;
+    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+    Can1.write(CAN_TX_msg);
+    while (millis() - cnt < 30) {
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        status = 5;
+        return;
+      }
+    }
+    cnt = millis();
+  }
+  cnt = millis();
+  hexSpeed.vint = 50000;
   for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
   if (digitalRead(DL_DOWN)) Can1.write(CAN_TX_msg);
   while (digitalRead(DL_DOWN)) {
@@ -1149,35 +922,25 @@ void lifter_Down() {
       status = 5;
       return;
     }
-    if (millis() - cnt > 5000) break;
+    if (millis() - cnt > lifterDelay) {
+      lifter_Stop();
+      add_Error(9);
+      status = 5;
+      break;
+    }
     delay(10);
     Can1.write(CAN_TX_msg);
     blink_Work();
+    get_Distance();
   }
-  cnt = millis();
-  if (digitalRead(DL_DOWN)) {
-    while (digitalRead(DL_DOWN)) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        status = 5;
-        return;
-      }
-      if (millis() - cnt > 5000) {
-        lifter_Stop();
-        add_Error(9);
-        status = 5;
-        break;
-      }
-      delay(10);
-      Can1.write(CAN_TX_msg);
-      blink_Work();
-    }
-  }
+  
   if (!digitalRead(DL_DOWN)) lifterUp = 0;
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
 }
 
+// Остановка платформы
 void lifter_Stop() {
   Serial.println("Stop lifter...");
   Serial1.println("Stop lifter...");
@@ -1192,8 +955,8 @@ void lifter_Stop() {
 
 #pragma region Служебные функции
 
-uint8_t get_Cmd()  //Запрос команд с пульта ДУ
-{
+// Запрос команд с пульта ДУ
+uint8_t get_Cmd() {
   if (millis() - countLora < 20) { return status; }
   int8_t inByte = 0;
   int8_t data = 0;
@@ -1201,8 +964,7 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
   uint8_t statusTmp = 100;
   countLora = millis();
   String inStr = "";
-  if (Serial2.available())  // Получаем команду
-  {
+  if (Serial2.available()) {  // Получаем команду
     inByte = Serial2.read();
     char inChar = (char)inByte;
     inStr += inChar;
@@ -1232,209 +994,155 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
     }
   }
   if (data) {
-    //Serial1.println(inStr);
-    //Serial.println(inStr);
     String tempStr = inStr.substring(0, 2);
     if (tempStr == shuttleNums[shuttleNum]) {
-      if (!pultConnect) {
+      if (!pultConnect) {  // Подключение с пультом
         digitalWrite(ZOOMER, HIGH);
         delay(500);
         digitalWrite(ZOOMER, LOW);
         pultConnect = 1;
       }
-      //if (!pultConnect) {zoomer(500); pultConnect = 1;}
       countPult = millis();
       tempStr = inStr.substring(2, 8);
-      if (tempStr == "dCharg") send_Cmd();  // Коннект с пультом
-      //else if (tempStr == "dRight") {Serial2.print(inStr + "!"); if (status == 25 && millis() - pingCount > 2000) {moove_Right();} else if (status != 25) statusTmp = 1;}              // Движение вперед
-      //else if (tempStr == "dLeft_") {Serial2.print(inStr + "!"); if (status == 25 && millis() - pingCount > 2000) {moove_Left();} else if (status != 25) statusTmp = 2;}               // Движение назад
-      else if (tempStr == "dUp___") {
+      if (tempStr == "dCharg") send_Cmd();  // Запрос с пульта хартбита
+      else if (tempStr == "dUp___") {  // Поднять платформу вверх
         Serial2.print(inStr + "!");
-        if (status == 25) lifter_Up();
-        else statusTmp = 3;
-      }  // Поднять платформу вверх
-      else if (tempStr == "dDown_") {
+        statusTmp = 3;
+      } else if (tempStr == "dDown_") {  // Опустить платфоорму
         Serial2.print(inStr + "!");
-        if (status == 25) lifter_Down();
-        else statusTmp = 4;
-      }  // Опустить платфоорму
-      else if (tempStr == "dStop_") {
+        statusTmp = 4;
+      } else if (tempStr == "dStop_") {  // Остановка
         statusTmp = 5;
         Serial2.print(inStr + "!");
         diffPallete = 0;
-      }  // Остановка
-      else if (tempStr == "dLoad_") {
+      } else if (tempStr == "dLoad_") {  // Загрузка паллеты
         Serial2.print(inStr + "!");
         statusTmp = 6;
-      }  // Выгрузка паллеты
-      else if (tempStr == "dUnld_") {
+      } else if (tempStr == "dUnld_") {  // Выгрузка паллеты
         Serial2.print(inStr + "!");
         statusTmp = 7;
-      }  // Загрузка паллеты
-      else if (tempStr == "dClbr_") {
+      } else if (tempStr == "dClbr_") {  // Калибровка
         Serial2.print(inStr + "!");
         statusTmp = 10;
-      }  // Калибровка
-      else if (tempStr == "dDemo_") {
+      } else if (tempStr == "dDemo_") {  // Демо режим
         Serial2.print(inStr + "!");
         statusTmp = 11;
-      }  // Демо режим
-      else if (tempStr == "dGetQu") {
+      } else if (tempStr == "dGetQu") {  // Подсчет паллет
         Serial2.print(inStr + "!");
         statusTmp = 12;
-      }  // Подсчет паллет
-      else if (tempStr == "dSaveC") {
+      } else if (tempStr == "dSaveC") {  // Сохранение параметров на флэш память
         Serial2.print(inStr + "!");
         statusTmp = 13;
-      }  // Сохранение параметров на флэш память
-      else if (tempStr == "dComFo") {
+      } else if (tempStr == "dComFo") {  // Уплотнение паллет вперед
         Serial2.print(inStr + "!");
         statusTmp = 14;
-      }  // Уплотнение паллет вперед
-      else if (tempStr == "dComBa") {
+      } else if (tempStr == "dComBa") {  // Уплотнение паллет назад
         Serial2.print(inStr + "!");
         statusTmp = 15;
-      }  // Уплотнение паллет назад
-      else if (tempStr == "dSGet_") {
+      } else if (tempStr == "dSGet_") {  // Запрос параметров из настроек
         Serial2.print(inStr + "!");
         statusTmp = 16;
         send_Cmd();
-      }  // Запрос параметров из настроек
-      else if (tempStr == "dDataP") {
+      } else if (tempStr == "dDataP") {  // Запрос данных из отладки
         Serial2.print(inStr + "!");
         statusTmp = 17;
         send_Cmd();
-      }  // Запрос данных из отладки
-      else if (tempStr == "tError") {
+      } else if (tempStr == "tError") {  // Запрос ошибок
         Serial2.print(inStr + "!");
         statusTmp = 19;
-      }  // Запрос ошибок
-      else if (tempStr == "dEvOn_") {
+      } else if (tempStr == "dEvOn_") {  // Включение режима эвакуации
         Serial2.print(inStr + "!");
         statusTmp = 20;
         evacuate = 1;
-      }  // Включение режима эвакуации
-      else if (tempStr == "dLLoad") {
+      } else if (tempStr == "dLLoad") {  // Продолжительная загрузка
         Serial2.print(inStr + "!");
         statusTmp = 21;
-      }  // Продолжительная загрузка
-      else if (tempStr == "dLUnld") {
+      } else if (tempStr == "dLUnld") {  // Продолжительная выгрузка
         Serial2.print(inStr + "!");
         statusTmp = 22;
-      }  // Продолжительная выгрузка
-      else if (tempStr == "dReset") {
+      } else if (tempStr == "dReset") {  // Сброс ошибок
         Serial2.print(inStr + "!");
         statusTmp = 24;
-      }  // Сброс ошибок
-      else if (tempStr == "dManua") {
+      } else if (tempStr == "dManua") {  // Ручной режим
         Serial2.print(inStr + "!");
         statusTmp = 25;
         countManual = millis();
         send_Cmd();
-      }  // Ручной режим
-      else if (tempStr == "dGetLg") {
+      } else if (tempStr == "dGetLg") {  // Журналирование
         Serial2.print(inStr + "!");
         statusTmp = 26;
         send_Cmd();
-      }  // Журналирование
-      else if (tempStr == "dHome_") {
+      } else if (tempStr == "dHome_") {  // В начало канала
         Serial2.print(inStr + "!");
         statusTmp = 27;
-      }  // В начало канала
-      else if (tempStr == "dWaitT") {
+      } else if (tempStr == "dWaitT") {  // Время ожидания при загрузке
         Serial2.print(inStr + "!");
         statusTmp = 29;
-      }  // Время ожидания при загрузке
-      else if (tempStr == "dMprOf") {
+      } else if (tempStr == "dMprOf") {  // Запрос смещения МПР
         Serial2.print(inStr + "!");
         statusTmp = 30;
-      }  // Запрос смещения МПР
-      else if (tempStr == "dEvOff") {
+      } else if (tempStr == "dEvOff") {  // Выключение режима эвакуации
         Serial2.print(inStr);
         evacuate = 0;
-      }  // Выключение режима эвакуации
-      else if (tempStr == "ngPing") {
+      } else if (tempStr == "ngPing") {  // Удержание движения
         if (millis() - pingCount < 800) pingCount = millis();
-      }  // Удержание движения
-      else if (tempStr == "dFIFO_") {
+      } else if (tempStr == "dFIFO_") {  // Установка режима FIFO
         Serial2.print(inStr + "!");
         fifoLifo = 0;
         eepromData.fifoLifo = fifoLifo;
-      }  // Установка режима FIFO
-      else if (tempStr == "dLIFO_") {
+      } else if (tempStr == "dLIFO_") {  // Установка режима LIFO
         Serial2.print(inStr + "!");
         fifoLifo = 1;
         eepromData.fifoLifo = fifoLifo;
-      }  // Установка режима LIFO
-      else if (tempStr == "dRevOn") {
+      } else if (tempStr == "dRevOn") {  // Включение реверса
         Serial2.print(inStr + "!");
         inverse = 0;
         eepromData.inverse = inverse;
-        sensor_channel_f = &sens_chnl_f;
-        sensor_channel_r = &sens_chnl_r;
-        sensor_pallete_F = &sens_plt_F;
-        sensor_pallete_R = &sens_plt_R;
         currentPosition = channelLength - currentPosition - 800;
-      } else if (tempStr == "dReOff") {
+      } else if (tempStr == "dReOff") {  // Выключение реверса
         Serial2.print(inStr + "!");
         inverse = 1;
         eepromData.inverse = inverse;
-        sensor_channel_f = &sens_chnl_r;
-        sensor_channel_r = &sens_chnl_f;
-        sensor_pallete_F = &sens_plt_R;
-        sensor_pallete_R = &sens_plt_F;
         currentPosition = channelLength - currentPosition - 800;
       }
-
       tempStr = inStr.substring(2, 5);
-      if (tempStr == "dNN") {
+      if (tempStr == "dNN") {  // Установка номера шаттла
         shuttleNum = inStr.substring(5, 8).toInt() - 1;
         eepromData.shuttleNum = shuttleNum;
-      }  // Установка номера шаттла
-      else if (tempStr == "dQt") {
+      } else if (tempStr == "dQt") {  // Выгрузка заданного количества паллет
         UPQuant = inStr.substring(5, 8).toInt();
         statusTmp = 23;
-      }  // Выгрузка заданного количества паллет
-      else if (tempStr == "dDm") {
+      } else if (tempStr == "dDm") {  // Установка межпаллетного расстояния
         interPalleteDistance = inStr.substring(5, 8).toInt();
         eepromData.interPalleteDistance = interPalleteDistance;
-      }  // Установка межпаллетного расстояния
-      else if (tempStr == "dSl") {
+      } else if (tempStr == "dSl") {  // Установка длинны шаттла
         shuttleLength = inStr.substring(5, 8).toInt() * 10;
         eepromData.shuttleLength = shuttleLength;
-      }                           // Установка длинны шаттла
-      else if (tempStr == "dSp")  // Установка максимальной скорости
-      {
+      } else if (tempStr == "dSp") {  // Установка максимальной скорости
         maxSpeed = inStr.substring(5, 8).toInt();
         if (maxSpeed > 96) maxSpeed = 96;
         if (maxSpeed < minSpeed) maxSpeed = minSpeed + 5;
         eepromData.maxSpeed = maxSpeed;
-      } else if (tempStr == "dBc")  // Установка минимального заряда батареи
-      {
+      } else if (tempStr == "dBc") {  // Установка минимального заряда батареи
         minBattCharge = inStr.substring(5, 8).toInt();
         if (minBattCharge > 50) minBattCharge = 50;
         if (minBattCharge < 0) minBattCharge = 0;
         eepromData.minBattCharge = minBattCharge;
-      } else if (tempStr == "dMr")  // Движение назад на заданное расстояние
-      {
+      } else if (tempStr == "dMr") {  // Движение назад на заданное расстояние
         statusTmp = 8;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dMf")  // Движение вперед на заданное расстояние
-      {
+      } else if (tempStr == "dMf") {  // Движение вперед на заданное расстояние
         statusTmp = 9;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dWt")  // Время ожидания при выгрузке
-      {
+      } else if (tempStr == "dWt") {  // Время ожидания при выгрузке
         statusTmp = 0;
         waitTime = inStr.substring(5, 7).toInt() * 1000;
         eepromData.waitTime = waitTime;
-      } else if (tempStr == "dMo")  // Смещение МПР
-      {
+      } else if (tempStr == "dMo") {  // Смещение МПР
         statusTmp = 0;
         mprOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.mprOffset = mprOffset;
-      } else if (tempStr == "dMc")  // Смещение конца канала
-      {
+      } else if (tempStr == "dMc") {  // Смещение конца канала
         statusTmp = 0;
         chnlOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.chnlOffset = chnlOffset;
@@ -1447,8 +1155,7 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
   uint8_t i = 0;
   inStr = "";
   data = 0;
-  while (Serial1.available())  // Получаем команду
-  {
+  while (Serial1.available()) {  // Получаем команду от Lilygo (WiFi)
     inByte = Serial1.read();
     inBytes[i] = inByte;
     i++;
@@ -1459,8 +1166,6 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
     if (inStr.length() > 30) break;
   }
   if (data) {
-    //Serial.println("String from LiLyGo:  " + inStr);
-    //Serial1.print("GS " + String(shuttleNum));
     String tempStr = inStr.substring(0, 2);
     if (tempStr == shuttleNums[shuttleNum]) {
       countPult = millis();
@@ -1469,144 +1174,109 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
       else if (tempStr == "dRight" || inStr == "dRight") { statusTmp = 1; }  // Движение вперед
       else if (tempStr == "dLeft_" || inStr == "dLeft_") {
         statusTmp = 2;
-      }                                                 // Движение назад
+      }                                                                      // Движение назад
       else if (tempStr == "dUp___" || inStr == "dUp___") { statusTmp = 3; }  // Поднять платформу вверх
-      else if (tempStr == "dDown_" || inStr == "dDown_") {
+      else if (tempStr == "dDown_" || inStr == "dDown_") {                   // Опустить платформу
         statusTmp = 4;
-      }  // Опустить платфоорму
-      else if (tempStr == "dStop_" || inStr == "dStop_") {
+      } else if (tempStr == "dStop_" || inStr == "dStop_") {                 // Остановка
         statusTmp = 5;
         diffPallete = 0;
-      }                                                 // Остановка
-      else if (tempStr == "dLoad_" || inStr == "dLoad_") { statusTmp = 6; }  // Выгрузка паллеты
-      else if (tempStr == "dUnld_" || inStr == "dUnld_") {
+      } else if (tempStr == "dLoad_" || inStr == "dLoad_") { statusTmp = 6; }  // Выгрузка паллеты
+      else if (tempStr == "dUnld_" || inStr == "dUnld_") {                     // Загрузка паллеты
         statusTmp = 7;
-      }                                                  // Загрузка паллеты
-      else if (tempStr == "dClbr_" || inStr == "dClbr_") { statusTmp = 10; }  // Калибровка
-      else if (tempStr == "dDemo_" || inStr == "dDemo_") {
+      } else if (tempStr == "dClbr_" || inStr == "dClbr_") { statusTmp = 10; } // Калибровка
+      else if (tempStr == "dDemo_" || inStr == "dDemo_") {                     // Демо режим
         statusTmp = 11;
-      }                                                  // Демо режим
-      else if (tempStr == "dGetQu" || inStr == "dGetQu") { statusTmp = 12; }  // Подсчет паллет
-      else if (tempStr == "dSaveC" || inStr == "dSaveC") {
-        statusTmp = 13;
-      }                                                  // Сохранение параметров на флэш память
-      else if (tempStr == "dComFo" || inStr == "dComFo") { statusTmp = 14; }  // Уплотнение паллет вперед
-      else if (tempStr == "dComBa" || inStr == "dComBa") {
+      } else if (tempStr == "dGetQu" || inStr == "dGetQu") { statusTmp = 12; } // Подсчет паллет
+      else if (tempStr == "dSaveC" || inStr == "dSaveC") {                     // Сохранение параметров на флэш память
+        saveEEPROMData(eepromData);
+      } else if (tempStr == "dComFo" || inStr == "dComFo") { statusTmp = 14; } // Уплотнение паллет вперед
+      else if (tempStr == "dComBa" || inStr == "dComBa") {                     // Уплотнение паллет назад
         statusTmp = 15;
-      }  // Уплотнение паллет назад
-      else if (tempStr == "dSpGet" || inStr == "dSpGet") {
+      } else if (tempStr == "dSpGet" || inStr == "dSpGet") {                    // Запрос параметров из настроек
         statusTmp = 16;
         send_Cmd();
-      }  // Запрос параметров из настроек
-      else if (tempStr == "dDataP" || inStr == "dDataP") {
+      } else if (tempStr == "dDataP" || inStr == "dDataP") {                   // Запрос данных из отладки
         statusTmp = 17;
         send_Cmd();
-      }  // Запрос данных из отладки
-      else if (tempStr == "tError" || inStr == "tError") {
+      } else if (tempStr == "tError" || inStr == "tError") {                   // Запрос ошибок
         statusTmp = 19;
         send_Cmd();
-      }  // Запрос ошибок
-      else if (tempStr == "dEvOn_" || inStr == "dEvOn_") {
+      } else if (tempStr == "dEvOn_" || inStr == "dEvOn_") {                   // Включение режима эвакуации
         statusTmp = 20;
         evacuate = 1;
-      }                                                  // Включение режима эвакуации
-      else if (tempStr == "dLLoad" || inStr == "dLLoad") { statusTmp = 21; }  // Продолжительная загрузка
-      else if (tempStr == "dLUnld" || inStr == "dLUnld") {
+      }  else if (tempStr == "dLLoad" || inStr == "dLLoad") { statusTmp = 21; }// Продолжительная загрузка
+      else if (tempStr == "dLUnld" || inStr == "dLUnld") {                     // Продолжительная выгрузка
         statusTmp = 22;
-      }                                                  // Продолжительная выгрузка
-      else if (tempStr == "dReset" || inStr == "dReset") { statusTmp = 24; }  // Сброс ошибок
-      else if (tempStr == "dManua" || inStr == "dManua") {
+      } else if (tempStr == "dReset" || inStr == "dReset") { statusTmp = 24; } // Сброс ошибок
+      else if (tempStr == "dManua" || inStr == "dManua") {                     // Ручной режим
         statusTmp = 25;
         countManual = millis();
         send_Cmd();
-      }                                                  // Ручной режим
-      else if (tempStr == "dHome_" || inStr == "dHome_") { statusTmp = 27; }  // В начало канала
-      else if (tempStr == "dWaitT" || inStr == "dWaitT") {
+      } else if (tempStr == "dHome_" || inStr == "dHome_") { statusTmp = 27; } // В начало канала
+      else if (tempStr == "dWaitT" || inStr == "dWaitT") {                     // Время ожидания при загрузке
         statusTmp = 29;
-      }                                                // Время ожидания при загрузке
-      else if (tempStr == "dEvOff" || inStr == "dEvOff") { evacuate = 0; }  // Выключение режима эвакуации
-      else if (tempStr == "ngPing" || inStr == "ngPing")
-        pingCount = millis();                          // Удержание движения
-      else if (tempStr == "dLIFO_" || inStr == "dLIFO_") { fifoLifo = 0; }  // Установка режима LIFO
-      else if (tempStr == "dFIFO_" || inStr == "dFIFO_") {
+      } else if (tempStr == "dEvOff" || inStr == "dEvOff") { evacuate = 0; }   // Выключение режима эвакуации
+      else if (tempStr == "ngPing" || inStr == "ngPing") { pingCount = millis();}   // Удержание движения
+      else if (tempStr == "dLIFO_" || inStr == "dLIFO_") { fifoLifo = 0; }     // Установка режима LIFO
+      else if (tempStr == "dFIFO_" || inStr == "dFIFO_") {                     // Установка режима FIFO
         fifoLifo = 1;
-      }  // Установка режима FIFO
-      else if (tempStr == "dRevOn" || inStr == "dRevOn") {
+      } else if (tempStr == "dRevOn" || inStr == "dRevOn") {                   // Включение реверса
         inverse = 0;
         eepromData.inverse = inverse;
-        sensor_channel_f = &sens_chnl_f;
-        sensor_channel_r = &sens_chnl_r;
-        sensor_pallete_F = &sens_plt_F;
-        sensor_pallete_R = &sens_plt_R;
         currentPosition = channelLength - currentPosition - 800;
-      } else if (tempStr == "dReOff" || inStr == "dReOff") {
+      } else if (tempStr == "dReOff" || inStr == "dReOff") {                   // Выключение реверса
         inverse = 1;
         eepromData.inverse = inverse;
-        sensor_channel_f = &sens_chnl_r;
-        sensor_channel_r = &sens_chnl_f;
-        sensor_pallete_F = &sens_plt_R;
-        sensor_pallete_R = &sens_plt_F;
         currentPosition = channelLength - currentPosition - 800;
       }
-
       tempStr = inStr.substring(2, 5);
-      if (tempStr == "dNN" || inStr == "dNN") {
+      if (tempStr == "dNN" || inStr == "dNN") {  // Установка номера шаттла
         shuttleNum = inStr.substring(5, 8).toInt() - 1;
         eepromData.shuttleNum = shuttleNum;
-      }  // Установка номера шаттла
-      else if (tempStr == "dQt" || inStr == "dQt") {
+      } else if (tempStr == "dQt" || inStr == "dQt") {  // Выгрузка заданного количества паллет
         UPQuant = inStr.substring(5, 8).toInt();
         statusTmp = 23;
-      }  // Выгрузка заданного количества паллет
-      else if (tempStr == "dDm" || inStr == "dDm") {
+      } else if (tempStr == "dDm" || inStr == "dDm") {  // Установка межпаллетного расстояния
         interPalleteDistance = inStr.substring(5, 8).toInt();
         eepromData.interPalleteDistance = interPalleteDistance;
-      }  // Установка межпаллетного расстояния
-      else if (tempStr == "dSl" || inStr == "dSl") {
+      } else if (tempStr == "dSl" || inStr == "dSl") {  // Установка длинны шаттла
         shuttleLength = inStr.substring(5, 8).toInt() * 10;
         eepromData.shuttleLength = shuttleLength;
-      }                           // Установка длинны шаттла
-      else if (tempStr == "dSp" || inStr == )  // Установка максимальной скорости
-      {
+      } else if (tempStr == "dSp" || inStr == "dSp") {  // Установка максимальной скорости
         maxSpeed = inStr.substring(5, 8).toInt();
         if (maxSpeed > 96) maxSpeed = 96;
         if (maxSpeed < minSpeed) maxSpeed = minSpeed + 5;
         eepromData.maxSpeed = maxSpeed;
-      } else if (tempStr == "dBc" || inStr == "dBc")  // Установка минимального заряда батареи
-      {
+      } else if (tempStr == "dBc" || inStr == "dBc") {  // Установка минимального заряда батареи
         minBattCharge = inStr.substring(5, 8).toInt();
         if (minBattCharge > 50) minBattCharge = 50;
         if (minBattCharge < 0) minBattCharge = 0;
         eepromData.minBattCharge = minBattCharge;
-      } else if (tempStr == "dMr" || inStr == "dMr")  // Движение назад на заданное расстояние
-      {
+      } else if (tempStr == "dMr" || inStr == "dMr") {  // Движение назад на заданное расстояние
         statusTmp = 8;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dMf" || inStr == "dMf")  // Движение вперед на заданное расстояние
-      {
+      } else if (tempStr == "dMf" || inStr == "dMf") {  // Движение вперед на заданное расстояние
         statusTmp = 9;
         mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dWt" || inStr == "dWt")  // Время ожидания при выгрузке
-      {
+      } else if (tempStr == "dWt" || inStr == "dWt") {  // Время ожидания при выгрузке
         statusTmp = 0;
         waitTime = inStr.substring(5, 7).toInt() * 1000;
         eepromData.waitTime = waitTime;
-      } else if (tempStr == "dMo" || inStr == "dMo")  // Смещение МПР
-      {
+      } else if (tempStr == "dMo" || inStr == "dMo") {  // Смещение МПР
         statusTmp = 0;
         mprOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.mprOffset = mprOffset;
-      } else if (tempStr == "dMc" || inStr == "dMc")  // Смещение конца канала
-      {
+      } else if (tempStr == "dMc" || inStr == "dMc") {  // Смещение конца канала
         statusTmp = 0;
         chnlOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
         eepromData.chnlOffset = chnlOffset;
       }
-    } else if (tempStr == "GS" || inStr == "GS") {
+    } else if (tempStr == "GS" || inStr == "GS") {  // Запрос от индикатора батареи номера шаттла
       Serial1.print("GS " + String(shuttleNum));
       delay(5);
       Serial1.print("GS " + String(shuttleNum));
-    } else if (tempStr == "DT" || inStr == "DT") {
+    } else if (tempStr == "DT" || inStr == "DT") {  // Установка текущей даты и времени
       String input = inStr.substring(3, 23);
       int hour, minute, second, day, month, year;
       if (sscanf(input.c_str(), "%d:%d:%d %d.%d.%d", &hour, &minute, &second, &day, &month, &year) == 6) {
@@ -1627,14 +1297,23 @@ uint8_t get_Cmd()  //Запрос команд с пульта ДУ
         Serial.println("Invalid format. Use: HH:MM:SS DD/MM/YYYY");
       }
     }
+    tempStr = inStr.substring(0, 8);
+    if (tempStr == "Firmware") {
+      motor_Stop();
+      jumpToBootloader();
+    } else if (tempStr == "Reboot__") {
+      Serial1.println("Reboot system by external command...");
+      delay(20);
+      HAL_NVIC_SystemReset();
+    }
   }
 
   if (statusTmp == 100) return status;
   else return statusTmp;
 }
 
-uint8_t get_Cmd_Manual()  //Запрос команд с пульта ДУ
-{
+// Запрос команд с пульта ДУ
+uint8_t get_Cmd_Manual() {
   int8_t inByte = 0;
   int8_t data = 0;
   char inChar;
@@ -1669,6 +1348,7 @@ uint8_t get_Cmd_Manual()  //Запрос команд с пульта ДУ
       if (inStr.length() == 8) data = 1;
     }
   }
+  Serial.println(inStr);
   if (data) {
     String tempStr = inStr.substring(2, 8);
     //if (!pultConnect) {digitalWrite(ZOOMER, HIGH); delay(500); digitalWrite(ZOOMER, LOW); pultConnect = 1;}
@@ -1697,10 +1377,12 @@ uint8_t get_Cmd_Manual()  //Запрос команд с пульта ДУ
       return 4;
     }  // Опустить платфоорму
     else if (tempStr == "dLoad_") {
+      status = 6;
       send_Cmd();
       return 6;
     }  // Выгрузка паллеты
     else if (tempStr == "dUnld_") {
+      status = 7;
       send_Cmd();
       return 7;
     }  // Загрузка паллеты
@@ -1730,8 +1412,8 @@ uint8_t get_Cmd_Manual()  //Запрос команд с пульта ДУ
   return 0;
 }
 
-void run_Cmd()  // Выполнение команд с пульта ДУ
-{
+// Выполнение команд с пульта ДУ
+void run_Cmd() {
   if (status == 1) {
     send_Cmd();
     moove_Reverse();
@@ -1758,13 +1440,13 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
     send_Cmd();
   } else if (status == 6) {
     send_Cmd();
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     single_Load();
     status = 0;
     send_Cmd();
   } else if (status == 7) {
     send_Cmd();
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     moove_Forward();
     unload_Pallete();
     status = 2;
@@ -1796,7 +1478,7 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
     status = 0;
     send_Cmd();
     status = 12;
-    dataStr = "Pallete count = " + String(palleteCount) + " " + String(currentPosition);
+    dataStr = "Pallete count = " + String(palleteCount);
     Serial.println(dataStr);
     Serial1.println(dataStr);
     status = 2;
@@ -1819,8 +1501,7 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
     send_Cmd();
   } else if (status == 21) {
     send_Cmd();
-    if (lifterUp) lifter_Down();
-    moove_Forward();
+    lifter_Down();
     long_Load();
     if (status != 5) moove_Forward();
     status = 0;
@@ -1828,7 +1509,7 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
   } else if (status == 22) {
     send_Cmd();
     longWork = 1;
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     moove_Forward();
     long_Unload();
     longWork = 0;
@@ -1841,7 +1522,7 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
     send_Cmd();
     longWork = 1;
     Serial.println("Pallet quant = " + String(palletQuant));
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     moove_Forward();
     status = 23;
     long_Unload(UPQuant);
@@ -1853,12 +1534,13 @@ void run_Cmd()  // Выполнение команд с пульта ДУ
     status = 0;
     send_Cmd();
   } else if (status == 27) {
-    moove_Reverse();
+    moove_Forward();
     status = 0;
     send_Cmd();
   }
 }
 
+// Ответы на запросы от пульта или сетевого клиента
 void send_Cmd() {
   char report[64];
   String tempStr = shuttleNums[shuttleNum] + "t1" + fifoLifo;
@@ -1946,8 +1628,6 @@ void send_Cmd() {
         Serial2.print(tempStr + "12:" + batteryCharge + ":" + palleteCount + "!");
         break;
       case 23:  // Продолжительная выгрузка
-        //Serial2.print(tempStr + "13:" + batteryCharge + ":" + palleteCount + "!");
-        //delay(20);
         tempStr = shuttleNums[shuttleNum] + "pq";
         Serial2.print(tempStr + "0" + String(UPQuant) + "!");
         break;
@@ -1982,8 +1662,8 @@ void send_Cmd() {
   }
 }
 
-void sensor_Report()  // Опрос сенсоров
-{
+// Опрос сенсоров
+void sensor_Report() {
   //Serial.println("Start reporting...");
   char report[64];
 
@@ -2083,12 +1763,14 @@ void sensor_Report()  // Опрос сенсоров
   dataStr = "Wait time on unload = " + String(waitTime / 1000) + " Sec";
   Serial.println(dataStr);
   Serial1.println(dataStr);
+  delay(20);
   dataStr = "Zero point MPR = " + String(mprOffset) + " channel offset = " + String(chnlOffset);
   Serial.println(dataStr);
   Serial1.println(dataStr);
   dataStr = " ";
   Serial.println(dataStr);
   Serial1.println(dataStr);
+  delay(20);
   if (sizeof(shuttleStatus) > status) {
     dataStr = "Status = " + String(shuttleStatus[status]) + "  (" + String(status) + ")";
     Serial.println(dataStr);
@@ -2101,23 +1783,78 @@ void sensor_Report()  // Опрос сенсоров
   delay(20);
   Serial.println("Shuttle number = " + String(shuttleNum + 1) + " Shuttle length = " + String(shuttleLength));
   Serial1.println("Shuttle number = " + String(shuttleNum + 1) + " Shuttle length = " + String(shuttleLength));
-
+  dataStr = " ";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  dataStr = "Weehl diameter = " + String(weelDia);
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
   dataStr = "-----------------------------------------------";
   Serial.println(dataStr);
   Serial1.println(dataStr);
   Serial1.println("CB " + String(batteryCharge));
   if (!errorStatus[0] && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     moove_Forward();
     add_Error(11);
     status = 5;
     return;
   }
   Serial1.println("CV " + String(batteryVoltage));
+  //makeReport();
 }
 
-void add_Error(uint8_t error)  // Добавление ошибки
-{
+// Формирование бинарного репорта (на замену текстового)
+void makeReport() {
+  reportData.shuttleNumber = shuttleNum;
+  reportData.shuttleLength = shuttleLength;
+  reportData.maxSpeed = maxSpeed;
+  reportData.minSpeed = minSpeed;
+  reportData.interPalleteDistance = interPalleteDistance;
+  reportData.inverse = inverse;
+  reportData.fifoLifo = fifoLifo;
+  reportData.lifterSpeed = lifter_Speed;
+  reportData.waitTime = waitTime;
+
+  batteryData.minBattCharge = minBattCharge;
+  batteryData.batteryVoltage = batteryVoltage;
+  batteryData.batteryCharge = batteryCharge;
+  reportData.battery = batteryData;
+
+  memcpy(&reportData.calibrateEncoder_F, calibrateEncoder_F, 8);
+  memcpy(&reportData.calibrateEncoder_R, calibrateEncoder_R, 8);
+  memcpy(&reportData.calibrateSensor_F, calibrateSensor_F, 3);
+  memcpy(&reportData.calibrateSensor_R, calibrateSensor_R, 3);
+  reportData.timingBudget = timingBudget;
+  reportData.mprOffset = mprOffset;
+  reportData.chnlOffset = chnlOffset;
+  reportData.blinkTime = blinkTime;
+
+  eepromStat.load = loadCounter;
+  eepromStat.unload = unloadCounter;
+  eepromStat.compact = compact;
+  eepromStat.liftUp = liftUpCounter;
+  eepromStat.liftDown = liftDownCounter;
+  eepromStat.totalDist = totalDist;
+  memcpy(&reportData.shuttleStats, &eepromStat, sizeof(eepromStat));
+  memcpy(&reportData.dateTime, &globalDateTime, sizeof(globalDateTime));
+  reportData.temp = temp;
+
+  memcpy(&reportData.errorStatus, errorStatus, 16);
+
+  uint16_t dataSize = sizeof(reportData);
+
+  Serial1.write(0xFF);
+  Serial1.write(0xFE);
+  Serial1.write((const uint8_t*)&dataSize, sizeof(dataSize));
+  Serial1.write((const char*)&reportData, dataSize);
+  Serial1.write(0xFE);
+  Serial1.write(0xFF);
+  Serial1.write('\n');
+}
+
+// Добавление ошибки
+void add_Error(uint8_t error) {
   uint8_t i = 0;
   while (errorStatus[i]) {
     if (errorStatus[i] == error) return;
@@ -2126,8 +1863,8 @@ void add_Error(uint8_t error)  // Добавление ошибки
   errorStatus[i] = error;
 }
 
-void detect_Pallete()  // Получение данных с датчиков обраружения паллет
-{
+// Получение данных с датчиков обраружения паллет
+void detect_Pallete() {
   if (inverse) {
     detectPalleteF1 = digitalRead(DATCHIK_R1);
     detectPalleteF2 = digitalRead(DATCHIK_R2);
@@ -2175,314 +1912,64 @@ void detect_Pallete()  // Получение данных с датчиков о
   }
 }
 
-uint16_t get_Distance(VL53L0X* sensor)  //Получение данных о расстоянии от сенсоров VL53L0X
-{
-  uint16_t dst = 0;
-  VL53L0X_RangingMeasurementData_t pRangingMeasurementData;
-
-  uint16_t dist;
-  if (sensor->dev == 0x60) {
-    sensorNum = 0;
-    if (inverse) dist = distance[0];
-    else dist = distance[1];
-  } else if (sensor->dev == 0x62) {
-    sensorNum = 1;
-    if (!inverse) dist = distance[0];
-    else dist = distance[1];
-  } else if (sensor->dev == 0x64) {
-    sensorNum = 2;
-    if (inverse) dist = distance[2];
-    else dist = distance[3];
-  } else {
-    sensorNum = 3;
-    if (!inverse) dist = distance[2];
-    else dist = distance[3];
-  }
-
-  ITimer0.enableTimer();
-  if (!ITimer0.attachInterruptInterval(timingBudget * 2000, reinitialise_Sensor)) {
-    dataStr = "Can't set ITimer0...";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
-  }
-
-  uint8_t st = sensor->GetRangingMeasurementData(&pRangingMeasurementData);
-  dst = pRangingMeasurementData.RangeMilliMeter;
-  uint16_t cps = pRangingMeasurementData.SignalRateRtnMegaCps / 64;
-  sensor->ClearInterruptMask(0);
-
-  if (pRangingMeasurementData.RangeStatus == 3) {
-    Serial.println("none interrupt");
-    reinitialise_Sensor();
-  }
-
-  ITimer0.detachInterrupt();
-  ITimer0.disableTimer();
-
-  if (pRangingMeasurementData.RangeStatus == 0 && cps > 60 && dst > 800 && dst <= 1500) {
-  } else if (pRangingMeasurementData.RangeStatus == 1 && dst > 1200 && dst <= 1500) {
-  } else if (pRangingMeasurementData.RangeStatus == 0 && cps > 150 && dst > 400 && dst <= 800) {
-  } else if (pRangingMeasurementData.RangeStatus == 0 && cps > 700 && dst > 40 && dst <= 400) {
-  } else if (pRangingMeasurementData.RangeStatus == 0 && (cps > 2000 && dst <= 40)) dst = 40;
-  else if (pRangingMeasurementData.RangeStatus != 0 && dst <= 1200) dst = dist + 10;
-  else dst = 1500;
-  if (motorStart && oldSpeed > 30 && ((dist > 1200 && dst < 400))) dst = dist;
-  if (((sensorNum == 0 && inverse) || (sensorNum == 1 && !inverse) && dst < distance[2] + 100 && dst > distance[2] - 40)) dst = dist + 10;
-  else if (((sensorNum == 1 && inverse) || (sensorNum == 0 && !inverse) && dst < distance[3] + 100 && dst > distance[3] - 40)) dst = dist + 10;
-  if (dst > 1500) dst = 1500;
-  return dst;
-}
-
+// Опрос всех сенсоров расстояния
 void get_Distance() {
-  distance[0] = get_Distance(sensor_channel_r);
-  distance[1] = get_Distance(sensor_channel_f);
-  distance[2] = get_Distance(sensor_pallete_R);
-  distance[3] = get_Distance(sensor_pallete_F);
+  static uint16_t fault = 0;
+  static uint8_t filterCount = 0;
+  static uint8_t err[4] = {0};
+  TOF_Parameter sensor;
+  countSensor = millis();
+  if (!TOF_Is_Device_Present(sensorIndex + 1)) {
+    err[sensorIndex]++;
+    if (sensorIndex == 0 && err[sensorIndex] > 6) add_Error(1);
+    else if (sensorIndex == 1 && err[sensorIndex] > 6) add_Error(2);
+    else if (sensorIndex == 2 && err[sensorIndex] > 6) add_Error(5);
+    else if (sensorIndex == 3 && err[sensorIndex] > 6) add_Error(6);
+    return;
+  } else err[sensorIndex] = 0;
+  TOF_Inquire_I2C_Decoding_ByID(sensorIndex + 1, &sensor);
+  uint16_t dist = sensor.dis;
+  if ((dist <= 1500 && sensor.signal_strength > 100) || dist > 1500) {
+    if (!dist || dist > 1500) dist = 1500;
+    data[sensorIndex][filterCount] = dist;
+    if (inverse && sensorIndex == 0) distance[1] = filter_Distance(data[sensorIndex]);
+    else if (inverse && sensorIndex == 1) distance[0] = filter_Distance(data[sensorIndex]);
+    else if (inverse && sensorIndex == 2) distance[3] = filter_Distance(data[sensorIndex]);
+    else if (inverse && sensorIndex == 3) distance[2] = filter_Distance(data[sensorIndex]);
+    else distance[sensorIndex] = filter_Distance(data[sensorIndex]);
+  } else if (sensor.dis_status != 1 ) {
+    if (inverse && sensorIndex == 0) distance[1] = 1500;
+    else if (inverse && sensorIndex == 1) distance[0] = 1500;
+    else if (inverse && sensorIndex == 2) distance[3] = 1500;
+    else if (inverse && sensorIndex == 3) distance[2] = 1500;
+    else distance[sensorIndex] = 1500;
+  }
+  else fault += pow(10, sensorIndex);
+  sensorIndex = (sensorIndex + 1) % 4;
+  if (sensorIndex == 3) filterCount = (filterCount + 1) % 5;
 }
 
-void demo_Mode()  //Демо режим
-{
-  dataStr = "Start DEMO mode...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
-  if (!digitalRead(DL_DOWN)) lifter_Down();
-  moove_Reverse();
-  if (status == 5 || errorStatus[0]) return;
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      return;
-    }
-  }
-  get_Distance();
-  detect_Pallete();
-  uint8_t moove = 0;
-  while (distance[3] < 1000) {
-    moove_Distance_F(10, 25, 25);
-    motor_Speed(oldSpeed);
-    moove = 1;
-  }
-  //if (moove) moove_Distance_F(shuttleLength + 500, 40, 60);
+uint16_t filter_Distance(uint16_t arr[5]) {
+  uint16_t minVal = arr[0];
+  uint16_t maxVal = arr[0];
+  uint32_t sum = 0;
 
-  while (1) {
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      motor_Stop();
-      status = 5;
-      return;
-    }
-    while (status != 5) {
-      count = millis();
-      while (millis() - count < 1000 && !moove) {
-        if (get_Cmd() == 5 || errorStatus[0]) {
-          motor_Stop();
-          status = 5;
-          return;
-        }
-        blink_Work();
-      }
-      moove = 0;
-      load_Pallete();
-      sensor_Report();
-      if (errorStatus[0]) {
-        motor_Stop();
-        return;
-      }
-      if (distance[1] < 200) status = 5;
-    }
-    if (status == 5 && distance[1] > 200 || errorStatus[0]) {
-      motor_Stop();
-      return;
-    } else status = 11;
-    motor_Stop();
-    count = millis();
-    read_BatteryCharge();
-    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
-      add_Error(11);
-      if (lifterUp) lifter_Down();
-      moove_Forward();
-      status = 5;
-      return;
-    }
-    while (millis() - count < 3000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    sensor_Report();
-    if (status == 5 || errorStatus[0]) return;
-    moove_Reverse();
-    if (errorStatus[0]) {
-      motor_Stop();
-      return;
-    }
-    if (status == 5 || errorStatus[0]) return;
-    sensor_Report();
-    moove_Forward();
-    if (errorStatus[0]) {
-      motor_Stop();
-      return;
-    }
-    if (status == 5 || errorStatus[0]) return;
-    count = millis();
-    read_BatteryCharge();
-    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
-      add_Error(11);
-      if (lifterUp) lifter_Down();
-      moove_Forward();
-      status = 5;
-      return;
-    }
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    sensor_Report();
-    if (status == 5 || errorStatus[0]) return;
-    while (status != 5) {
-      count = millis();
-      while (millis() - count < 1000) {
-        if (get_Cmd() == 5 || errorStatus[0]) {
-          motor_Stop();
-          status = 5;
-          return;
-        }
-        blink_Work();
-      }
-      unload_Pallete();
-      sensor_Report();
-      firstPalletePosition = currentPosition;
-      if (errorStatus[0]) {
-        motor_Stop();
-        return;
-      }
-      if (distance[0] < 200) status = 5;
-    }
-    firstPalletePosition = 0;
-    if (status == 5 && distance[0] > 200 || errorStatus[0]) {
-      motor_Stop();
-      return;
-    } else status = 11;
-    motor_Stop();
-    count = millis();
-    read_BatteryCharge();
-    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
-      add_Error(11);
-      if (lifterUp) lifter_Down();
-      moove_Forward();
-      status = 5;
-      return;
-    }
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    sensor_Report();
-    if (status == 5 || errorStatus[0]) return;
-    moove_Forward();
-    if (errorStatus[0]) {
-      motor_Stop();
-      return;
-    }
-    if (status == 5 || errorStatus[0]) return;
-    sensor_Report();
-    moove_Reverse();
-    if (errorStatus[0]) {
-      motor_Stop();
-      return;
-    }
-    if (status == 5 || errorStatus[0]) return;
-    count = millis();
-    read_BatteryCharge();
-    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
-      add_Error(11);
-      if (lifterUp) lifter_Down();
-      moove_Forward();
-      status = 5;
-      return;
-    }
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    count = millis();
-    while (millis() - count < 1000) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-    }
-    sensor_Report();
-    if (status == 5 || errorStatus[0]) return;
+  // Находим min и max, а также сумму всех элементов
+  for (int i = 0; i < 5; i++) {
+    if (arr[i] < minVal) minVal = arr[i];
+    if (arr[i] > maxVal) maxVal = arr[i];
+    sum += arr[i];
   }
+
+  // Вычитаем min и max из суммы
+  sum = sum - minVal - maxVal;
+
+  // Возвращаем среднее арифметическое оставшихся 3 значений
+  return (uint16_t)(sum / 3);
 }
 
-void set_Position()  // Определяет текущую позицию шаттла в канале по переднему фронту (передней панели)
-{
+// Определяет текущую позицию шаттла в канале по переднему фронту (передней панели)
+void set_Position() {
   angle = as5600.readAngle();
   int oldAng = oldAngle;
   while (angle > 4096 || angle < 0) angle = as5600.readAngle();
@@ -2553,36 +2040,28 @@ void set_Position()  // Определяет текущую позицию ша�
   if (channelLength - shuttleLength < currentPosition) channelLength = currentPosition + shuttleLength;
 }
 
+// Переключение между FiFo и LiFo
 void fifoLifo_Inverse() {
   if (inverse) {
     inverse = 0;
-    sensor_channel_f = &sens_chnl_f;
-    sensor_channel_r = &sens_chnl_r;
-    sensor_pallete_F = &sens_plt_F;
-    sensor_pallete_R = &sens_plt_R;
     currentPosition = channelLength - currentPosition - 800;
   } else {
     inverse = 1;
-    sensor_channel_f = &sens_chnl_r;
-    sensor_channel_r = &sens_chnl_f;
-    sensor_pallete_F = &sens_plt_R;
-    sensor_pallete_R = &sens_plt_F;
   }
 }
 
-void blink_Work()  // Моргание светодиодом в режиме работы
-{
-  if (millis() - count2 > blinkTime) {
+// Моргание светодиодом в режиме работы
+void blink_Work() {
+  if (millis() - count2 > blinkTime) { // Счетчик блинков, всего 20 по blinkTime
     counter++;
-    Can1.read(CAN_RX_msg);
-    if (counter == 10 && status != 25) {
+    Can1.read(CAN_RX_msg);  // Считывание Can шины для очистки буфера
+    if (counter == 10 && status != 25) {  // Тики для сообщения позиции в канале
       set_Position();
       dataStr = "Position = " + String(currentPosition);
       Serial.println(dataStr);
       Serial1.println(dataStr);
       int diff = abs(currentPosition - oldPosition);
       if (currentPosition == 0) diff = abs(channelLength - shuttleLength - oldPosition);
-      //if ((motorStart && oldSpeed > 9 && diff < oldSpeed / 5) || mooveCount == 5) {motor_Stop(); status = 5; add_Error(10); return;}
       if (motorStart && oldSpeed && diff < 10) {
         if (!mooveCount) countCrush = millis();
         mooveCount = 1;
@@ -2602,8 +2081,7 @@ void blink_Work()  // Моргание светодиодом в режиме р
       digitalWrite(WHITE_LED, HIGH);
     } else if ((counter == 2 || counter == 12) && status != 25) {
       if (motorStart) dataStr = "Speed = " + String(oldSpeed);
-      else dataStr = "mooving lifter...";
-      //dataStr = "Speed = " + String(oldSpeed) + " CF = " + String(distance[0]) + " CR = " + String(distance[1]) + " PF = " + String(distance[2]) + " PR = " + String(distance[3]);
+      else dataStr = "standing...";
       Serial.println(dataStr);
       Serial1.println(dataStr);
     } else if (counter == 3 || counter == 7) {
@@ -2621,7 +2099,6 @@ void blink_Work()  // Моргание светодиодом в режиме р
       send_Cmd();
       status = oldStatus;
     }
-    //else if ((counter == 6 || counter == 9 || counter == 10 || counter == 13 || counter == 15 || counter == 17) && status != 25) { Serial1.println("CB " + String(batteryCharge)); delay(20); Serial1.println("CV " + String(batteryVoltage));}
     else if ((counter == 11 || counter == 19) && status != 25) {
       send_Cmd();
     } else if (counter == 20) {
@@ -2632,99 +2109,161 @@ void blink_Work()  // Моргание светодиодом в режиме р
   return;
 }
 
-void blink_Error()  // Моргание светодиодом в режиме ошибки
-{}
-
-void blink_Warning()  // Моргание светодиодом на предупреждение
-{
+// Моргание светодиодом на предупреждение
+void blink_Warning() {
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(ZOOMER, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
     if (status = get_Cmd() == 5 || errorStatus[0]) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
+      digitalWrite(BOARD_LED, LOW);
       return;
     }
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(ZOOMER, LOW);
+  digitalWrite(BOARD_LED, LOW);
   count = millis();
   while (millis() - count < 100)
     if (status = get_Cmd() == 5 || errorStatus[0]) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
+      digitalWrite(BOARD_LED, LOW);
       return;
     }
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(ZOOMER, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
     if (status = get_Cmd() == 5 || errorStatus[0]) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
+      digitalWrite(BOARD_LED, LOW);
       return;
     }
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(ZOOMER, LOW);
+  digitalWrite(BOARD_LED, LOW);
   count = millis();
   while (millis() - count < 100)
     if (status = get_Cmd() == 5 || errorStatus[0]) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
+      digitalWrite(BOARD_LED, LOW);
       return;
     }
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(ZOOMER, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
     if (status = get_Cmd() == 5 || errorStatus[0]) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
+      digitalWrite(BOARD_LED, LOW);
       return;
     }
   digitalWrite(RED_LED, LOW);
   digitalWrite(ZOOMER, LOW);
+  digitalWrite(BOARD_LED, LOW);
   return;
+}
+
+// Моргание светодиодом в режиме ошибки
+void blink_Error() {
+  static int countError = millis();
+  static uint8_t errCounter = 0;
+  if (millis() - countError < 200) return;
+  if (errCounter == 0 || errCounter == 2 || errCounter == 4 || errCounter == 6 || errCounter == 8) {
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(BOARD_LED, HIGH);
+    errCounter++;
+  }
+  else if (errCounter == 1 || errCounter == 3 || errCounter == 5 || errCounter == 7) {
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BOARD_LED, LOW);
+    errCounter++;
+  }
+  else if (errCounter == 9) {
+    digitalWrite(GREEN_LED, LOW);
+    errCounter++;
+    IWatchdog.reload();
+    motor_Stop();
+    Can1.read(CAN_RX_msg);
+  }
+  else if (errCounter == 14) {
+    debuger++;    
+    if (debuger == 1) {
+      dataStr = "Shuttle ERROR !!! Errors: ";
+      uint8_t i = 0;
+      while (errorStatus[i]) {
+        if (batteryCharge > minBattCharge && errorStatus[i] == 11) errorStatus[i] = 0;
+        dataStr += shuttleErrors[errorStatus[i]] + " ";
+        i++;
+      }
+      Serial.println(dataStr);
+      Serial1.println(dataStr);
+      sensor_Report();
+    }
+    if (debuger == 3 || debuger == 7) {
+      Serial1.println("CB " + String(batteryCharge));
+    }
+    if (debuger == 2 || debuger == 6) {
+      Serial1.println("CV " + String(batteryVoltage));
+    }
+    else if (debuger == 10) debuger = 0;    
+    status = 16;
+    send_Cmd();
+    status = 19;
+    errCounter = 0;
+  }
+  else errCounter++;
+  countError = millis();
 }
 
 #pragma endregion
 
 #pragma region Рабочие функции шаттла
 
-void stop_Before_Pallete_F()  //Остановка перед паллетом к началу канала (к выгрузке)
-{
+// Остановка перед паллетом к началу канала (к выгрузке)
+void stop_Before_Pallete_F() {
   dataStr = "Start stopping before pallete F... at " + String(distance[3]);
   Serial.println(dataStr);
   Serial1.println(dataStr);
   moove_Before_Pallete_F();
-  //if (lifterUp && (status == 21 || status == 22) && oldSpeed ==0) oldSpeed =20;
   if (status == 5 || errorStatus[0]) return;
   if (oldSpeed == 0 && distance[1] > 250) motor_Speed(20);
+  uint16_t otstup = 70;
+  if (lifterUp) otstup = 100;
+  otstup += chnlOffset;
   if (distance[3] <= 900) {
     count = millis();
-    while (distance[3] >= 550 && distance[1] > 85) {
+    while (distance[3] >= 550 && distance[1] > otstup) {
       int spd = (distance[3] - 200) / 20;
       if (spd > distance[1] / 23) spd = distance[1] / 23;
-      if (spd > oldSpeed) spd = oldSpeed;
+      if (spd - oldSpeed > 3) spd = oldSpeed + 3;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
-      while (millis() - count < timingBudget + 5) {
-        blink_Work();
-        if (get_Cmd() == 5 || errorStatus[0]) {
-          status = 5;
-          motor_Stop();
-          return;
-        }
+      blink_Work();
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        status = 5;
+        motor_Stop();
+        return;
       }
       count = millis();
       set_Position();
@@ -2739,12 +2278,10 @@ void stop_Before_Pallete_F()  //Остановка перед паллетом �
     uint8_t i = 1;
     uint8_t j = 1;
     get_Distance();
-    while (i < 4) {
-      dataStr = "Distance F = " + String(distance[3]);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
-      while (millis() - count < timingBudget + 5) {
+    while (i < 4) {  // Фиксируем несколько измерений расстояния  до паллета
+      while (millis() - count < 100) {
         blink_Work();
+        get_Distance();
         if (get_Cmd() == 5 || errorStatus[0]) {
           status = 5;
           motor_Stop();
@@ -2752,8 +2289,11 @@ void stop_Before_Pallete_F()  //Остановка перед паллетом �
         }
       }
       count = millis();
-      get_Distance();
+      
       if (distance[3] > 250 && distance[3] < 550) {
+        dataStr = "Distance F = " + String(distance[3]);
+        Serial.println(dataStr);
+        Serial1.println(dataStr);
         dist += distance[3];
         i++;
       }
@@ -2769,14 +2309,14 @@ void stop_Before_Pallete_F()  //Остановка перед паллетом �
       }
       int spd = (distance[3] - 200) / 20;
       if (oldSpeed < spd && distance[3] < 700 && distance[1] > 700) motor_Speed(oldSpeed);
-      else if (distance[3] >= 700 && distance[1] > 700) motor_Speed(30);
+      else if (distance[3] >= 700 && distance[1] > 700) moove_Before_Pallete_F();
       else if (spd > 7 && distance[1] > 700) motor_Speed(spd);
-      else if (distance[1] <= 700 && distance[1] > 85 + chnlOffset) {
+      else if (distance[1] <= 700 && distance[1] > 100 + chnlOffset) {
         spd = distance[1] / 23;
         if (spd < 5) spd = 5;
         else if (spd > oldSpeed) spd = oldSpeed;
         motor_Speed(spd);
-      } else if (distance[1] <= 85 + chnlOffset) {
+      } else if (distance[1] <= 100 + chnlOffset) {
         motor_Stop();
         dataStr = "Stopped at the end of channel...";
         Serial.println(dataStr);
@@ -2809,38 +2349,27 @@ void stop_Before_Pallete_F()  //Остановка перед паллетом �
   Serial1.println(dataStr);
 }
 
-void moove_Before_Pallete_F()  //Остановка перед паллетом к началу канала (к выгрузке)
-{
+// Остановка перед паллетом к началу канала (к выгрузке)
+void moove_Before_Pallete_F() {
   dataStr = "Going before pallete F...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
   uint8_t findPallete = 1;
   get_Distance();
   if (motorStart) motor_Speed(oldSpeed);
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
-  get_Distance();
-  if (motorStart) motor_Speed(oldSpeed);
   motor_Start_Forward();
   oldChannelDistanse = distance[1];
   oldPalleteDistanse = distance[3];
   count = millis();
-  while (findPallete) {
-    if (get_Cmd() == 5 || errorStatus[0]) {
+  while (findPallete) {                      // Двигаемся до обнаружения поддона или конца канала
+    if (get_Cmd() == 5 || errorStatus[0]) {  // Проверка на стоп и ошибки
       motor_Stop();
       status = 5;
       return;
     }
     blink_Work();
-    if (millis() - count > timingBudget + 5) {
-      get_Distance();
+    get_Distance();
+    if (millis() - count > 50) {
       set_Position();
       if (distance[1] >= 1500 && distance[3] >= 1500) {
         if (lifterUp && firstPalletePosition) {
@@ -2848,36 +2377,42 @@ void moove_Before_Pallete_F()  //Остановка перед паллетом 
           else if ((currentPosition - firstPalletePosition - 600) / 30 > 40) motor_Speed((currentPosition - firstPalletePosition - 600) / 30);
           else motor_Speed(40);
         } else if (lifterUp) {
-          if (currentPosition > 3500) motor_Speed(80);
-          else if (currentPosition / 50 > 40) motor_Speed(currentPosition / 50);
-          else motor_Speed(40);
-        } else if (currentPosition > 1800) motor_Speed(90);
-        else if (currentPosition <= 100) {
-          if (oldSpeed < 60) motor_Speed(oldSpeed + 5);
-          else motor_Speed(60);
+          if (currentPosition / 50 > 80) motor_Speed(currentPosition / 50);
+          else motor_Speed(80);
+        } else if (currentPosition > 1800 || currentPosition <= 100) {
+          motor_Speed(90);
         } else if (currentPosition > 100 && currentPosition <= 1800) {
           int spd = currentPosition / 20;
-          if (spd > oldSpeed) motor_Speed(oldSpeed);
+          if (oldSpeed && spd > oldSpeed)
+            motor_Speed(oldSpeed);
           else motor_Speed(spd);
         } else motor_Speed(5);
       } else if (distance[1] >= distance[3] && distance[3] >= 750) {
-        int spd = (int)((distance[3] - 40) / 25);
+        int spd = (distance[3] - 40) / 25;
         if (lifterUp) spd = (distance[3] - 450) / 20;
         if (spd > oldSpeed)
           if (oldSpeed > 20) motor_Speed(oldSpeed);
           else motor_Speed(20);
         else motor_Speed(spd);
-      } else if (distance[1] >= distance[3] && distance[3] < 750) findPallete = 0;
-      else if (distance[1] > 150 + chnlOffset && distance[1] <= 1500) {
+      } else if (distance[1] >= distance[3] && distance[3] < 750) {
+        findPallete = 0;
+      } else if (distance[1] > 150 + chnlOffset && distance[1] <= 1500) {
         int spd = (int)((distance[1] - 40) / 18);
-        if (spd > oldSpeed) motor_Speed(oldSpeed + 5);
+        if (lifterUp && spd > 40) if (spd > oldSpeed && oldSpeed) spd = oldSpeed; else spd = 40;
+        if (spd < 6) spd = 6;
+        if (spd > oldSpeed)
+          if (oldSpeed > 35) motor_Speed(oldSpeed);
+          else motor_Speed(oldSpeed + 5);
         else motor_Speed(spd);
         if (distance[3] < 750) findPallete = 0;
-      } else if (distance[1] > 90 + chnlOffset && distance[1] <= 150 + chnlOffset) motor_Speed(5);
-      else if (distance[1] <= 90 + chnlOffset) {
+      } else if (distance[1] > 90 + chnlOffset && distance[1] <= 150 + chnlOffset) {
+        motor_Speed(5);
+      } else if (distance[1] <= 90 + chnlOffset) {
         findPallete = 0;
         currentPosition = 60;
-      } else motor_Speed(oldSpeed);
+      } else if (oldSpeed) {
+        motor_Speed(oldSpeed);
+      } else motor_Speed(5);
       if (status == 5 || errorStatus[0]) return;
       count = millis();
     }
@@ -2891,24 +2426,28 @@ void moove_Before_Pallete_F()  //Остановка перед паллетом 
   Serial1.println(dataStr);
 }
 
-void stop_Before_Pallete_R()  //Остановка перед паллетом к концу канала (загрузка)
-{
+// Остановка перед паллетом к концу канала (загрузка)
+void stop_Before_Pallete_R() {
   dataStr = "Start stopping before pallete R... at " + String(distance[2]);
   Serial.println(dataStr);
   Serial1.println(dataStr);
   moove_Before_Pallete_R();
   if (status == 5 || errorStatus[0]) return;
   if (oldSpeed == 0 && distance[0] > 250) motor_Speed(20);
+  uint16_t otstup = 70;
+  if (lifterUp) otstup = 100;
+  otstup += chnlOffset;
   if (distance[2] <= 900) {
     count = millis();
-    while (distance[2] >= 550 && distance[0] > 80) {
+    while (distance[2] >= 550 && distance[0] > otstup) {
       int spd = (distance[2] - 200) / 20;
       if (spd > distance[0] / 23) spd = distance[0] / 23;
-      if (spd > oldSpeed) spd = oldSpeed;
+      if (spd - oldSpeed > 3) spd = oldSpeed + 3;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
-      while (millis() - count < timingBudget + 5) {
+      while (millis() - count < 50) {
         blink_Work();
+        get_Distance();
         if (get_Cmd() == 5 || errorStatus[0]) {
           status = 5;
           motor_Stop();
@@ -2916,8 +2455,7 @@ void stop_Before_Pallete_R()  //Остановка перед паллетом �
         }
       }
       count = millis();
-      set_Position();
-      get_Distance();
+      set_Position();      
     }
     int dist = distance[2];
     dataStr = "Speed = " + String(oldSpeed) + "  position = " + String(currentPosition);
@@ -2927,13 +2465,10 @@ void stop_Before_Pallete_R()  //Остановка перед паллетом �
     int diffP = currentPosition + startDiff;
     uint8_t i = 1;
     uint8_t j = 1;
-    get_Distance();
     while (i < 4) {
-      dataStr = "Distance R = " + String(distance[2]);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
-      while (millis() - count < timingBudget + 5) {
+      while (millis() - count < 100) {
         blink_Work();
+        get_Distance();
         if (get_Cmd() == 5 || errorStatus[0]) {
           status = 5;
           motor_Stop();
@@ -2941,8 +2476,10 @@ void stop_Before_Pallete_R()  //Остановка перед паллетом �
         }
       }
       count = millis();
-      get_Distance();
       if (distance[2] > 300 && distance[2] < 550) {
+        dataStr = "Distance R = " + String(distance[2]);
+        Serial.println(dataStr);
+        Serial1.println(dataStr);
         dist += distance[2];
         i++;
       }
@@ -2958,14 +2495,14 @@ void stop_Before_Pallete_R()  //Остановка перед паллетом �
       }
       int spd = (distance[2] - 200) / 20;
       if (oldSpeed < spd && distance[2] < 700 && distance[0] > 700) motor_Speed(oldSpeed);
-      else if (distance[2] >= 700 && distance[0] > 700) motor_Speed(30);
+      else if (distance[2] >= 700 && distance[0] > 700) moove_Before_Pallete_R();
       else if (spd > 7 && distance[0] > 700) motor_Speed(spd);
-      else if (distance[0] <= 700 && distance[0] > 85 + chnlOffset) {
+      else if (distance[0] <= 700 && distance[0] > 100 + chnlOffset) {
         spd = distance[0] / 23;
         if (spd < 5) spd = 5;
         else if (spd > oldSpeed && oldSpeed > 5) spd = oldSpeed;
         motor_Speed(spd);
-      } else if (distance[0] <= 85 + chnlOffset) {
+      } else if (distance[0] <= 100 + chnlOffset) {
         motor_Stop();
         dataStr = "Stopped at the end of channel...";
         Serial.println(dataStr);
@@ -2998,23 +2535,13 @@ void stop_Before_Pallete_R()  //Остановка перед паллетом �
   Serial1.println(dataStr);
 }
 
-void moove_Before_Pallete_R()  //Остановка перед паллетом к концу канала (загрузка)
-{
+// Остановка перед паллетом к концу канала (загрузка)
+void moove_Before_Pallete_R() {
   dataStr = "Going before pallete R...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
   uint8_t findPallete = 1;
   if (motorStart) motor_Speed(oldSpeed);
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
   get_Distance();
   oldChannelDistanse = distance[0];
   oldPalleteDistanse = distance[2];
@@ -3028,8 +2555,8 @@ void moove_Before_Pallete_R()  //Остановка перед паллетом 
       return;
     }
     blink_Work();
-    if (millis() - count > timingBudget + 5) {
-      get_Distance();
+    get_Distance();
+    if (millis() - count > 50) {      
       set_Position();
       if (distance[0] >= 1500 && distance[2] >= 1500) {
         if (lifterUp && lastPallete) {
@@ -3054,24 +2581,28 @@ void moove_Before_Pallete_R()  //Остановка перед паллетом 
         } else if (lifterUp) {
           if (maxSpeed > 86) motor_Speed(60);
           else motor_Speed(66);
-        } else if (channelLength - shuttleLength - currentPosition > 1800) motor_Speed(90);
-        else if (channelLength - shuttleLength - currentPosition < 100) {
-          if (oldSpeed < 60 && endOfChannel) motor_Speed(oldSpeed + 5);
-          else motor_Speed(60);
+        } else if (channelLength - shuttleLength - currentPosition > 1800 || channelLength - shuttleLength - currentPosition < 100) {
+          motor_Speed(90);
         } else if (channelLength - shuttleLength - currentPosition >= 100 && channelLength - shuttleLength - currentPosition <= 1800) {
           int spd = (channelLength - shuttleLength - currentPosition) / 20;
           if (!endOfChannel && spd < 50) spd = 50;
-          if (endOfChannel && spd > oldSpeed) motor_Speed(oldSpeed);
-          else motor_Speed(spd);
+          if (endOfChannel && spd > oldSpeed && oldSpeed) {
+            motor_Speed(oldSpeed);
+          } else motor_Speed(spd);
         } else motor_Speed(5);
       } else if (distance[0] >= distance[2] && distance[2] >= 750) {
         if ((distance[2] - 40) / 25 < oldSpeed) motor_Speed((distance[2] - 40) / 25);
         else if (oldSpeed >= 20) motor_Speed(oldSpeed);
         else motor_Speed(20);
-      } else if (distance[0] >= distance[2] && distance[2] < 750) findPallete = 0;
-      else if (distance[0] > 150 + chnlOffset && distance[0] <= 1500) {
+      } else if (distance[0] >= distance[2] && distance[2] < 750) {
+        findPallete = 0;
+      } else if (distance[0] > 150 + chnlOffset && distance[0] <= 1500) {
         int spd = (int)((distance[0] - 40) / 18);
-        if (spd > oldSpeed) motor_Speed(oldSpeed + 5);
+        if (lifterUp && spd > 40) spd = 40;
+        if (spd < 6) spd = 6;
+        if (spd > oldSpeed)
+          if (oldSpeed > 35) motor_Speed(oldSpeed);
+          else motor_Speed(oldSpeed + 5);
         else motor_Speed(spd);
         if (distance[2] < 750) findPallete = 0;
       } else if (distance[0] > 90 + chnlOffset && distance[0] <= 150 + chnlOffset) motor_Speed(5);
@@ -3092,14 +2623,21 @@ void moove_Before_Pallete_R()  //Остановка перед паллетом 
   Serial1.println(dataStr);
 }
 
-void moove_Distance_F(int dist)  //Движение вперед на заданное расстояние
-{
+// Движение вперед на заданное расстояние
+void moove_Distance_F(int dist) {
   moove_Distance_F(dist, 100, 10);
   motor_Stop();
 }
 
-void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение вперед на заданное расстояние
-{
+// Движение вперед на заданное расстояние
+void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
+  get_Distance();
+  if (distance[0] < 70) {
+    dataStr = "End of channel F, can't moove... ";
+    Serial.println(dataStr);
+    Serial1.println(dataStr);
+    return;
+  }
   dataStr = "Moove F distance = " + String(dist) + " Pos = " + String(currentPosition);
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3113,30 +2651,21 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
   if (dist > 500 && dist <= 1000 && maxSpeed > 50) maxSpeed = 50;
   if (dist > 300 && dist <= 500 && maxSpeed > 30) maxSpeed = 30;
   if (dist <= 300 && maxSpeed > 20) maxSpeed = 20;
-  if (dist > 50) dist -= 10;
+  if (dist > 500) dist -= 50;
+  else if (dist > 50) dist -= 10;
   motor_Start_Forward();
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
   get_Distance();
   int cnt = millis();
   count = millis();
-  while (moove) {
-    if (get_Cmd() == 5 || errorStatus[0]) {
+  while (moove) {  // Двигаемся до конца заданного расстояния
+    if (get_Cmd() == 5 || errorStatus[0]) {  // Проверка на стоп и ошибки
       status = 5;
       motor_Stop();
       return;
     }
     blink_Work();
-    if (millis() - count > timingBudget + 5) {
-      get_Distance();
+    get_Distance();
+    if (millis() - count > 50) {
       set_Position();
       currentAngle = as5600.readAngle();
       while (currentAngle > 4096 || currentAngle < 0) currentAngle = as5600.readAngle();
@@ -3150,7 +2679,6 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
           } else {
             diff = ((512 * s - currentAngle) * calibrateEncoder_F[f] + (startAngle - 512 * s) * calibrateEncoder_F[s]) / 512;
           }
-          //Serial1.print("[0] ");
         } else if (currentAngle - startAngle > 2000) {
           diff = (startAngle * calibrateEncoder_F[0] + (4096 - currentAngle) * calibrateEncoder_F[7]) / 512; /* Serial1.print("[1] ");*/
         } else if (currentAngle - startAngle > 0 && currentAngle - startAngle <= 2000) {
@@ -3158,7 +2686,6 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
           uint8_t f = currentAngle / 512;
           if (s == f) diff = (currentAngle - startAngle) * calibrateEncoder_F[s] / 512;
           else diff = ((currentAngle - 512 * f) * calibrateEncoder_F[f] + (512 * f - startAngle) * calibrateEncoder_F[s]) / 512;
-          //Serial1.print("[2] ");
         } else if (startAngle - currentAngle > 2000) {
           diff = (currentAngle * calibrateEncoder_F[0] + (4096 - startAngle) * calibrateEncoder_F[7]) / 512;
         }
@@ -3171,7 +2698,6 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
           } else {
             diff = ((512 * s - currentAngle) * (int)calibrateEncoder_R[f] + (startAngle - 512 * s) * (int)calibrateEncoder_R[s]) / 512;
           }
-          //Serial1.print("[4] ");
         } else if (currentAngle - startAngle > 2000) {
           diff = (startAngle * calibrateEncoder_R[0] + (4096 - currentAngle) * calibrateEncoder_R[7]) / 512;
         } else if (currentAngle - startAngle > 0 && currentAngle - startAngle <= 2000) {
@@ -3179,12 +2705,10 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
           uint8_t f = currentAngle / 512;
           if (s == f) diff = (currentAngle - startAngle) * (int)calibrateEncoder_R[s] / 512;
           else diff = ((currentAngle - 512 * f) * (int)calibrateEncoder_R[f] + (512 * f - startAngle) * (int)calibrateEncoder_R[s]) / 512;
-          //Serial1.print("[6] ");
         } else if (startAngle - currentAngle > 2000) {
           diff = (currentAngle * calibrateEncoder_R[0] + (4096 - startAngle) * calibrateEncoder_R[7]) / 512;
         }
       }
-      //Serial1.println("old angle = " + String(startAngle) + "  angle = " + String(currentAngle) + "  diff = " + String(diff));
       if (diff < 0) diff = 0;
       if (diff != 0) {
         dist -= diff;
@@ -3192,21 +2716,32 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
         cnt = millis();
       }
 
-      if (distance[1] >= maxSpeed * 15 && dist >= maxSpeed * 15) motor_Speed(maxSpeed);
-      else if (distance[1] <= 90 + chnlOffset) {
+      if (distance[1] >= maxSpeed * 15 && dist >= maxSpeed * 15) {
+        motor_Speed(maxSpeed);
+      } else if (distance[1] <= 90 + chnlOffset) {
+        motor_Stop();
         moove = 0;
         currentPosition = 0;
-      } else if (dist >= distance[1] && distance[1] < maxSpeed * 15) motor_Speed((int)(distance[1] / 15));
-      else if (dist < maxSpeed * 15 && dist > minSpeed * 15) motor_Speed((int)(dist / 15));
-      else if (dist > 0 && dist <= minSpeed * 15) motor_Speed(minSpeed);
-      else if (dist <= 0) moove = 0;
+      } else if (dist >= distance[1] && distance[1] < maxSpeed * 15) {
+        motor_Speed((int)(distance[1] / 15));
+      } else if (dist < maxSpeed * 15 && dist > minSpeed * 15) {
+        motor_Speed((int)(dist / 15));
+      } else if (dist > 0 && dist <= minSpeed * 15) {
+        if (oldSpeed > minSpeed) {
+          motor_Speed(minSpeed);
+        } else if (oldSpeed) {
+          motor_Speed(oldSpeed);
+        } else motor_Speed(minSpeed);
+      } else if (dist <= 0) {
+        moove = 0;
+      }
       if (lifterUp && millis() - cnt > 3000 && dist < 30) {
         motor_Stop();
         return;
       } else if (millis() - cnt > 5000) {
         add_Error(12);
         motor_Stop();
-        if (lifterUp) lifter_Down();
+        lifter_Down();
         status = 5;
         return;
       }
@@ -3218,14 +2753,21 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)  //Движение 
   Serial1.println(dataStr);
 }
 
-void moove_Distance_R(int dist)  //Движение назад на заданное расстояние
-{
+// Движение назад на заданное расстояние
+void moove_Distance_R(int dist) {
   moove_Distance_R(dist, 100, 10);
   motor_Stop();
 }
 
-void moove_Distance_R(int dist, int maxSpeed, int minSpeed)  //Движение назад на заданное расстояние
-{
+// Движение назад на заданное расстояние
+void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
+  get_Distance();
+  if (distance[1] < 70) {
+    dataStr = "End of channel R, can't moove... ";
+    Serial.println(dataStr);
+    Serial1.println(dataStr);
+    return;
+  }
   dataStr = "Moove R distance = " + String(dist) + " Pos = " + String(currentPosition);
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3237,20 +2779,11 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)  //Движение 
   if (dist > 500 && dist <= 1000 && maxSpeed > 50) maxSpeed = 50;
   if (dist > 300 && dist <= 500 && maxSpeed > 30) maxSpeed = 30;
   if (dist <= 300 && maxSpeed > 20) maxSpeed = 20;
-  if (dist > 50) dist -= 10;
+  if (dist > 500) dist -= 50;
+  else if (dist > 50) dist -= 10;
   if (maxSpeed < 5) maxSpeed = 5;
   if (minSpeed > maxSpeed) minSpeed = maxSpeed - 1;
   motor_Start_Reverse();
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
   get_Distance();
   int cnt = millis();
   count = millis();
@@ -3261,8 +2794,8 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)  //Движение 
       return;
     }
     blink_Work();
-    if (millis() - count > timingBudget + 5) {
-      get_Distance();
+    get_Distance();
+    if (millis() - count > 50) {
       set_Position();
       currentAngle = as5600.readAngle();
       while (currentAngle > 4096 || currentAngle < 0) currentAngle = as5600.readAngle();
@@ -3318,21 +2851,30 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)  //Движение 
         cnt = millis();
       }
 
-      if (distance[0] >= maxSpeed * 15 && dist >= maxSpeed * 15) motor_Speed(maxSpeed);
-      else if (distance[0] <= 90 + chnlOffset) {
+      if (distance[0] >= maxSpeed * 15 && dist >= maxSpeed * 15) {
+        motor_Speed(maxSpeed);
+      } else if (distance[0] <= 90 + chnlOffset) {
+        motor_Stop();
         moove = 0;
         channelLength = currentPosition + shuttleLength;
-      } else if (dist >= distance[0] && distance[0] < maxSpeed * 15) motor_Speed((int)(distance[0] / 15));
-      else if (dist < maxSpeed * 15 && dist > minSpeed * 15) motor_Speed((int)(dist / 15));
-      else if (dist > 0 && dist <= minSpeed * 15) motor_Speed(minSpeed);
-      else if (dist <= 0) moove = 0;
+      } else if (dist >= distance[0] && distance[0] < maxSpeed * 15) {
+        motor_Speed((int)(distance[0] / 15));
+      } else if (dist < maxSpeed * 15 && dist > minSpeed * 15) {
+        motor_Speed((int)(dist / 15));
+      } else if (dist > 0 && dist <= minSpeed * 15) {
+        if (oldSpeed > minSpeed) {
+          motor_Speed(minSpeed);
+        } else if (oldSpeed) {
+          motor_Speed(oldSpeed);
+        } else motor_Speed(minSpeed);
+      } else if (dist <= 0) moove = 0;
       if (lifterUp && millis() - cnt > 3000 && dist < 30) {
         motor_Stop();
         return;
       } else if (millis() - cnt > 5000) {
         add_Error(12);
         motor_Stop();
-        if (lifterUp) lifter_Down();
+        lifter_Down();
         status = 5;
         return;
       }
@@ -3344,8 +2886,8 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)  //Движение 
   Serial1.println(dataStr);
 }
 
-void moove_Forward()  //Движение вперед до конца канала
-{
+// Движение вперед до конца канала
+void moove_Forward() {
   dataStr = "Start moove forward... Status = " + String(status);
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3355,16 +2897,6 @@ void moove_Forward()  //Движение вперед до конца канал
     stop_Before_Pallete_F();
     if (status != 5) lifter_Down();
     return;
-  }
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
   }
   get_Distance();
   oldChannelDistanse = distance[1];
@@ -3377,8 +2909,8 @@ void moove_Forward()  //Движение вперед до конца канал
       return;
     }
     blink_Work();
-    if (millis() - count > timingBudget + 5) {
-      get_Distance();
+    get_Distance();
+    if (millis() - count > 50) {
       set_Position();
       if (currentPosition < 0) currentPosition = 0;
       if (distance[1] >= 1500 && currentPosition < 3000 && currentPosition > 1500) {
@@ -3386,19 +2918,23 @@ void moove_Forward()  //Движение вперед до конца канал
         if (speed < 70) speed = 70;
       } else if (distance[1] >= 1500 && currentPosition <= 1500) {
         speed = 70;
-        if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
-      } else if (distance[1] >= 1500 && (currentPosition >= 3000)) speed = 100;
-      else if (distance[1] > 90 + chnlOffset && distance[1] < 1500) {
+        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
+      } else if (distance[1] >= 1500 && (currentPosition >= 3000)) {
+        speed = 100;
+      } else if (distance[1] > 90 + chnlOffset && distance[1] < 1500) {
         speed = distance[1] / 20;
-        if (oldSpeed > 10 && speed > oldSpeed && currentPosition <= 1500) speed = oldSpeed;
+        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= 1500) speed = oldSpeed;
         if (speed < 5) speed = 5;
         if (speed > 70) speed = 70;
         if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
       } else if (distance[1] <= 90 + chnlOffset) {
-        speed = 0;
-        moove = 0;
-        currentPosition = 60;
-        Serial1.println("End of channel, stop moove forward...");
+        if ((status == 6 || status == 21) && distance[1] > 80) speed = 5;
+        else {
+          speed = 0;
+          moove = 0;
+          currentPosition = 60;
+          Serial1.println("End of channel, stop moove forward...");
+        }
       }
       motor_Speed(speed);
       if (status == 5 || errorStatus[0]) return;
@@ -3408,8 +2944,8 @@ void moove_Forward()  //Движение вперед до конца канал
   motor_Stop();
 }
 
-void moove_Reverse()  //Движение назад до конца канала
-{
+// Движение назад до конца канала
+void moove_Reverse() {
   dataStr = "Start moove reverse... Status = " + String(status);
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3419,16 +2955,6 @@ void moove_Reverse()  //Движение назад до конца канала
     stop_Before_Pallete_R();
     if (status != 5) lifter_Down();
     return;
-  }
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
   }
   get_Distance();
   oldChannelDistanse = distance[0];
@@ -3442,8 +2968,8 @@ void moove_Reverse()  //Движение назад до конца канала
       return;
     }
     blink_Work();
+    get_Distance();
     if (millis() - count > timingBudget + 5) {
-      get_Distance();
       set_Position();
       if (currentPosition > channelLength - shuttleLength) channelLength = currentPosition + shuttleLength;
       if (distance[0] >= 1500 && currentPosition > channelLength - shuttleLength - 3000 && currentPosition < channelLength - shuttleLength - 1500) {
@@ -3451,11 +2977,11 @@ void moove_Reverse()  //Движение назад до конца канала
         if (speed < 70) speed = 70;
       } else if (distance[0] >= 1500 && currentPosition >= channelLength - shuttleLength - 1500) {
         speed = 70;
-        if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
+        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
       } else if (distance[0] >= 1500 && currentPosition < channelLength - shuttleLength - 3000) speed = 100;
       else if (distance[0] > 90 + chnlOffset && distance[0] < 1500) {
         speed = distance[0] / 20;
-        if (oldSpeed > 10 && speed > oldSpeed && currentPosition <= channelLength - shuttleLength - 100) speed = oldSpeed;
+        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= channelLength - shuttleLength - 100) speed = oldSpeed;
         if (speed < 5) speed = 5;
         if (speed > 70) speed = 70;
         if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
@@ -3476,8 +3002,8 @@ void moove_Reverse()  //Движение назад до конца канала
   motor_Stop();
 }
 
-void unload_Pallete()  //Выгрузка паллеты
-{
+// Выгрузка паллеты
+void unload_Pallete() {
   dataStr = "Start unloading pallete...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3487,220 +3013,103 @@ void unload_Pallete()  //Выгрузка паллеты
   int currentPalletePosition;
   int palleteLenght = 0;
   startDiff = 0;
-  if (lifterUp) lifter_Down();
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 30) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      if (fifoLifo) fifoLifo_Inverse();
-      return;
-    }
-  }
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 30) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      if (fifoLifo) fifoLifo_Inverse();
-      return;
-    }
-  }
+  lifter_Down();
   get_Distance();
   if (distance[0] < 90 + chnlOffset) startDiff = 20;
-  if (1) {
-    //Подъезжаем к паллету
-    if (distance[0] > shuttleLength && distance[2] > 750) {
-      moove_Before_Pallete_R();
-      frontBoard = 0;
-    }  // Если свободен канал вперед, едем к паллету
-    if (status == 5 || errorStatus[0]) {
-      oldSpeed = 0;
+
+  //Подъезжаем к паллету
+  if (distance[2] > 750) {  // Если свободен канал вперед, едем к паллету
+    moove_Before_Pallete_R();
+    frontBoard = 0;
+  }
+  if (status == 5 || errorStatus[0]) {  // Проверка на ошибки и стоп
+    oldSpeed = 0;
+    if (fifoLifo) fifoLifo_Inverse();
+    return;
+  }
+  moove = 1;
+  motor_Start_Reverse();
+  if (oldSpeed > 20 || distance[0] < 250 + chnlOffset) motor_Speed(oldSpeed);
+  else motor_Speed(28);
+  int cnt = millis();
+  while (moove) {                                           // Едем до определения поддона
+    if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {  // Проверка на ошибки и стоп
+      motor_Stop();
+      status = 5;
       if (fifoLifo) fifoLifo_Inverse();
       return;
     }
-    moove = 1;
-    motor_Start_Reverse();
-    if (oldSpeed > 20 || distance[0] < 250 + chnlOffset) motor_Speed(oldSpeed);
-    else motor_Speed(28);
-    int cnt = millis();
-    while (moove) {
-      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        if (fifoLifo) fifoLifo_Inverse();
-        return;
+    blink_Work();
+    get_Distance();
+    detect_Pallete();
+    if (detectPalleteR1 && detectPalleteR2 && !frontBoard) {  // Увидели переднюю доску и едем фиксированное расстояние
+      set_Position();
+      currentPalletePosition = currentPosition;
+      int dst = 600;
+      if (shuttleLength == 1200) dst = 670;
+      if (channelLength - currentPosition - shuttleLength < 1500 && shuttleLength == 800) dst = 500;
+      moove_Distance_R(dst, oldSpeed, 10);
+      frontBoard = 1;
+    } else if (detectPalleteR1 && detectPalleteR2 && frontBoard) {  // Определяем что доехали до последней доски поддона
+      uint8_t maxbb = 2 + (150 - maxSpeed) / 10; 
+      if (distance[0] < 300) maxbb += 3;
+      if (maxbb >= 3 && shuttleLength == 1200) {
+        maxbb -= 3;
       }
-      blink_Work();
-      detect_Pallete();
-      if (detectPalleteR1 && detectPalleteR2 && !frontBoard) {
-        set_Position();
-        currentPalletePosition = currentPosition;
-        int dst = 650;
-        if (channelLength - currentPosition - shuttleLength < 1500 && shuttleLength == 800) dst = 500;
-        moove_Distance_R(dst, oldSpeed, 10);
-        frontBoard = 1;
+      else if (maxbb < 3 && shuttleLength == 1200) {
+        maxbb = 0;
       }
-      delay(1);
-      detect_Pallete();
-      if (frontBoard && detectPalleteF1 && detectPalleteF2) {
-        moove = 0;
-        dataStr = "Back board detect...";
-        Serial.println(dataStr);
-        Serial1.println(dataStr);
-        if (!(detectPalleteR1 || detectPalleteR2)) {
-          motor_Stop();
-          Serial.println("Pallete error in BB...");
-          Serial1.println("Pallete error in BB...");
-          blink_Warning();
-          Serial2.print(shuttleNums[shuttleNum] + "wc004!");
-          moove_Forward();
-          status = 5;
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-          return;
-        }
-        int pause = 30 + (300 - 60 * oldSpeed / 2);
-        while (pause > 100) {
-          count = millis();
-          while (millis() - count < 100) {
-            blink_Work();
-            if (get_Cmd() == 5 || errorStatus[0]) {
-              status = 5;
-              return;
-            }
-          }
-          motor_Speed(oldSpeed);
-          pause -= 100;
-        }
+      for (uint8_t i = 0; i < maxbb; i++) {  // Задержка для доезда под доску
         count = millis();
-        while (millis() - count < pause) {
+        while (millis() - count < 100) {
           blink_Work();
           if (get_Cmd() == 5 || errorStatus[0]) {
             status = 5;
+            motor_Stop();
             return;
           }
         }
-        motor_Stop();
-      }
-      if (detectPalleteR1 && detectPalleteR2 && frontBoard && shuttleLength != 800) {
         set_Position();
         palleteLenght = abs(currentPalletePosition - currentPosition);
-        count = millis();
-        while (millis() - count < 250) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            return;
-          }
-        }
-        motor_Speed(oldSpeed);
-        count = millis();
-        while (millis() - count < 150) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            return;
-          }
-        }
-        moove = 0;
-        frontBoard = 0;
-        motor_Stop();
-      }
-      if (moove && millis() - count > timingBudget + 5) {
-        set_Position();
-        get_Distance();
-        count = millis();
-        while (millis() - count < timingBudget + 30) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            motor_Stop();
-            if (fifoLifo) fifoLifo_Inverse();
-            return;
-          }
-        }
-        get_Distance();
-        int spd = distance[0] / 23;
-        if (spd > oldSpeed) spd = oldSpeed;
-        if (spd < 5) spd = 5;
-        motor_Speed(spd);
         detect_Pallete();
-        if (distance[0] < 90 + chnlOffset && (detectPalleteR1 || detectPalleteR2) && (detectPalleteF1 || detectPalleteF2)) {
-          startDiff = 20;
-          motor_Stop();
-          moove = 0;
-        }
-        if ((millis() - cnt > 20000 || distance[0] < 90 + chnlOffset)) {
-          Serial.println("Pallete error...");
-          Serial1.println("Pallete error...");
-          motor_Stop();
-          Serial2.print(shuttleNums[shuttleNum] + "wc003!");
-          blink_Warning();
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-          if (fifoLifo) fifoLifo_Inverse();
-          return;
-        }
-        count = millis();
+        if (frontBoard && detectPalleteF1 && detectPalleteF2) {frontBoard = 0; i = maxbb - 1;}
+        motor_Speed(oldSpeed);
       }
-    }
-    if (frontBoard) moove = 1;
-    detect_Pallete();
-    if (detectPalleteF1 && detectPalleteF2) {
       moove = 0;
-      delay(0);
-      motor_Stop();
-    }
-    delay(10);
-    detect_Pallete();
-    if (detectPalleteF1 && detectPalleteF2) {
-      moove = 0;
-      delay(0);
-      motor_Stop();
-    }
-    while (moove) {
-      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
+      uint16_t pltMaxLn = shuttleLength - 20;
+      // if (shuttleLength == 800) pltMaxLn -= 20;
+      // else if (shuttleLength == 1000) pltMaxLn -= 100;
+      // else pltMaxLn -= 150;
+      if (frontBoard && palleteLenght >=pltMaxLn) {  // Если шаттл видит видит последнюю доску не увидев заднюю проехав больше своей длины то ой
         motor_Stop();
+        Serial.println("Pallete error in BB...");
+        Serial1.println("Pallete error in BB...");
+        blink_Warning();
+        Serial2.print(shuttleNums[shuttleNum] + "wc004!");
+        moove_Forward();
         status = 5;
+        Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+        return;
+      }
+      motor_Stop();
+    }
+    if (moove && millis() - count > 50) {  // Пока не нашли заднюю доску едем
+      set_Position();
+      int spd = distance[0] / 23;
+      if (spd > oldSpeed) spd = oldSpeed;
+      if (spd < 5) spd = 5;
+      motor_Speed(spd);
+      if ((millis() - cnt > 2000000 / maxSpeed || distance[0] < 80)) {
+        Serial.println("Pallete error...");
+        Serial1.println("Pallete error...");
+        motor_Stop();
+        Serial2.print(shuttleNums[shuttleNum] + "wc003!");
+        blink_Warning();
+        Serial2.print(shuttleNums[shuttleNum] + "wc000!");
         if (fifoLifo) fifoLifo_Inverse();
         return;
       }
-      blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
-        uint16_t dit = distance[0];
-        set_Position();
-        if (distance[0] < 90 + chnlOffset) {
-          motor_Stop();
-          channelLength = currentPosition + shuttleLength + distance[0] - 30;
-          status = 5;
-          moove = 0;
-          endOfChannel = 1;
-        } else {
-          uint8_t detect = 1;
-          detect_Pallete();
-          if (detectPalleteF1 && detectPalleteF2) {
-            moove = 0;
-            delay(0);
-            motor_Stop();
-            detect = 0;
-          }
-          delay(5);
-          detect_Pallete();
-          if (detectPalleteF1 && detectPalleteF2) {
-            moove = 0;
-            delay(0);
-            motor_Stop();
-          } else if (detect) {
-            set_Position();
-            motor_Speed(10);
-          }
-        }
-        count = millis();
-      }
+      count = millis();
     }
   }
 
@@ -3712,19 +3121,8 @@ void unload_Pallete()  //Выгрузка паллеты
   }
   //Поднимаем паллет
   get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      if (fifoLifo) fifoLifo_Inverse();
-      return;
-    }
-  }
-  get_Distance();
-  if (distance[3] < 900) {
-    if (lifterUp) lifter_Down();
+  if (distance[3] < 900) {  // Проверка что поддон есть куда везти
+    lifter_Down();
     Serial2.print(shuttleNums[shuttleNum] + "wc005!");
     blink_Warning();
     moove_Forward();
@@ -3732,17 +3130,17 @@ void unload_Pallete()  //Выгрузка паллеты
     status = 5;
     return;
   }
-  if (!lifterUp) lifter_Up();
+  lifter_Up();
   int pstn = 0;
   if (distance[2] < 600) pstn = currentPosition;
-  //Перехват если требуется
-  if (!frontBoard && !(detectPalleteF1 && detectPalleteF2)) {
-    int dist = 250;
-    if (shuttleLength == 1200) dist = 450;
-    //if (shuttleLength - palleteLenght > 350) dist = 400;
+  detect_Pallete();
+  if (!detectPalleteF1 || !detectPalleteF2) {  //Перехват если требуется
+    int dist = 100;
+    if (shuttleLength == 1000) dist = 250;
+    else if (shuttleLength == 1200) dist = 450;
     moove_Distance_F(dist, 12, 10);
     motor_Stop();
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     moove = 1;
     motor_Start_Reverse();
     while (moove) {
@@ -3753,8 +3151,8 @@ void unload_Pallete()  //Выгрузка паллеты
         return;
       }
       blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
+      get_Distance();
+      if (millis() - count > 50) {
         if (distance[0] < 90 + chnlOffset) {
           motor_Stop();
           channelLength = currentPosition + shuttleLength + distance[0] - 30;
@@ -3783,10 +3181,9 @@ void unload_Pallete()  //Выгрузка паллеты
       }
     }
     motor_Stop();
-    if (!lifterUp) lifter_Up();
+    lifter_Up();
   }
-  //Везем в начало канала
-  if (status == 7 || status == 22 || status == 23) {
+  if (status == 7 || status == 22 || status == 23) {  //Везем в начало канала
     moove_Before_Pallete_F();
     motor_Stop();
     if (distance[1] > 150) {
@@ -3798,13 +3195,11 @@ void unload_Pallete()  //Выгрузка паллеты
           return;
         }
         blink_Work();
-        if (millis() - count > timingBudget + 5) {
-          get_Distance();
-          count = millis();
-        }
+        get_Distance();
       }
       while (millis() - count < waitTime) {
         blink_Work();
+        get_Distance();
         if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
           motor_Stop();
           status = 5;
@@ -3814,7 +3209,7 @@ void unload_Pallete()  //Выгрузка паллеты
       }
       motor_Start_Forward();
       motor_Speed(20);
-      while (distance[1] > 90) {
+      while (distance[1] > 90 + chnlOffset) {
         if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
           motor_Stop();
           status = 5;
@@ -3822,11 +3217,19 @@ void unload_Pallete()  //Выгрузка паллеты
           return;
         }
         blink_Work();
-        if (millis() - count > timingBudget + 5) {
-          get_Distance();
-          if (distance[1] > 400 + chnlOffset) motor_Speed(20);
-          else if (distance[1] <= 400 + chnlOffset && distance[1] > 120 + chnlOffset) motor_Speed(distance[1] / 20);
-          else motor_Speed(6);
+        get_Distance();
+        if (millis() - count > 50) {
+          int spd = 0;
+          if (distance[1] > 400 + chnlOffset) spd = 20;
+          else if (distance[1] <= 400 + chnlOffset && distance[1] > 120 + chnlOffset) spd = distance[1] / 20;
+          else spd = 6;
+          if (distance[3] < 600 && distance[1] > distance[3]) {
+            spd = 0;
+            motor_Stop();
+          } else {
+            motor_Start_Forward();
+            motor_Speed(spd);
+          }
           set_Position();
           count = millis();
         }
@@ -3837,7 +3240,7 @@ void unload_Pallete()  //Выгрузка паллеты
   } else {
     stop_Before_Pallete_F();
   }
-  if (status == 5 || errorStatus[0]) {
+  if (status == 5 || errorStatus[0]) {  // Проверка на стоп и ошибки
     if (fifoLifo) fifoLifo_Inverse();
     return;
   }
@@ -3855,8 +3258,8 @@ void unload_Pallete()  //Выгрузка паллеты
   if (fifoLifo) fifoLifo_Inverse();
 }
 
-void load_Pallete()  //Загрузка паллеты
-{
+// Загрузка паллеты
+void load_Pallete() {
   dataStr = "Start loading pallete...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -3865,54 +3268,29 @@ void load_Pallete()  //Загрузка паллеты
   int currentPalletePosition;
   int palleteLenght = 0;
   startDiff = 0;
-  if (lifterUp) lifter_Down();
-  if (lastPalletePosition && lastPalletePosition < shuttleLength + 300) {
-    Serial2.print(shuttleNums[shuttleNum] + "wc003!");
+  lifter_Down();
+  if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) { // Проверка что канал не забит
+    Serial2.print(shuttleNums[shuttleNum] + "wc005!");
     blink_Warning();
     Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     status = 5;
     return;
   }
   get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
-  get_Distance();
   if (distance[1] < 90 + chnlOffset) startDiff = 20;
   detect_Pallete();
-  if (!((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 + chnlOffset && distance[3] > 400))  // Проверка шаттла на нахождение в начале канала, сработка паллетного датчика (паллет сверху) и свободное место впереди
-  {
+  if (!((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 450 + chnlOffset && distance[3] > 400)) { // Проверка шаттла на нахождение в начале канала, сработка паллетного датчика (паллет сверху) и свободное место впереди
+    frontBoard = 0;
     //Подъезжаем к паллету
-    if (distance[1] > shuttleLength && distance[3] > 750) {
+    if (distance[3] > 750) {  // Если есть куда ехать назад (канал свободен назад), едем к паллету
       moove_Before_Pallete_F();
-      frontBoard = 0;
-    }  // Если есть куда ехать назад (канал свободен назад), едем к паллету
-    else {
-      frontBoard = 0;
-      //oldSpeed = 28;
     }
     if (status == 5 || errorStatus[0]) {
       oldSpeed = 0;
       return;
     }
     //Двигаемся под паллет
-    if (distance[1] > 150) {
+    if (distance[1] > 150) {  // Стартуем если не в конце канала
       moove = 1;
       motor_Start_Forward();
       if (oldSpeed > 20) motor_Speed(oldSpeed);
@@ -3921,116 +3299,80 @@ void load_Pallete()  //Загрузка паллеты
     count = millis();
     uint8_t free = 0;
     int cnt = millis();
-    while (moove) {
-      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
+    while (moove) {  // Едем до определения поддона
+      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {  // Проверка на стоп и ошибки
         motor_Stop();
         status = 5;
         return;
       }
       blink_Work();
+      get_Distance();
       detect_Pallete();
-      if (detectPalleteF1 && detectPalleteF2 && !frontBoard) {
-        frontBoard = 1;
+      if (detectPalleteF1 && detectPalleteF2 && !frontBoard) {   // Увидели переднюю доску и едем фиксированное расстояние
         set_Position();
         currentPalletePosition = currentPosition;
-        moove_Distance_F(650, oldSpeed, 10);
+        int dst = 600;
+        if (shuttleLength == 1200) dst = 670;
+        
+        //if (channelLength - currentPosition - shuttleLength < 1500 && shuttleLength == 800) dst = 500;
+        moove_Distance_F(dst, oldSpeed, 10);
         frontBoard = 1;
+      } else if (detectPalleteF1 && detectPalleteF2 && frontBoard) {  // Определяем что доехали до последней доски короткого поддона
+        uint8_t maxbb = 3 + (150 - maxSpeed) / 10;
+        if (distance[1] < 300) maxbb += 3;
+            if (maxbb >= 3 && shuttleLength == 1200) {
+        maxbb -= 3;
+    }
+      else if (maxbb < 3 && shuttleLength == 1200) {
+       maxbb = 0;
       }
-      detect_Pallete();
-      if (frontBoard && detectPalleteR1 && detectPalleteR2) {
-        moove = 0;
-        dataStr = "Back board detect...";
-        Serial.println(dataStr);
-        Serial1.println(dataStr);
-        if (!(detectPalleteF1 || detectPalleteF2)) {
-          motor_Stop();
-          Serial.println("Pallete error in BB...");
-          Serial1.println("Pallete error in BB...");
-          Serial2.print(shuttleNums[shuttleNum] + "wc004!");
-          blink_Warning();
-          moove_Forward();
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-          status = 5;
-          return;
-        }
-        int pause = 30 + (300 - 60 * oldSpeed / 2);
-        while (pause > 100) {
+        for (uint8_t i = 0; i < maxbb; i++) {  // Задержка для доезда под доску
           count = millis();
           while (millis() - count < 100) {
             blink_Work();
             if (get_Cmd() == 5 || errorStatus[0]) {
               status = 5;
+              motor_Stop();
               return;
             }
           }
+          detect_Pallete();
+          set_Position();
+          palleteLenght = abs(currentPalletePosition - currentPosition);
+          if (frontBoard && detectPalleteR1 && detectPalleteR2) {frontBoard = 0; i = maxbb - 1;}
           motor_Speed(oldSpeed);
-          pause -= 100;
-        }
-        count = millis();
-        while (millis() - count < pause) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            return;
-          }
-        }
-        motor_Stop();
-      }
-      if (detectPalleteF1 && detectPalleteF2 && frontBoard && shuttleLength != 800) {
-        set_Position();
-        dataStr = "Channel dist = " + String(distance[1]) + "  pallete dist = " + String(distance[3]);
-        Serial.println(dataStr);
-        Serial1.println(dataStr);
-        palleteLenght = abs(currentPalletePosition - currentPosition);
-        //if (distance[1] < 300 || distance[3] < 700) {moove = 0; frontBoard = 0; motor_Stop();}
-        count = millis();
-        while (millis() - count < 250) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            motor_Stop();
-            return;
-          }
-        }
-        motor_Speed(oldSpeed);
-        count = millis();
-        while (millis() - count < 150) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            motor_Stop();
-            return;
-          }
         }
         moove = 0;
-        frontBoard = 0;
         motor_Stop();
-      }
-      if (moove && millis() - count > timingBudget + 5) {
-        set_Position();
-        get_Distance();
-        count = millis();
-        while (millis() - count < timingBudget + 30) {
-          blink_Work();
-          if (get_Cmd() == 5 || errorStatus[0]) {
-            status = 5;
-            motor_Stop();
-            if (fifoLifo) fifoLifo_Inverse();
-            return;
-          }
+        uint16_t pltMaxLn = shuttleLength - 20;
+        // if (shuttleLength == 800) pltMaxLn -= 20;
+        // else if (shuttleLength == 1000) pltMaxLn -= 100;
+        // else pltMaxLn -= 150;
+        if (frontBoard && palleteLenght >= pltMaxLn) {  // Если шаттл видит последнюю доску проехав свою длину и не увидел заднюю то ой
+          motor_Stop();
+          Serial.println("Pallete error in BB... PLenght = " + String(palleteLenght));
+          Serial1.println("Pallete error in BB... PLenght = " + String(palleteLenght));
+          blink_Warning();
+          Serial2.print(shuttleNums[shuttleNum] + "wc004!");
+          moove_Forward();
+          status = 5;
+          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+          return;
         }
-        get_Distance();
+      }
+      if (moove && millis() - count > 50) {
+        set_Position();
         int spd = distance[1] / 23;
         if (spd > oldSpeed) spd = oldSpeed;
         if (spd < 5) spd = 5;
         motor_Speed(spd);
         detect_Pallete();
-        if (distance[1] < 90 + chnlOffset && (detectPalleteR1 || detectPalleteR2) && (detectPalleteF1 || detectPalleteF2)) {
+        if (distance[1] < 80 && (detectPalleteR1 || detectPalleteR2) && (detectPalleteF1 || detectPalleteF2)) {
           startDiff = 20;
           motor_Stop();
           moove = 0;
         }
-        if ((millis() - cnt > 20000 || distance[1] < 90 + chnlOffset)) {
+        if ((millis() - cnt > 2000000 / maxSpeed || distance[1] < 80)) {
           Serial.println("Pallete error...");
           Serial1.println("Pallete error...");
           motor_Stop();
@@ -4042,27 +3384,61 @@ void load_Pallete()  //Загрузка паллеты
         count = millis();
       }
     }
-    if (frontBoard) moove = 1;
-    detect_Pallete();
-    if (detectPalleteR1 && detectPalleteR2) {
-      moove = 0;
-      motor_Stop();
+  } else if ((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 + chnlOffset && distance[2] <= interPalleteDistance + 600) {
+    motor_Stop();
+    Serial2.print(shuttleNums[shuttleNum] + "wc005!");
+    blink_Warning();
+    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+    status = 5;
+    return;
+  } else if ((detectPalleteR1 || detectPalleteR2) && !(detectPalleteF1 || detectPalleteF2)) {
+    uint8_t mv = 1;
+    while (mv) {
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        status = 5;
+        motor_Stop();
+        return;
+      }
+      moove_Distance_R(10, 10, 10);
+      get_Distance();
+      detect_Pallete();
+      if (distance[1] < 70 || detectPalleteR1 || detectPalleteR2) mv = 0;
     }
-    delay(10);
-    detect_Pallete();
-    if (detectPalleteR1 && detectPalleteR2) {
-      moove = 0;
+    get_Distance();
+    if (distance[3] < 500 && distance[3] < distance[1]) {
       motor_Stop();
+      Serial2.print(shuttleNums[shuttleNum] + "wc005!");
+      blink_Warning();
+      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+      status = 5;
+      return;
     }
+    frontBoard = 0;
+  } else if (detectPalleteF1 && detectPalleteF2) frontBoard = 0;
+  set_Position();
+  if (status == 5 || errorStatus[0]) return;
+  //Поднимаем паллет
+  lifter_Up();
+  //Перехват если требуется
+  detect_Pallete();
+  if (!detectPalleteR1 || !detectPalleteR2) {
+    int dist = 100;
+    if (shuttleLength == 1000) dist = 250;
+    else if (shuttleLength == 1200) dist = 450;
+    moove_Distance_R(dist, 15, 10);
+    motor_Stop();
+    lifter_Down();
+    motor_Start_Forward();
+    moove = 1;
     while (moove) {
-      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
+      if (get_Cmd() == 5 || errorStatus[0] || status == 5) {
         motor_Stop();
         status = 5;
         return;
       }
       blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
+      get_Distance();
+      if (millis() - count > 50) {
         if (distance[1] < 90 + chnlOffset) {
           motor_Stop();
           status = 5;
@@ -4076,103 +3452,20 @@ void load_Pallete()  //Загрузка паллеты
             detect = 0;
           }
           delay(5);
-          detect_Pallete();
           if (detectPalleteR1 && detectPalleteR2) {
             moove = 0;
             motor_Stop();
+            detect = 0;
           } else if (detect) {
             set_Position();
             motor_Speed(10);
           }
         }
         count = millis();
-        set_Position();
-      }
-    }
-  } else if ((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 + chnlOffset && distance[2] <= interPalleteDistance + 600) {
-    motor_Stop();
-    Serial2.print(shuttleNums[shuttleNum] + "wc003!");
-    blink_Warning();
-    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-    status = 5;
-    return;
-  } else if ((detectPalleteR1 || detectPalleteR2) && !(detectPalleteF1 || detectPalleteF2)) {
-    while (detectPalleteR1 || detectPalleteR2) {
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        status = 5;
-        motor_Stop();
-        return;
-      }
-      moove_Distance_R(10, 10, 10);
-      detect_Pallete();
-    }
-    get_Distance();
-    count = millis();
-    while (millis() - count < timingBudget + 5) {
-      blink_Work();
-      if (get_Cmd() == 5 || errorStatus[0]) {
-        status = 5;
-        motor_Stop();
-        return;
-      }
-    }
-    get_Distance();
-    if (distance[3] < 500) {
-      motor_Stop();
-      Serial2.print(shuttleNums[shuttleNum] + "wc005!");
-      blink_Warning();
-      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-      status = 5;
-      return;
-    }
-    frontBoard = 0;
-  } else if (detectPalleteF1 && detectPalleteF2) frontBoard = 0;
-  set_Position();
-
-
-  if (status == 5 || errorStatus[0]) return;
-  //Поднимаем паллет
-  if (!lifterUp) lifter_Up();
-  //Перехват если требуется
-  detect_Pallete();
-  if (!frontBoard && !(detectPalleteR1 && detectPalleteR2)) {
-    int dist = 100;
-    if (shuttleLength == 1000) dist = 250;
-    else if (shuttleLength == 1200) dist = 450;
-    moove_Distance_R(dist, 15, 10);
-    motor_Stop();
-    if (lifterUp) lifter_Down();
-    motor_Start_Forward();
-    moove = 1;
-    while (moove) {
-      if (get_Cmd() == 5 || errorStatus[0] || status == 5) {
-        motor_Stop();
-        status = 5;
-        return;
-      }
-      blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        uint8_t detect = 1;
-        detect_Pallete();
-        if (detectPalleteR1 && detectPalleteR2) {
-          moove = 0;
-          motor_Stop();
-          detect = 0;
-        }
-        delay(5);
-        if (detectPalleteR1 && detectPalleteR2) {
-          moove = 0;
-          motor_Stop();
-          detect = 0;
-        } else if (detect) {
-          set_Position();
-          motor_Speed(10);
-        }
-        count = millis();
       }
     }
     motor_Stop();
-    if (!lifterUp) lifter_Up();
+    lifter_Up();
     diffPallete = 0;
   }
   //Везем на выгрузку
@@ -4191,27 +3484,22 @@ void load_Pallete()  //Загрузка паллеты
   }
 }
 
-void single_Load()  // Единичная загрузка
-{
+// Единичная загрузка
+void single_Load() {
   moove_Forward();
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
+  if (status == 5 || errorStatus[0]) return;
   get_Distance();
   detect_Pallete();
-  if (detectPalleteF1 && detectPalleteF2) load_Pallete();
+  if ((detectPalleteF1 && detectPalleteF2 && shuttleLength != 800) || (detectPalleteF1 && detectPalleteF2 && detectPalleteR1 && detectPalleteR2)) load_Pallete();
+  else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
+    Serial2.print(shuttleNums[shuttleNum] + "wc004!");
+    blink_Warning();
+    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+  }
   else {
     motor_Start_Reverse();
     motor_Speed(10);
-    //Serial1.println("dist = " + String(distance[0]) + " " + String(distance[1]) + " plt: " + String(detectPalleteF1) + " " + String(detectPalleteF2));
-    while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 260 + chnlOffset) {
+    while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
       if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
         motor_Stop();
         status = 5;
@@ -4219,33 +3507,37 @@ void single_Load()  // Единичная загрузка
       }
       blink_Work();
       detect_Pallete();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
+      get_Distance();
+      if (millis() - count > 50) {
         set_Position();
         motor_Speed(10);
         count = millis();
-        //Serial1.println("dist = " + String(distance[0]) + " plt: " + String(detectPalleteF1) + " " + String(detectPalleteF2));
       }
     }
     motor_Stop();
-    if (detectPalleteF1 && detectPalleteF2) {
+    if ((detectPalleteF1 && detectPalleteF2 && shuttleLength != 800) || (detectPalleteF1 && detectPalleteF2 && detectPalleteR1 && detectPalleteR2)) {
       diffPallete = 10;
       load_Pallete();
+    } else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
+      Serial2.print(shuttleNums[shuttleNum] + "wc004!");
+      blink_Warning();
+      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     } else {
       Serial2.print(shuttleNums[shuttleNum] + "wc003!");
       blink_Warning();
       Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+      Serial1.println("Single load fail...");
     }
   }
   moove_Forward();
 }
 
-void pallete_Counting_F()  // Пересчет паллет
-{
+// Пересчет паллет
+void pallete_Counting_F() {
   dataStr = "Start counting pallete forward...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
-  if (lifterUp) lifter_Down();
+  lifter_Down();
   palleteCount = 0;
   //Двигаемся в начало канала
   moove_Forward();
@@ -4254,16 +3546,6 @@ void pallete_Counting_F()  // Пересчет паллет
   if ((detectPalleteF1 && detectPalleteF2) || (detectPalleteR1 && detectPalleteR2)) palleteOnStart++;
   if (status == 5 || errorStatus[0]) return;
   //Теперь к первому паллету в загрузке
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
   get_Distance();
   detect_Pallete();
   if (distance[2] > 1000 && !(detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2)) {
@@ -4276,16 +3558,6 @@ void pallete_Counting_F()  // Пересчет паллет
   }
   //Запускаем цикл пересчета
   get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
-  get_Distance();
   motor_Start_Reverse();
   motor_Speed(28);
   uint8_t detect = 0;
@@ -4293,7 +3565,6 @@ void pallete_Counting_F()  // Пересчет паллет
   uint8_t boardCount = 0;
   int count = millis();
   int countBoard = count;
-  int measuringCount = count;
   int boardPosition = 0;
   uint8_t moove = 1;
   while (moove) {
@@ -4304,6 +3575,7 @@ void pallete_Counting_F()  // Пересчет паллет
       return;
     }
     blink_Work();
+    get_Distance();
     detect_Pallete();
     if (detectPalleteR1 && detectPalleteR2) {
       boardCount++;
@@ -4322,40 +3594,42 @@ void pallete_Counting_F()  // Пересчет паллет
       }
 
       while (moove && (detectPalleteR1 || detectPalleteR2)) {
-        count = millis();
         blink_Work();
         if (get_Cmd() == 5 || errorStatus[0]) {
           status = 5;
           motor_Stop();
           return;
         }
+        get_Distance();
         detect_Pallete();
-        if (millis() - measuringCount > timingBudget + 5) {
-          get_Distance();
-          if (distance[0] <= 560 + chnlOffset && distance[0] > 120 + chnlOffset) motor_Speed((int)(distance[0] / 20));
-          else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) motor_Speed(6);
-          else if (distance[0] <= 80 + chnlOffset) {
+        if (millis() - count > 50) {
+          int spd = oldSpeed;
+          if (distance[0] <= 560 + chnlOffset && distance[0] > 120 + chnlOffset) spd = (distance[0] / 20);
+          else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) spd = 6;
+          else if (distance[0] <= 100 + chnlOffset) {
             motor_Stop();
             moove = 0;
             Serial1.println("End channel on counting with pallete ...");
-          } else motor_Speed(28);
+          } else spd = 28;
+          if (moove) motor_Speed(spd);
           set_Position();
-          measuringCount = millis();
+          count = millis();
         }
       }
     }
 
-    if (millis() - measuringCount > timingBudget + 5 && moove) {
-      get_Distance();
-      if (distance[0] + chnlOffset <= 560 && distance[0] > 120 + chnlOffset) motor_Speed((int)(distance[0] / 20));
-      else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) motor_Speed(6);
-      else if (distance[0] <= 80 + chnlOffset) {
+    if (millis() - count > 50 && moove) {
+      int spd = oldSpeed;
+      if (distance[0] <= 560 + chnlOffset && distance[0] > 120 + chnlOffset) spd = (distance[0] / 20);
+      else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) spd = 6;
+      else if (distance[0] <= 100 + chnlOffset) {
         motor_Stop();
         moove = 0;
-        Serial1.println("End channel on counting without pallete ...");
-      } else motor_Speed(28);
+        Serial1.println("End channel on counting with pallete ...");
+      } else spd = 28;
+      if (moove) motor_Speed(spd);
       set_Position();
-      measuringCount = millis();
+      count = millis();
     }
   }
   palleteCount = lrint((float)boardCount / 3) + palleteOnStart;
@@ -4364,8 +3638,8 @@ void pallete_Counting_F()  // Пересчет паллет
   return;
 }
 
-void pallete_Compacting_F()  // Уплотнение вперед
-{
+// Уплотнение вперед
+void pallete_Compacting_F() {
   dataStr = "Start compacting pallete forward...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -4373,30 +3647,24 @@ void pallete_Compacting_F()  // Уплотнение вперед
   moove_Reverse();
   if (status == 5 || errorStatus[0]) return;
   get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      return;
-    }
-  }
-  get_Distance();
   status = 14;
   detect_Pallete();
-  while (distance[3] < 1000 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2)) {
-    moove_Distance_F(10, 25, 25);
+  while (distance[3] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] > 100 + chnlOffset) {
+    moove_Distance_F(100, 25, 25);
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
       status = 5;
       return;
     }
     status = 14;
-    motor_Speed(oldSpeed);
+    get_Distance();
+    if (distance[1] / 20 < oldSpeed) motor_Speed(distance[1] / 20);
+    else motor_Speed(oldSpeed);
   }
   while (status != 5) {
     blink_Work();
     load_Pallete();
+    if (distance[1] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
       status = 5;
@@ -4407,39 +3675,33 @@ void pallete_Compacting_F()  // Уплотнение вперед
   }
 }
 
-void pallete_Compacting_R()  // Уплотнение назад
-{
+// Уплотнение назад
+void pallete_Compacting_R() {
   dataStr = "Start compacting pallete reverse...";
   Serial.println(dataStr);
   Serial1.println(dataStr);
   moove_Forward();
   if (status == 5 || errorStatus[0]) return;
   get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      return;
-    }
-  }
-  get_Distance();
   status = 15;
   detect_Pallete();
-  while (distance[2] < 1000 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2)) {
-    moove_Distance_R(10, 25, 25);
+  while (distance[2] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[0] > 100 + chnlOffset) {
+    moove_Distance_R(100, 25, 25);
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
       status = 5;
       return;
     }
     status = 15;
-    motor_Speed(oldSpeed);
+    get_Distance();
+    if (distance[0] / 20 < oldSpeed) motor_Speed(distance[0] / 20);
+    else motor_Speed(oldSpeed);
   }
   status = 15;
   while (status != 5) {
     blink_Work();
     unload_Pallete();
+    if (distance[0] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
       status = 5;
@@ -4452,30 +3714,22 @@ void pallete_Compacting_R()  // Уплотнение назад
   firstPalletePosition = 0;
 }
 
-void long_Load()  // Продолжительная загрузка
-{
+// Продолжительная загрузка
+void long_Load() {
   dataStr = "Starting continuos load...";
+  status = 21;
+  moove_Forward();
+  if (status == 5 || errorStatus[0]) return;
   status = 21;
   Serial.println(dataStr);
   Serial1.println(dataStr);
-  if (lifterUp) lifter_Down();
-  get_Distance();
-  count = millis();
-  while (millis() - count < timingBudget + 5) {
-    blink_Work();
-    if (get_Cmd() == 5 || errorStatus[0]) {
-      status = 5;
-      motor_Stop();
-      return;
-    }
-  }
+  lifter_Down();
   get_Distance();
   detect_Pallete();
   if (!(detectPalleteF1 && detectPalleteF2)) {
     motor_Start_Reverse();
     motor_Speed(10);
-    //Serial1.println("dist = " + String(distance[0]) + " " + String(distance[1]) + " plt: " + String(detectPalleteF1) + " " + String(detectPalleteF2));
-    while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 260 + chnlOffset) {
+    while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
       if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
         motor_Stop();
         status = 5;
@@ -4483,12 +3737,11 @@ void long_Load()  // Продолжительная загрузка
       }
       blink_Work();
       detect_Pallete();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
+      get_Distance();
+      if (millis() - count > 50) {
         set_Position();
         motor_Speed(10);
         count = millis();
-        //Serial1.println("dist = " + String(distance[0]) + " plt: " + String(detectPalleteF1) + " " + String(detectPalleteF2));
       }
     }
     motor_Stop();
@@ -4500,16 +3753,13 @@ void long_Load()  // Продолжительная загрузка
       motor_Stop();
       count = millis();
       while (wait) {
-        blink_Work();
         if (get_Cmd() == 5 || errorStatus[0]) {
           status = 5;
           Serial2.print(shuttleNums[shuttleNum] + "wc000!");
           return;
         }
-        if (millis() - count > timingBudget + 5) {
-          get_Distance();
-          count = millis();
-        }
+        blink_Work();
+        get_Distance();
         detect_Pallete();
         if ((detectPalleteF1 && detectPalleteF2) || distance[3] < 1000) {
           Serial2.print(shuttleNums[shuttleNum] + "wc000!");
@@ -4517,7 +3767,7 @@ void long_Load()  // Продолжительная загрузка
           while (millis() - count < 10000) {
             if (get_Cmd() == 5 || errorStatus[0]) {
               status = 5;
-              Serial2.print(shuttleNums[shuttleNum] + "wc000!");
+              get_Distance();
               return;
             }
             blink_Work();
@@ -4531,18 +3781,13 @@ void long_Load()  // Продолжительная загрузка
   while (1) {
     status = 21;
     load_Pallete();
-    if (lastPalletePosition && lastPalletePosition < shuttleLength + 300) {
-      Serial2.print(shuttleNums[shuttleNum] + "wc003!");
+    if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) {
+      Serial2.print(shuttleNums[shuttleNum] + "wc005!");
       blink_Warning();
       Serial2.print(shuttleNums[shuttleNum] + "wc000!");
       status = 0;
       return;
     }
-    /*get_Distance();
-    count = millis();
-    while (millis() - count < timingBudget + 5) {blink_Work(); if (get_Cmd() == 5) {status = 5; motor_Stop(); return;}}
-    get_Distance();
-    if ((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 && distance[2] <= interPalleteDistance + 600) return;*/
     uint8_t wait = 0;
     get_Distance();
     if (distance[1] < 90 + chnlOffset && !errorStatus[0]) {
@@ -4554,15 +3799,12 @@ void long_Load()  // Продолжительная загрузка
     else status = 21;
     count = millis();
     while (wait) {
-      blink_Work();
       if (get_Cmd() == 5 || errorStatus[0]) {
         status = 5;
         return;
       }
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
-        count = millis();
-      }
+      blink_Work();
+      get_Distance();
       detect_Pallete();
       if ((detectPalleteF1 && detectPalleteF2) || distance[3] < 1000) {
         count = millis();
@@ -4579,8 +3821,8 @@ void long_Load()  // Продолжительная загрузка
   }
 }
 
-void long_Unload()  // Продолжительная выгрузка
-{
+// Продолжительная выгрузка
+void long_Unload() {
   uint16_t oldInterPalleteDistance = interPalleteDistance;
   interPalleteDistance = 700;
   dataStr = "Starting continuos unload...";
@@ -4617,10 +3859,7 @@ void long_Unload()  // Продолжительная выгрузка
         return;
       }
       blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
-        count = millis();
-      }
+      get_Distance();
     }
     if (distance[1] > 700) {
       count = millis();
@@ -4633,8 +3872,8 @@ void long_Unload()  // Продолжительная выгрузка
           return;
         }
         blink_Work();
-        if (millis() - count > timingBudget + 5) {
-          get_Distance();
+        get_Distance();
+        if (millis() - count > 50) {
           if (distance[1] > 400 + chnlOffset) motor_Speed(20);
           else if (distance[1] <= 400 + chnlOffset && distance[1] > 120 + chnlOffset) motor_Speed(distance[1] / 20);
           else motor_Speed(6);
@@ -4643,7 +3882,7 @@ void long_Unload()  // Продолжительная выгрузка
       }
     }
     motor_Stop();
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     sensor_Report();
     moove_Distance_R(shuttleLength + 500, 80, 80);
   }
@@ -4651,8 +3890,8 @@ void long_Unload()  // Продолжительная выгрузка
   if (fifoLifo) fifoLifo_Inverse();
 }
 
-void long_Unload(uint8_t num)  // Продолжительная выгрузка заданного количества паллет
-{
+// Продолжительная выгрузка заданного количества паллет
+void long_Unload(uint8_t num) {
   uint16_t oldInterPalleteDistance = interPalleteDistance;
   interPalleteDistance = 700;
   dataStr = "Starting continuos unload...";
@@ -4673,17 +3912,7 @@ void long_Unload(uint8_t num)  // Продолжительная выгрузк�
     unload_Pallete();
     if (fifoLifo) fifoLifo_Inverse();
     get_Distance();
-    while (millis() - count < timingBudget + 5) {
-      if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
-        motor_Stop();
-        status = 5;
-        interPalleteDistance = oldInterPalleteDistance;
-        if (fifoLifo) fifoLifo_Inverse();
-        return;
-      }
-      blink_Work();
-    }
-    get_Distance();
+    blink_Work();
     if (distance[0] < 200 + chnlOffset && !errorStatus[0]) {
       detect = 0;
       status = 23;
@@ -4705,13 +3934,9 @@ void long_Unload(uint8_t num)  // Продолжительная выгрузк�
         return;
       }
       blink_Work();
-      if (millis() - count > timingBudget + 5) {
-        get_Distance();
-        count = millis();
-      }
+      get_Distance();
     }
     if (distance[1] > 700) {
-      count = millis();
       while (distance[1] > 90) {
         if (get_Cmd() == 5 || status == 5 || errorStatus[0]) {
           motor_Stop();
@@ -4721,8 +3946,8 @@ void long_Unload(uint8_t num)  // Продолжительная выгрузк�
           return;
         }
         blink_Work();
-        if (millis() - count > timingBudget + 5) {
-          get_Distance();
+        get_Distance();
+        if (millis() - count > 50) {
           if (distance[1] > 400 + chnlOffset) motor_Speed(20);
           else if (distance[1] <= 400 + chnlOffset && distance[1] > 120 + chnlOffset) motor_Speed(distance[1] / 20);
           else motor_Speed(6);
@@ -4732,7 +3957,7 @@ void long_Unload(uint8_t num)  // Продолжительная выгрузк�
     }
 
     motor_Stop();
-    if (lifterUp) lifter_Down();
+    lifter_Down();
     num--;
     UPQuant--;
     status = 23;
@@ -4743,32 +3968,33 @@ void long_Unload(uint8_t num)  // Продолжительная выгрузк�
   if (fifoLifo) fifoLifo_Inverse();
 }
 
-void moove_Right()  // Движение назад в ручном режиме
-{
-  Serial.println("Manual moove right...");
-  Serial1.println("Manual moove right...");
+// Движение назад в ручном режиме
+void moove_Right() {
+  dataStr = "Manual moove right...";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
   uint8_t manualCount = 6;
   uint8_t moove = 1;
   motor_Start_Reverse();
   int cnt = millis();
-  int cnt2 = millis();
   get_Distance();
   pingCount = millis();
   motor_Speed(manualCount);
-  while (moove) {
+  while (moove) {  // Едем пока держат кнопку
     uint8_t stTmp = 0;
     if (Serial2.available()) {
       stTmp = get_Cmd_Manual();
-      if (stTmp == 5 || errorStatus[0] || stTmp == 55) {
+      if (stTmp == 5 || errorStatus[0] || stTmp == 55) {  //Проверка на стоп и ошибки
         motor_Stop();
         Serial.println("Manual stop...");
         Serial1.println("Manual stop...");
         return;
       } else if (stTmp == 100) pingCount = millis();
     }
-    if (millis() - cnt > timingBudget + 5) {
-      get_Distance();
-      if (manualCount < 60 && millis() - cnt2 > 500) manualCount += 3;
+    blink_Work();
+    get_Distance();
+    if (millis() - cnt > 50) {
+      if (manualCount < 60)  manualCount += 3;
       cnt = millis();
       if (sensorOff) motor_Speed(manualCount);
       else {
@@ -4784,12 +4010,12 @@ void moove_Right()  // Движение назад в ручном режиме
       set_Position();
       while (Serial1.available()) Serial1.read();
     }
-    blink_Work();
     if (millis() - pingCount > 500) {
       motor_Stop();
       moove = 0;
-      Serial.println("End of cycle, stop...");
-      Serial1.println("End of cycle, stop...");
+      dataStr = "No ping, stop...";
+      Serial.println(dataStr);
+      Serial1.println(dataStr);
       return;
     }
   }
@@ -4798,32 +4024,33 @@ void moove_Right()  // Движение назад в ручном режиме
   return;
 }
 
-void moove_Left()  // Движение назад в ручном режиме
-{
-  Serial.println("Manual moove left...");
-  Serial1.println("Manual moove left...");
+// Движение назад в ручном режиме
+void moove_Left() {
+  dataStr = "Manual moove left...";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
   uint8_t manualCount = 6;
   uint8_t moove = 1;
   motor_Start_Forward();
   int cnt = millis();
-  int cnt2 = millis();
   get_Distance();
   pingCount = millis();
   motor_Speed(manualCount);
-  while (moove) {
+  while (moove) {  // Едем пока держат кнопку
     uint8_t stTmp = 0;
     if (Serial2.available()) {
       stTmp = get_Cmd_Manual();
-      if (stTmp == 5 || errorStatus[0] || stTmp == 55) {
+      if (stTmp == 5 || errorStatus[0] || stTmp == 55) {  //Проверка на стоп и ошибки
         motor_Stop();
         Serial.println("Manual stop...");
         Serial1.println("Manual stop...");
         return;
       } else if (stTmp == 100) pingCount = millis();
     }
-    if (millis() - cnt > timingBudget + 5) {
-      get_Distance();
-      if (manualCount < 60 && millis() - cnt2 > 500) manualCount += 3;
+    blink_Work();
+    get_Distance();
+    if (millis() - cnt > 50) {
+      if (manualCount < 60) manualCount += 3;
       cnt = millis();
       if (sensorOff) motor_Speed(manualCount);
       else {
@@ -4839,12 +4066,12 @@ void moove_Left()  // Движение назад в ручном режиме
       set_Position();
       while (Serial1.available()) Serial1.read();
     }
-    blink_Work();
     if (millis() - pingCount > 500) {
       motor_Stop();
       moove = 0;
-      Serial.println("End of cycle, stop...");
-      Serial1.println("End of cycle, stop...");
+      dataStr = "No ping, stop...";
+      Serial.println(dataStr);
+      Serial1.println(dataStr);
       return;
     }
   }
@@ -4853,12 +4080,137 @@ void moove_Left()  // Движение назад в ручном режиме
   return;
 }
 
+// Демо режим
+void demo_Mode() {
+  dataStr = "Start DEMO mode...";
+  Serial.println(dataStr);
+  Serial1.println(dataStr);
+  lifter_Down();
+  moove_Reverse();
+  lastPalletePosition = 0;
+  if (status == 5 || errorStatus[0]) return;
+  get_Distance();
+  detect_Pallete();
+  uint8_t moove = 0;
+  while (distance[3] < 700 && distance[1] > 100 + chnlOffset) {
+    moove_Distance_F(100, 25, 25);
+    if (status == 5 || errorStatus[0]) {
+      motor_Stop();
+      return;
+    }
+    get_Distance();
+    if (distance[1] / 20 < oldSpeed) motor_Speed(distance[1] / 20);
+    else motor_Speed(oldSpeed);
+    moove = 1;
+  }
+  while (1) {
+    if (get_Cmd() == 5 || errorStatus[0]) {
+      motor_Stop();
+      status = 5;
+      return;
+    }
+    while (status != 5) {
+      count = millis();
+      while (millis() - count < 1000 && !moove) {
+        if (get_Cmd() == 5 || errorStatus[0]) {
+          motor_Stop();
+          status = 5;
+          return;
+        }
+        blink_Work();
+        get_Distance();
+      }
+      moove = 0;
+      load_Pallete();
+      if (errorStatus[0]) {
+        motor_Stop();
+        return;
+      }
+      sensor_Report();
+      if (distance[1] < 200) status = 5;
+    }
+    if (status == 5 && distance[1] > 200 || errorStatus[0]) {
+      motor_Stop();
+      return;
+    } else status = 11;
+    motor_Stop();
+    read_BatteryCharge();
+    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
+      lifter_Down();
+      moove_Forward();
+      status = 5;
+      add_Error(11);
+      return;
+    }
+    count = millis();
+    while (millis() - count < 2000) {
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        motor_Stop();
+        status = 5;
+        return;
+      }
+      blink_Work();
+      get_Distance();
+    }
+    sensor_Report();
+    if (status == 5 || errorStatus[0]) return;
+    while (status != 5) {
+      count = millis();
+      while (millis() - count < 1000) {
+        if (get_Cmd() == 5 || errorStatus[0]) {
+          motor_Stop();
+          status = 5;
+          return;
+        }
+        blink_Work();
+        get_Distance();
+      }
+      unload_Pallete();
+      sensor_Report();
+      firstPalletePosition = currentPosition;
+      if (errorStatus[0]) {
+        motor_Stop();
+        return;
+      }
+      if (distance[0] < 200) status = 5;
+    }
+    firstPalletePosition = 0;
+    if (!errorStatus[0] && status == 5 && distance[1] < 200) status = 11;
+    else if (status == 5 && distance[0] > 200 || errorStatus[0]) {
+      motor_Stop();
+      return;
+    } else status = 11;
+    motor_Stop();
+    count = millis();
+    read_BatteryCharge();
+    if (batteryCharge > 0 && batteryCharge <= minBattCharge) {
+      lifter_Down();
+      moove_Forward();
+      status = 5;
+      add_Error(11);
+      return;
+    }
+    count = millis();
+    while (millis() - count < 2000) {
+      if (get_Cmd() == 5 || errorStatus[0]) {
+        motor_Stop();
+        status = 5;
+        return;
+      }
+      blink_Work();
+      get_Distance();
+    }
+    sensor_Report();
+    if (status == 5 || errorStatus[0]) return;
+  }
+}
+
 #pragma endregion
 
 #pragma region Технические функции
 
-void calibrate_Encoder_R()  //Процедура калибровки энкодера вперед
-{
+// Процедура калибровки энкодера вперед
+void calibrate_Encoder_R() {
   dataStr = "Start calibrating encoder to Reverse";
   Serial.println(dataStr);
   as5600.readAngle();
@@ -4866,10 +4218,6 @@ void calibrate_Encoder_R()  //Процедура калибровки энкод
 
   if (inverse) {
     inverse = 0;
-    sensor_channel_f = &sens_chnl_f;
-    sensor_channel_r = &sens_chnl_r;
-    sensor_pallete_F = &sens_plt_F;
-    sensor_pallete_R = &sens_plt_R;
   }
   int summ = 0;
 
@@ -4877,10 +4225,6 @@ void calibrate_Encoder_R()  //Процедура калибровки энкод
   moove_Forward();
   if (status == 5 || errorStatus[0]) {
     if (inverse) {
-      sensor_channel_f = &sens_chnl_r;
-      sensor_channel_r = &sens_chnl_f;
-      sensor_pallete_F = &sens_plt_R;
-      sensor_pallete_R = &sens_plt_F;
     }
     return;
   }
@@ -4905,7 +4249,7 @@ void calibrate_Encoder_R()  //Процедура калибровки энкод
   uint8_t i = 0;
   cnt = millis();
   while (i < 8) {
-    delay(5);
+    delay(3);
     if (millis() - count > 100) {
       motor_Speed(5);
       count = millis();
@@ -4917,29 +4261,24 @@ void calibrate_Encoder_R()  //Процедура калибровки энкод
       cnt = millis();
       i++;
     }
+    IWatchdog.reload();
+    blink_Work();
   }
-  IWatchdog.reload();
   motor_Stop();
 
   //Выводим данные
   Serial1.print("Calibrate_R data: ");
   for (i = 0; i < 8; i++) {
     Serial1.print(String(calibrateEncoder_R[i]) + "/");
-    calibrateEncoder_R[i] = lrint(40.5 + calibrateEncoder_R[i] * 320 / summ) / 2;
+    calibrateEncoder_R[i] = lrint(weelDia * 3.2 / 8  + calibrateEncoder_R[i] * weelDia * 3.2 / summ) / 2;
     Serial1.print(String(calibrateEncoder_R[i]) + " ");
     eepromData.calibrateEncoder_R[i] = calibrateEncoder_R[i];
   }
   Serial1.println(" ");
-  if (inverse) {
-    sensor_channel_f = &sens_chnl_r;
-    sensor_channel_r = &sens_chnl_f;
-    sensor_pallete_F = &sens_plt_R;
-    sensor_pallete_R = &sens_plt_F;
-  }
 }
 
-void calibrate_Encoder_F()  //Процедура калибровки энкодера вперед
-{
+// Процедура калибровки энкодера вперед
+void calibrate_Encoder_F() {
   dataStr = "Start calibrating encoder to Reverse";
   Serial.println(dataStr);
   Serial1.println(dataStr);
@@ -4954,22 +4293,12 @@ void calibrate_Encoder_F()  //Процедура калибровки энкод
   delay(50);
   if (inverse) {
     inverse = 0;
-    sensor_channel_f = &sens_chnl_f;
-    sensor_channel_r = &sens_chnl_r;
-    sensor_pallete_F = &sens_plt_F;
-    sensor_pallete_R = &sens_plt_R;
   }
   int summ = 0;
 
   //Двигаемся к концу канала
   moove_Distance_R(2000);
   if (status == 5 || errorStatus[0]) {
-    if (inverse) {
-      sensor_channel_f = &sens_chnl_r;
-      sensor_channel_r = &sens_chnl_f;
-      sensor_pallete_F = &sens_plt_R;
-      sensor_pallete_R = &sens_plt_F;
-    }
     return;
   }
   //Выставляем 0 на энкодере
@@ -5005,6 +4334,8 @@ void calibrate_Encoder_F()  //Процедура калибровки энкод
       cnt = millis();
       i++;
     }
+    IWatchdog.reload();
+    blink_Work();
   }
   motor_Stop();
 
@@ -5013,197 +4344,14 @@ void calibrate_Encoder_F()  //Процедура калибровки энкод
   Serial1.print("Calibrate_R data: ");
   for (i = 0; i < 8; i++) {
     Serial1.print(String(calibrateEncoder_F[i]) + "/");
-    calibrateEncoder_F[i] = lrint(40.5 + calibrateEncoder_F[i] * 320 / summ) / 2;
+    calibrateEncoder_F[i] = lrint(weelDia * 3.2 / 8 + calibrateEncoder_F[i] * weelDia * 3.2 / summ) / 2;
     Serial1.print(String(calibrateEncoder_F[i]) + " ");
     eepromData.calibrateEncoder_F[i] = calibrateEncoder_F[i];
   }
   Serial1.println(" ");
-  if (inverse) {
-    sensor_channel_f = &sens_chnl_r;
-    sensor_channel_r = &sens_chnl_f;
-    sensor_pallete_F = &sens_plt_R;
-    sensor_pallete_R = &sens_plt_F;
-  }
 }
 
-uint8_t initialise_Sensor(VL53L0X* sensor)  //Инициализация датчиков VL53L0X
-{
-  dataStr = "Start initialise sensor VL53L0X...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
-  uint8_t st;
-  Serial.println("New address = 0x" + String(sensor->dev, HEX));
-  Serial1.println("New address = 0x" + String(sensor->dev, HEX));
-  sensor->VL53L0X_Off();
-  st = sensor->InitSensor(sensor->dev);  //инициируем датчик на новый адрес
-  if (st) {
-    dataStr = "Init sensor failed... status: " + String(st);
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
-    //add_Error(5);
-  } else {
-    dataStr = "Init sensor success...";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
-    sensor->Prepare();
-    sensor->SetDeviceMode(VL53L0X_DEVICEMODE_CONTINUOUS_RANGING);
-    sensor->SetMeasurementTimingBudgetMicroSeconds(timingBudget * 1000);
-    sensor->StartMeasurement();
-  }
-  return st;
-}
-
-void reinitialise_Sensor() {
-  Serial.println("Start reinitialise sensor num = " + String(sensorNum));
-  uint8_t st = 1;
-  int tryes = 0;
-  VL53L0X sensor1(&Wire, XSHUT_F);
-  VL53L0X sensor2(&Wire, XSHUT_R);
-  VL53L0X sensor3(&Wire, XSHUT_PF);
-  VL53L0X sensor4(&Wire, XSHUT_PR);
-  switch (sensorNum) {
-    case 0:
-      while (st) {
-        digitalWrite(XSHUT_F, LOW);
-        delay(10);
-        sensor1.dev = 0x60;
-        st = initialise_Sensor(&sensor1);
-        tryes++;
-        if (tryes > 3) {
-          Wire.end();
-          Wire.begin();
-        }
-        if (tryes > 50) {
-          dataStr = "Too mutch tryes, reboot MCU...";
-          Serial.println(dataStr);
-          Serial1.println(dataStr);
-          delay(10);
-          HAL_NVIC_SystemReset();
-        }
-        delay(timingBudget * 2);
-        if (tryes < 4 && motorStart) motor_Speed(oldSpeed);
-      }
-      sens_chnl_f = sensor1;
-      break;
-    case 1:
-      while (st) {
-        digitalWrite(XSHUT_R, LOW);
-        delay(10);
-        sensor2.dev = 0x62;
-        st = initialise_Sensor(&sensor2);
-        tryes++;
-        if (tryes > 3) {
-          Wire.end();
-          Wire.begin();
-        }
-        if (tryes > 20) {
-          dataStr = "Too mutch tryes, reboot MCU...";
-          Serial.println(dataStr);
-          Serial1.println(dataStr);
-          delay(10);
-          HAL_NVIC_SystemReset();
-        }
-        delay(timingBudget * 2);
-        if (tryes < 4 && motorStart) motor_Speed(oldSpeed);
-      }
-      sens_chnl_r = sensor2;
-      break;
-    case 2:
-      while (st) {
-        digitalWrite(XSHUT_PF, LOW);
-        delay(10);
-        sensor3.dev = 0x64;
-        st = initialise_Sensor(&sensor3);
-        tryes++;
-        if (tryes > 3) {
-          Wire.end();
-          Wire.begin();
-        }
-        if (tryes > 20) {
-          dataStr = "Too mutch tryes, reboot MCU...";
-          Serial.println(dataStr);
-          Serial1.println(dataStr);
-          delay(10);
-          HAL_NVIC_SystemReset();
-        }
-        delay(timingBudget + 10);
-      }
-      sens_plt_F = sensor3;
-      break;
-    case 3:
-      while (st) {
-        digitalWrite(XSHUT_PR, LOW);
-        delay(10);
-        sensor4.dev = 0x66;
-        st = initialise_Sensor(&sensor4);
-        tryes++;
-        if (tryes > 3) {
-          Wire.end();
-          Wire.begin();
-        }
-        if (tryes > 20) {
-          dataStr = "Too mutch tryes, reboot MCU...";
-          Serial.println(dataStr);
-          Serial1.println(dataStr);
-          delay(10);
-          HAL_NVIC_SystemReset();
-        }
-        delay(timingBudget + 10);
-      }
-      sens_plt_R = sensor4;
-      break;
-  }
-  ITimer0.detachInterrupt();
-  ITimer0.disableTimer();
-}
-
-int findActivePage_new() {
-  int pageAddress = 0;
-  int incrStat = 4 * (int)(1 + (sizeof(EEPROMStat) + 1) / 4);
-  int incrData = 4 * (int)(1 + (sizeof(EEPROMData) + 1) / 4);
-  uint8_t rd;
-  while ((rd = EEPROM.read(pageAddress)) != 255) {
-    if (rd) {
-      pageAddressStat = pageAddress;
-      pageAddress += incrStat;
-    } else {
-      pageAddressData = pageAddress;
-      pageAddress += incrData;
-    }
-    if (pageAddress > 128 * 1024) return -1;
-  }
-  return pageAddress;
-}
-
-void saveEEPROMData_new(const EEPROMData& data) {
-  int activePage = findActivePage();
-  eeprom_buffered_write_byte(activePage, 0);
-  activePage++;
-  const uint8_t* dataPtr = (const uint8_t*)&data;
-  int cnt = millis();
-  int sz = sizeof(EEPROMData);
-  for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(activePage + i, dataPtr[i]);
-  eeprom_buffer_flush();
-  digitalWrite(ZOOMER, HIGH);
-  delay(1000);
-  digitalWrite(ZOOMER, LOW);
-}
-
-void saveEEPROMStat(const EEPROMStat& stat) {
-  int activePage = findActivePage();
-  int sz = sizeof(EEPROMStat);
-  //if (activePage + 4 * (int)(1 + (sz + 1) / 4)) > 128 * 1024) {EEPROM.}
-  eeprom_buffered_write_byte(activePage, 1);
-  activePage++;
-  const uint8_t* dataPtr = (const uint8_t*)&stat;
-  int cnt = millis();
-  for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(activePage + i, dataPtr[i]);
-  eeprom_buffer_flush();
-  digitalWrite(ZOOMER, HIGH);
-  delay(1000);
-  digitalWrite(ZOOMER, LOW);
-}
-
+// Сохранение текущих параметров на флэш память контроллера
 int findActivePage() {
   for (int i = 0; i < EEPROM_TOTAL_PAGES; i++) {
     int pageAddress = i * EEPROM_PAGE_SIZE;
@@ -5240,6 +4388,78 @@ void saveEEPROMData(const EEPROMData& data) {
   digitalWrite(ZOOMER, LOW);
 }
 
+// Чтение параметров с флэш памяти контроллера
+void read_EEPROM_Data() {
+  // Чтение параметров из EEProm
+  uint8_t calibrData = lrint(weelDia * 3.4 / 8);
+  for (uint8_t i = 0; i < 8; i++) {
+    eepromData.calibrateEncoder_F[i] = calibrData;
+    eepromData.calibrateEncoder_R[i] = calibrData;
+  }
+  for (uint8_t i = 0; i < 3; i++) {
+    eepromData.calibrateSensor_F[i] = calibrateSensor_F[i];
+    eepromData.calibrateSensor_R[i] = calibrateSensor_R[i];
+  }
+  eepromData.shuttleNum = shuttleNum;
+  eepromData.blinkTime = blinkTime;
+  eepromData.maxSpeed = maxSpeed;
+  eepromData.minSpeed = minSpeed;
+  eepromData.interPalleteDistance = interPalleteDistance;
+  eepromData.inverse = inverse;
+  eepromData.fifoLifo = fifoLifo;
+  eepromData.lifter_Speed = lifter_Speed;
+  eepromData.timingBudget = timingBudget;
+  eepromData.minBattCharge = minBattCharge;
+  eepromData.shuttleLength = shuttleLength;
+  eepromData.waitTime = waitTime;
+  eepromData.mprOffset = mprOffset;
+  eepromData.TopLeftXF = 4;
+  eepromData.TopLeftYF = 12;
+  eepromData.BotRightXF = 12;
+  eepromData.BotRightYF = 4;
+  eepromData.TopLeftXR = 4;
+  eepromData.TopLeftYR = 12;
+  eepromData.BotRightXR = 12;
+  eepromData.BotRightYR = 4;
+  eepromData.chnlOffset = chnlOffset;
+
+  if (readEEPROMData(eepromData)) {
+    for (uint8_t i = 0; i < 8; i++) {
+      calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
+      calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
+    }
+    for (uint8_t i = 0; i < 3; i++) {
+      calibrateSensor_F[i] = eepromData.calibrateSensor_F[i];
+      calibrateSensor_R[i] = eepromData.calibrateSensor_R[i];
+    }
+    shuttleNum = eepromData.shuttleNum;
+    blinkTime = eepromData.blinkTime;
+    maxSpeed = eepromData.maxSpeed;
+    minSpeed = eepromData.minSpeed;
+    interPalleteDistance = eepromData.interPalleteDistance;
+    inverse = eepromData.inverse;
+    fifoLifo = eepromData.fifoLifo;
+    lifter_Speed = eepromData.lifter_Speed;
+    timingBudget = eepromData.timingBudget;
+    minBattCharge = eepromData.minBattCharge;
+    shuttleLength = eepromData.shuttleLength;
+    waitTime = eepromData.waitTime;
+    mprOffset = eepromData.mprOffset;
+    chnlOffset = eepromData.chnlOffset;
+  } else saveEEPROMData(eepromData);
+  if (minBattCharge > 50) minBattCharge = 20;
+  if (waitTime < 5000) waitTime = 5000;
+  else if (waitTime > 30000) waitTime = 30000;
+
+  eepromStat.load = 0;
+  eepromStat.unload = 0;
+  eepromStat.compact = 0;
+  eepromStat.liftUp = 0;
+  eepromStat.liftDown = 0;
+  eepromStat.totalDist = 0;
+
+}
+
 bool readEEPROMData(EEPROMData& data) {
   int activePage = findActivePage();
   if (activePage == -1) return false;
@@ -5249,13 +4469,14 @@ bool readEEPROMData(EEPROMData& data) {
   for (int i = 0; i < sizeof(EEPROMData); i++) {
     cnt = millis();
     dataPtr[i] = EEPROM.read(pageAddress + i);
-    Serial.println("Reading time byte eeprom №" + String(i) + " = " + String(millis() - cnt) + "ms, millis = " + String(millis()) + "ms");
+    //Serial.println("Reading time byte eeprom №" + String(i) + " = " + String(millis() - cnt) + "ms, millis = " + String(millis()) + "ms");
   }
   return true;
 }
 
+// Считывание параметров с BMS батареи
 void read_BatteryCharge() {
-  //Serial1.println("Read battery charge...");
+  while (Serial3.available()) Serial3.read();
   uint8_t datab[7] = { 0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77 };
   if (!digitalRead(RS485)) pinMode(RS485, OUTPUT);
   else {
@@ -5278,7 +4499,7 @@ void read_BatteryCharge() {
   //Serial1.print("Batt data: ");
   while (Serial3.available())  // Получаем команду
   {
-    if (status == 5 || errorStatus[0]) break;
+    if (status == 5) break;
     dataRead[i] = Serial3.read();
     //Serial.print(" " + String(dataRead[i], HEX));
     //Serial1.print(" " + String(dataRead[i], HEX));
@@ -5294,9 +4515,12 @@ void read_BatteryCharge() {
       break;
     }
   }
-  /*Serial.print(" " + String(dataRead[i], HEX));
+  /*if (data) {
+    Serial.print(" " + String(dataRead[i], HEX));
+    Serial.println(" .");
+  }
+  else Serial.println(" No data...");
   Serial1.print(" " + String(dataRead[i], HEX));
-  Serial.println(" .");
   Serial1.println(" .");*/
   //i--;
   if (data && dataRead[0] == 0xDD) {
@@ -5333,8 +4557,8 @@ void read_BatteryCharge() {
       Serial.println(dataStr);
       Serial1.println(dataStr);*/
       dataStr = "Calc checksumm = " + String(sum) + "  ; BMS checksumm = " + String(res);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      //Serial.println(dataStr);
+      //Serial1.println(dataStr);
       countBatt = millis();
     }
   }
@@ -5343,16 +4567,17 @@ void read_BatteryCharge() {
   if (batteryCharge < 20) Serial2.print(shuttleNums[shuttleNum] + "wc002!");
 }
 
+// Обработка срабатывания бампера
 void crash() {
   if (!(status == 0 || status == 5)) {
-    if (lifterUp) motor_Stop();
-    else motor_Force_Stop();
+    motor_Force_Stop();
     status = 5;
     add_Error(12);
     oldSpeed = 0;
   }
 }
 
+// Обработка ошибок HardFault
 void HardFault_Handler(void) {
   struct
   {
@@ -5413,6 +4638,7 @@ void HardFault_Handler(void) {
   }
 }
 
+// Служебные функции установки даты и времени
 bool isValidDateTime(int hour, int minute, int second, int day, int month, int year) {
   if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
     return false;
@@ -5442,6 +4668,83 @@ uint8_t getWeekDay(int day, int month, int year) {
 
 bool isLeapYear(int year) {
   return (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
+}
+
+// Программный переход в загрузчик DFU
+void jumpToBootloader() {
+  //while (1) {digitalToggle(BOARD_LED); delay(100); IWatchdog.reload();}
+    // Отключаем все прерывания
+    __disable_irq();
+
+    // Сброс всех периферийных устройств (опционально, но рекомендуется)
+    RCC->APB1RSTR = 0xFFFFFFFF;
+    RCC->APB1RSTR = 0x00000000;
+    RCC->APB2RSTR = 0xFFFFFFFF;
+    RCC->APB2RSTR = 0x00000000;
+    RCC->AHB1RSTR = 0xFFFFFFFF;
+    RCC->AHB1RSTR = 0x00000000;
+    RCC->AHB2RSTR = 0xFFFFFFFF;
+    RCC->AHB2RSTR = 0x00000000;
+
+    // Отключаем SysTick
+    SysTick->CTRL = 0;
+    SysTick->LOAD = 0;
+    SysTick->VAL = 0;
+
+    pinMode(ZOOMER, OUTPUT);
+    digitalWrite(ZOOMER, LOW);
+
+    // Устанавливаем вектор таблицу на адрес загрузчика
+    __set_MSP(*(__IO uint32_t*)0x1FFF0000); // MSP из загрузчика
+
+    // Получаем адрес точки входа загрузчика
+    uint32_t bootJumpAddress = *(__IO uint32_t*)(0x1FFF0000 + 4);
+    void (*bootJump)(void) = (void (*)(void))bootJumpAddress;
+
+    // Переход в загрузчик
+    bootJump();
+
+    // Эта точка не должна быть достигнута
+    while (1);
+}
+
+void blink() {
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
+  delay(100);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BOARD_LED, LOW);
+  delay(100);
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
+  delay(100);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BOARD_LED, LOW);
+  delay(100);digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
+  delay(100);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BOARD_LED, LOW);
+  delay(100);digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
+  delay(100);
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BOARD_LED, LOW);
+  delay(100);digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, HIGH);
+  digitalWrite(BOARD_LED, HIGH);
+  delay(100);
+  digitalWrite(RED_LED, LOW);
+  //digitalWrite(GREEN_LED, LOW);
+  digitalWrite(BOARD_LED, LOW);
 }
 
 #pragma endregion
