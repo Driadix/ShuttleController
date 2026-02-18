@@ -421,8 +421,6 @@ void setup() {
     read_BatteryCharge();
   }
   if (!batteryCharge) batteryCharge = newBC;
-  sendLog(LOG_INFO, "%s", String("CB " + String(batteryCharge)).c_str());
-  sendLog(LOG_INFO, "%s", String("CV " + String(batteryVoltage)).c_str());
   batteryData.minBattCharge = minBattCharge;
   batteryData.batteryVoltage = batteryVoltage;
   batteryData.batteryCharge = batteryCharge;
@@ -827,13 +825,11 @@ void lifter_Up() {
   if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
     Serial.println(" ");
     Serial.println("Lifter is up... status = " + String(status));
-    sendLog(LOG_INFO, "%s", String(" ").c_str());
     sendLog(LOG_INFO, "%s", String("Lifter is up...").c_str());
     return;
   }
   Serial.println(" ");
   Serial.println("Moove lifter up...");
-  sendLog(LOG_INFO, "%s", String(" ").c_str());
   sendLog(LOG_INFO, "%s", String("Moove lifter up...").c_str());
   int k = 0;
   int summCurrent = 0;
@@ -899,13 +895,11 @@ void lifter_Down() {
   if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
     Serial.println(" ");
     Serial.println("Lifter is down... status = " + String(status));
-    sendLog(LOG_INFO, "%s", String(" ").c_str());
     sendLog(LOG_INFO, "%s", String("Lifter is down...").c_str());
     return;
   }
   Serial.println(" ");
   Serial.println("Moove lifter down... status = " + String(status));
-  sendLog(LOG_INFO, "%s", String(" ").c_str());
   sendLog(LOG_INFO, "%s", String("Moove lifter down...").c_str());
   int cnt = millis();
   cracked_int_t hexSpeed;
@@ -2013,10 +2007,8 @@ void blink_Error() {
       sensor_Report();
     }
     if (debuger == 3 || debuger == 7) {
-      sendLog(LOG_INFO, "%s", String("CB " + String(batteryCharge)).c_str());
     }
     if (debuger == 2 || debuger == 6) {
-      sendLog(LOG_INFO, "%s", String("CV " + String(batteryVoltage)).c_str());
     }
     else if (debuger == 10) debuger = 0;    
     status = 16;
@@ -4059,14 +4051,12 @@ void calibrate_Encoder_R() {
   motor_Stop();
 
   //Выводим данные
-  sendLog(LOG_INFO, "%s", String("Calibrate_R data: ").c_str());
+  sendLog(LOG_INFO, "Calibrate_R data:");
   for (i = 0; i < 8; i++) {
-    sendLog(LOG_INFO, "%s", String(String(calibrateEncoder_R[i]) + "/").c_str());
     calibrateEncoder_R[i] = lrint(weelDia * 3.2 / 8  + calibrateEncoder_R[i] * weelDia * 3.2 / summ) / 2;
-    sendLog(LOG_INFO, "%s", String(String(calibrateEncoder_R[i]) + " ").c_str());
+    sendLog(LOG_INFO, "R[%d]: %d", i, calibrateEncoder_R[i]);
     eepromData.calibrateEncoder_R[i] = calibrateEncoder_R[i];
   }
-  sendLog(LOG_INFO, "%s", String(" ").c_str());
 }
 
 // Процедура калибровки энкодера вперед
@@ -4133,14 +4123,12 @@ void calibrate_Encoder_F() {
 
   //Выводим данные
 
-  sendLog(LOG_INFO, "%s", String("Calibrate_R data: ").c_str());
+  sendLog(LOG_INFO, "Calibrate_R data:");
   for (i = 0; i < 8; i++) {
-    sendLog(LOG_INFO, "%s", String(String(calibrateEncoder_F[i]) + "/").c_str());
     calibrateEncoder_F[i] = lrint(weelDia * 3.2 / 8 + calibrateEncoder_F[i] * weelDia * 3.2 / summ) / 2;
-    sendLog(LOG_INFO, "%s", String(String(calibrateEncoder_F[i]) + " ").c_str());
+    sendLog(LOG_INFO, "F[%d]: %d", i, calibrateEncoder_F[i]);
     eepromData.calibrateEncoder_F[i] = calibrateEncoder_F[i];
   }
-  sendLog(LOG_INFO, "%s", String(" ").c_str());
 }
 
 // Сохранение текущих параметров на флэш память контроллера
@@ -4637,6 +4625,46 @@ uint8_t statusFromSerial1 = 0;
 void handleCommand(CommandPacket* cmd) {
     if (cmd->cmdType == 8 || cmd->cmdType == 9) {
         mooveDistance = cmd->arg1;
+    } else if (cmd->cmdType == 23) {
+        UPQuant = cmd->arg1;
+    } else if (cmd->cmdType == 100) {
+        pingCount = millis();
+        return; // Ping is not a status change command
+    } else if (cmd->cmdType == 200) { // Firmware Update
+        motor_Stop();
+        jumpToBootloader();
+        return;
+    } else if (cmd->cmdType == 201) { // System Reset
+        sendLog(LOG_INFO, "Reboot system...");
+        delay(20);
+        HAL_NVIC_SystemReset();
+        return;
+    } else if (cmd->cmdType == 202) { // Set DateTime: Arg1=HHMMSS, Arg2=DDMMYY
+        int timeVal = cmd->arg1;
+        int dateVal = cmd->arg2;
+
+        int hour = timeVal / 10000;
+        int minute = (timeVal / 100) % 100;
+        int second = timeVal % 100;
+
+        int day = dateVal / 10000;
+        int month = (dateVal / 100) % 100;
+        int year = dateVal % 100 + 2000; // Assuming 20xx
+
+        if (isValidDateTime(hour, minute, second, day, month, year)) {
+             rtc.setTime(hour, minute, second);
+             rtc.setDate(getWeekDay(day, month, year), day, month, year - 2000);
+             globalDateTime.hours = hour;
+             globalDateTime.minutes = minute;
+             globalDateTime.seconds = second;
+             globalDateTime.days = day;
+             globalDateTime.months = month;
+             globalDateTime.years = year;
+             sendLog(LOG_INFO, "RTC Updated: %02d:%02d:%02d %02d/%02d/%04d", hour, minute, second, day, month, year);
+        } else {
+             sendLog(LOG_WARN, "Invalid DateTime cmd");
+        }
+        return;
     }
     statusFromSerial1 = cmd->cmdType;
     cmdFromSerial1 = 1;
@@ -4657,8 +4685,41 @@ void handleConfig(ConfigPacket* cfg) {
              interPalleteDistance = cfg->value;
              eepromData.interPalleteDistance = interPalleteDistance;
              break;
+         case 4:
+             shuttleNum = cfg->value;
+             eepromData.shuttleNum = shuttleNum;
+             break;
+         case 5:
+             minBattCharge = cfg->value;
+             eepromData.minBattCharge = minBattCharge;
+             break;
+         case 6:
+             waitTime = cfg->value;
+             eepromData.waitTime = waitTime;
+             break;
+         case 7:
+             mprOffset = (int8_t)cfg->value;
+             eepromData.mprOffset = mprOffset;
+             break;
+         case 8:
+             chnlOffset = (int8_t)cfg->value;
+             eepromData.chnlOffset = chnlOffset;
+             break;
+         case 9:
+             fifoLifo = (uint8_t)cfg->value;
+             eepromData.fifoLifo = fifoLifo;
+             break;
+         case 10:
+             inverse = (uint8_t)cfg->value;
+             eepromData.inverse = inverse;
+             currentPosition = channelLength - currentPosition - 800; // Legacy logic from dRevOn/Off
+             break;
+         case 11:
+             evacuate = (uint8_t)cfg->value;
+             // Evacuate is not saved to EEPROM in legacy code, usually just a flag
+             break;
      }
-     saveEEPROMData(eepromData);
+     if (cfg->paramID != 11) saveEEPROMData(eepromData);
      sendLog(LOG_INFO, "Config set: %d = %d", cfg->paramID, cfg->value);
 }
 
