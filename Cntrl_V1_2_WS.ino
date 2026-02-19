@@ -1175,6 +1175,7 @@ uint8_t parseSerial1() {
                     state = STATE_READ_HEADER;
                 } else {
                     state = STATE_WAIT_SYNC1;
+                    rxIndex = 0; payloadLen = 0;
                 }
                 break;
             case STATE_READ_HEADER:
@@ -1184,6 +1185,7 @@ uint8_t parseSerial1() {
                     payloadLen = header->length;
                     if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) { // -2 for CRC
                         state = STATE_WAIT_SYNC1; // Too large
+                        rxIndex = 0; payloadLen = 0;
                         makeLog(LOG_ERROR, "Packet too large: %d", payloadLen);
                     } else if (payloadLen == 0) {
                         state = STATE_READ_CRC;
@@ -1210,10 +1212,12 @@ uint8_t parseSerial1() {
                         FrameHeader* header = (FrameHeader*)rxBuffer;
                         uint8_t res = processPacket(header, rxBuffer + sizeof(FrameHeader));
                         state = STATE_WAIT_SYNC1;
+                        rxIndex = 0; payloadLen = 0;
                         if (res != 0) return res;
                     } else {
                         makeLog(LOG_WARN, "CRC Error: Calc %04X != Recv %04X", calculatedCRC, receivedCRC);
                         state = STATE_WAIT_SYNC1;
+                        rxIndex = 0; payloadLen = 0;
                     }
                 }
                 break;
@@ -2343,9 +2347,7 @@ void blink_Work() {
     Can1.read(CAN_RX_msg);  // Считывание Can шины для очистки буфера
     if (counter == 10 && status != 25) {  // Тики для сообщения позиции в канале
       set_Position();
-      dataStr = "Position = " + String(currentPosition);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_INFO, "Position = %d", currentPosition);
       int diff = abs(currentPosition - oldPosition);
       if (currentPosition == 0) diff = abs(channelLength - shuttleLength - oldPosition);
       if (motorStart && oldSpeed && diff < 10) {
@@ -2366,18 +2368,15 @@ void blink_Work() {
       digitalWrite(GREEN_LED, HIGH);
       digitalWrite(WHITE_LED, HIGH);
     } else if ((counter == 2 || counter == 12) && status != 25) {
-      if (motorStart) dataStr = "Speed = " + String(oldSpeed);
-      else dataStr = "standing...";
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      if (motorStart) makeLog(LOG_INFO, "Speed = %d", oldSpeed);
+      else makeLog(LOG_INFO, "standing...");
     } else if (counter == 3 || counter == 7) {
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(WHITE_LED, LOW);
       IWatchdog.reload();
     } else if (counter == 4 && status != 25) {
       if (lifterCurrent) {
-        Serial.println("LCrnt = " + String(lifterCurrent));
-        Serial1.println("LCrnt = " + String(lifterCurrent));
+        makeLog(LOG_INFO, "LCrnt = %d", lifterCurrent);
       }
     } else if (counter == 8 && status != 25) {
       uint8_t oldStatus = status;
@@ -3778,9 +3777,7 @@ void single_Load() {
 
 // Пересчет паллет
 void pallete_Counting_F() {
-  dataStr = "Start counting pallete forward...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start counting pallete forward...");
   lifter_Down();
   palleteCount = 0;
   //Двигаемся в начало канала
@@ -3823,9 +3820,7 @@ void pallete_Counting_F() {
     detect_Pallete();
     if (detectPalleteR1 && detectPalleteR2) {
       boardCount++;
-      dataStr = "Find board, count = " + String(boardCount) + " Time between = " + String(millis() - countBoard) + " " + String(currentPosition);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_INFO, "Find board, count = %d Time between = %d %d", boardCount, millis() - countBoard, currentPosition);
       if (boardCount - 3 * (int)(boardCount / 3) == 1) {
         set_Position();
         boardPosition = currentPosition;
@@ -3834,7 +3829,7 @@ void pallete_Counting_F() {
       }
       if (boardCount && boardCount - 3 * (int)(boardCount / 3) == 0) {
         set_Position();
-        Serial1.println("Pallete width = " + String(currentPosition - boardPosition) + "  " + String(currentPosition));
+        makeLog(LOG_INFO, "Pallete width = %d %d", currentPosition - boardPosition, currentPosition);
       }
 
       while (moove && (detectPalleteR1 || detectPalleteR2)) {
@@ -3956,13 +3951,11 @@ void pallete_Compacting_R() {
 
 // Продолжительная загрузка
 void long_Load() {
-  dataStr = "Starting continuos load...";
+  makeLog(LOG_INFO, "Starting continuos load...");
   status = 21;
   moove_Forward();
   if (status == 5 || errorStatus[0]) return;
   status = 21;
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
   lifter_Down();
   get_Distance();
   detect_Pallete();
@@ -4065,9 +4058,7 @@ void long_Load() {
 void long_Unload() {
   uint16_t oldInterPalleteDistance = interPalleteDistance;
   interPalleteDistance = 700;
-  dataStr = "Starting continuos unload...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Starting continuos unload...");
   if (fifoLifo) fifoLifo_Inverse();
   moove_Forward();
   if (status == 5 || errorStatus[0]) {
@@ -4134,9 +4125,7 @@ void long_Unload() {
 void long_Unload(uint8_t num) {
   uint16_t oldInterPalleteDistance = interPalleteDistance;
   interPalleteDistance = 700;
-  dataStr = "Starting continuos unload...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Starting continuos unload...");
   if (fifoLifo) fifoLifo_Inverse();
   moove_Forward();
   if (status == 5 || errorStatus[0]) {
@@ -4275,8 +4264,7 @@ void moove_Left() {
       stTmp = get_Cmd_Manual();
       if (stTmp == 5 || errorStatus[0] || stTmp == 55) {  //Проверка на стоп и ошибки
         motor_Stop();
-        Serial.println("Manual stop...");
-        Serial1.println("Manual stop...");
+        makeLog(LOG_INFO, "Manual stop...");
         return;
       } else if (stTmp == 100) pingCount = millis();
     }
@@ -4302,9 +4290,7 @@ void moove_Left() {
     if (millis() - pingCount > 500) {
       motor_Stop();
       moove = 0;
-      dataStr = "No ping, stop...";
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_INFO, "No ping, stop...");
       return;
     }
   }
