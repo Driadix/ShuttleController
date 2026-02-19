@@ -7,6 +7,7 @@
 #include "STM32TimerInterrupt.h"
 #include <IWatchdog.h>
 #include <STM32RTC.h>
+#include "ShuttleProtocol.h"
 
 #pragma region Пины и дефайны...
 
@@ -55,6 +56,9 @@
 #pragma endregion
 
 #pragma region Переменные...
+
+char logStringBuffer[256];
+uint8_t txBuffer[512];
 
 HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
 HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
@@ -297,6 +301,157 @@ uint16_t data[4][5] = {
 
 #pragma endregion
 
+// --- Logging System ---
+
+void localLog(LogLevel level, const char* msg) {
+  char timeStr[16];
+  uint8_t hour, minute, second;
+  rtc.getTime(&hour, &minute, &second, 0, nullptr);
+  snprintf(timeStr, sizeof(timeStr), "[%02d:%02d:%02d] ", hour, minute, second);
+  Serial.print(timeStr);
+  Serial.println(msg);
+}
+
+void sendLog(LogLevel level, const char* msg) {
+  uint16_t msgLen = strlen(msg);
+  if (msgLen > 240) msgLen = 240; // Safe buffer limit
+
+  FrameHeader* header = (FrameHeader*)txBuffer;
+  header->sync1 = PROTOCOL_SYNC_1;
+  header->sync2 = PROTOCOL_SYNC_2;
+  header->length = sizeof(LogPacket) + msgLen;
+  static uint8_t seqCounter = 0;
+  header->seq = seqCounter++;
+  header->msgID = MSG_LOG;
+
+  LogPacket* logPkt = (LogPacket*)(txBuffer + sizeof(FrameHeader));
+  logPkt->level = level;
+  memcpy(txBuffer + sizeof(FrameHeader) + sizeof(LogPacket), msg, msgLen);
+
+  uint16_t totalLen = sizeof(FrameHeader) + header->length;
+  uint16_t crc = calcCRC16(txBuffer, totalLen);
+
+  txBuffer[totalLen] = (crc >> 8) & 0xFF;
+  txBuffer[totalLen + 1] = crc & 0xFF;
+
+  Serial1.write(txBuffer, totalLen + 2);
+}
+
+void makeLog(LogLevel level, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
+  va_end(args);
+
+  localLog(level, logStringBuffer);
+  sendLog(level, logStringBuffer);
+}
+
+void sendTelemetryPacket() {
+    TelemetryPacket pkt;
+    pkt.timestamp = millis();
+    pkt.errorCode = errorCode;
+    pkt.shuttleStatus = status;
+    pkt.currentPosition = currentPosition;
+    pkt.speed = speed; // Assuming speed variable is current speed
+    pkt.batteryCharge = batteryCharge;
+    pkt.batteryVoltage = batteryVoltage;
+
+    pkt.stateFlags = 0;
+    if (lifterUp) pkt.stateFlags |= (1 << 0);
+    if (motorStart) pkt.stateFlags |= (1 << 1);
+    if (motorReverse) pkt.stateFlags |= (1 << 2);
+    if (inverse) pkt.stateFlags |= (1 << 3);
+    if (digitalRead(CHANNEL)) pkt.stateFlags |= (1 << 4);
+    if (fifoLifo) pkt.stateFlags |= (1 << 5);
+
+    FrameHeader* header = (FrameHeader*)txBuffer;
+    header->sync1 = PROTOCOL_SYNC_1;
+    header->sync2 = PROTOCOL_SYNC_2;
+    header->length = sizeof(TelemetryPacket);
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_HEARTBEAT;
+
+    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    uint16_t crc = calcCRC16(txBuffer, totalLen);
+
+    txBuffer[totalLen] = (crc >> 8) & 0xFF;
+    txBuffer[totalLen + 1] = crc & 0xFF;
+
+    Serial1.write(txBuffer, totalLen + 2);
+}
+
+void sendSensorPacket() {
+    SensorPacket pkt;
+    pkt.distanceF = distance[1];
+    pkt.distanceR = distance[0];
+    pkt.distancePltF = distance[3];
+    pkt.distancePltR = distance[2];
+    pkt.angle = as5600.readAngle();
+    pkt.lifterCurrent = lifterCurrent;
+    pkt.temperature = temp;
+
+    pkt.hardwareFlags = 0;
+    if (detectPalleteF1) pkt.hardwareFlags |= (1 << 0);
+    if (detectPalleteF2) pkt.hardwareFlags |= (1 << 1);
+    if (detectPalleteR1) pkt.hardwareFlags |= (1 << 2);
+    if (detectPalleteR2) pkt.hardwareFlags |= (1 << 3);
+    if (digitalRead(BUMPER_F)) pkt.hardwareFlags |= (1 << 4);
+    if (digitalRead(BUMPER_R)) pkt.hardwareFlags |= (1 << 5);
+    if (!digitalRead(DL_UP)) pkt.hardwareFlags |= (1 << 6);
+    if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
+
+    FrameHeader* header = (FrameHeader*)txBuffer;
+    header->sync1 = PROTOCOL_SYNC_1;
+    header->sync2 = PROTOCOL_SYNC_2;
+    header->length = sizeof(SensorPacket);
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_SENSORS;
+
+    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    uint16_t crc = calcCRC16(txBuffer, totalLen);
+
+    txBuffer[totalLen] = (crc >> 8) & 0xFF;
+    txBuffer[totalLen + 1] = crc & 0xFF;
+
+    Serial1.write(txBuffer, totalLen + 2);
+}
+
+void sendStatsPacket() {
+    StatsPacket pkt;
+    pkt.totalDist = totalDist;
+    pkt.loadCounter = loadCounter;
+    pkt.unloadCounter = unloadCounter;
+    pkt.compactCounter = compact;
+    pkt.liftUpCounter = liftUpCounter;
+    pkt.liftDownCounter = liftDownCounter;
+    pkt.palleteCount = palleteCount;
+
+    FrameHeader* header = (FrameHeader*)txBuffer;
+    header->sync1 = PROTOCOL_SYNC_1;
+    header->sync2 = PROTOCOL_SYNC_2;
+    header->length = sizeof(StatsPacket);
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_STATS;
+
+    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    uint16_t crc = calcCRC16(txBuffer, totalLen);
+
+    txBuffer[totalLen] = (crc >> 8) & 0xFF;
+    txBuffer[totalLen + 1] = crc & 0xFF;
+
+    Serial1.write(txBuffer, totalLen + 2);
+}
+
 // Инициация устройств
 void setup() {
   pinMode(GREEN_LED, OUTPUT);
@@ -343,9 +498,7 @@ void setup() {
   read_EEPROM_Data();
   analogReadResolution(12);
 
-  dataStr = "Start init board...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start init board...");
 
   Can1.begin();
   Can1.setBaudRate(500000);
@@ -360,29 +513,19 @@ void setup() {
   // Инициируем магнитный энкодер
   as5600.begin(4);                         //  set direction pin.
   as5600.setDirection(AS5600_CLOCK_WISE);  // default, just be explicit.
-  dataStr = "Init encoder success...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Init encoder success...");
 
-  if (TOF_Is_Device_Present(2)) dataStr = "TOF channel sensor forward present...";
-  else dataStr = "TOF channel sensor forward failed!!!";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  if (TOF_Is_Device_Present(2)) makeLog(LOG_INFO, "TOF channel sensor forward present...");
+  else makeLog(LOG_ERROR, "TOF channel sensor forward failed!!!");
   delay(10);
-  if (TOF_Is_Device_Present(1)) dataStr = "TOF channel sensor reverse present...";
-  else dataStr = "TOF channel sensor reverse failed!!!";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  if (TOF_Is_Device_Present(1)) makeLog(LOG_INFO, "TOF channel sensor reverse present...");
+  else makeLog(LOG_ERROR, "TOF channel sensor reverse failed!!!");
   delay(10);
-  if (TOF_Is_Device_Present(4)) dataStr = "TOF pallete sensor forward present...";
-  else dataStr = "TOF pallete sensor forward failed!!!";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  if (TOF_Is_Device_Present(4)) makeLog(LOG_INFO, "TOF pallete sensor forward present...");
+  else makeLog(LOG_ERROR, "TOF pallete sensor forward failed!!!");
   delay(10);
-  if (TOF_Is_Device_Present(3)) dataStr = "TOF pallete sensor reverse present...";
-  else dataStr = "TOF pallete sensor reverse failed!!!";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  if (TOF_Is_Device_Present(3)) makeLog(LOG_INFO, "TOF pallete sensor reverse present...");
+  else makeLog(LOG_ERROR, "TOF pallete sensor reverse failed!!!");
   
   // Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
   // Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
@@ -393,7 +536,7 @@ void setup() {
   // delay(20);
   // digitalWrite(LORA, LOW);
   
-  Serial.println("Total struct size = " + String(sizeof(EEPROMData) + sizeof(EEPROMStat)) + "  " + String(sizeof(EEPROMData)));
+  makeLog(LOG_DEBUG, "Total struct size = %d  %d", sizeof(EEPROMData) + sizeof(EEPROMStat), sizeof(EEPROMData));
   delay(10);
 
   read_BatteryCharge();
@@ -418,16 +561,14 @@ void setup() {
     read_BatteryCharge();
   }
   if (!batteryCharge) batteryCharge = newBC;
-  Serial1.println("CB " + String(batteryCharge));
-  Serial1.println("CV " + String(batteryVoltage));
+  // Serial1.println("CB " + String(batteryCharge));
+  // Serial1.println("CV " + String(batteryVoltage));
   batteryData.minBattCharge = minBattCharge;
   batteryData.batteryVoltage = batteryVoltage;
   batteryData.batteryCharge = batteryCharge;
-  sensor_Report();
+  // sensor_Report();
 
-  dataStr = "Initialize RTC date and time.";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Initialize RTC date and time.");
   delay(50);
   
   rtc.setClockSource(STM32RTC::LSE_CLOCK);
@@ -437,26 +578,18 @@ void setup() {
   {
     rtc.setTime(0, 0, 0);
     rtc.setDate(1, 1, 1, 23);
-    dataStr = "RTC initialized with default date and time.";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_INFO, "RTC initialized with default date and time.");
   }
 
-  dataStr = "Complete initialize RTC date and time.";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Complete initialize RTC date and time.");
 
   delay(50);
-  char report[256];
+  // char report[256];
   temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
   uint8_t hour, minute, second, day, month, year, weekDay;
   rtc.getTime(&hour, &minute, &second, 0, nullptr);
   rtc.getDate(&weekDay, &day, &month, &year);
-  snprintf(report, sizeof(report), "Time %02d:%02d:%02d, Date:%02d/%02d/%02d", hour, minute, second, day, month, year);
-  dataStr = String(report);
-  dataStr += "  Temperature = " + String(temp);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Time %02d:%02d:%02d, Date:%02d/%02d/%02d  Temperature = %.2f", hour, minute, second, day, month, year, temp);
   delay(500);
   IWatchdog.begin(10000000);
 }
@@ -464,6 +597,22 @@ void setup() {
 // Основной цикл
 
 void loop() {
+  static uint32_t timerTelemetry = 0;
+  static uint32_t timerSensors = 0;
+  static uint32_t timerStats = 0;
+
+  if (millis() - timerTelemetry >= 100) {
+    timerTelemetry = millis();
+    sendTelemetryPacket();
+  }
+  if (millis() - timerSensors >= 500) {
+    timerSensors = millis();
+    sendSensorPacket();
+  }
+  if (millis() - timerStats >= 5000) {
+    timerStats = millis();
+    sendStatsPacket();
+  }
 
   static int cntSns = millis();
   static int cntBattdata = cntSns;
@@ -511,12 +660,8 @@ void loop() {
       while (Serial1.available()) Serial1.read();
       reportCounter++;
       if (reportCounter == 3) {
-        Serial.println(" ");
-        Serial1.println(" ");
         delay(5);
-        dataStr = "manual mode...";
-        Serial.println(dataStr);
-        Serial1.println(dataStr);
+        makeLog(LOG_INFO, "manual mode...");
         reportCounter = 0;
       }
     }
@@ -529,9 +674,7 @@ void loop() {
     inChannel = digitalRead(CHANNEL) && inChannel;
     statusTmp = get_Cmd();
     if (statusTmp != status) {
-      dataStr = "Shuttle status CMD changed = " + String(shuttleStatus[statusTmp]) + "  (" + String(statusTmp) + ")";
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_INFO, "Shuttle status CMD changed = %s (%d)", shuttleStatus[statusTmp].c_str(), statusTmp);
       if (!inChannel && (statusTmp == 13 || statusTmp == 16 || statusTmp == 17 || statusTmp == 19 || statusTmp == 24)) {status = statusTmp; lastPalletePosition = 0;}
       else if (!inChannel) {status = 0; lastPalletePosition = 0;}
       else if (inChannel) status = statusTmp;
@@ -555,16 +698,16 @@ void loop() {
       count = millis();
       IWatchdog.reload();
       if (reportCounter == 10) {
-        sensor_Report();
+        // sensor_Report(); // Removed, handled by periodic telemetry
         reportCounter = 0;
       }
       send_Cmd();
       
-      Serial1.println("online...");
-      delay(20);
-      Serial1.println("CB " + String(batteryCharge));
-      delay(20);
-      Serial1.println("CV " + String(batteryVoltage));
+      // makeLog(LOG_INFO, "online..."); // Optional, maybe redundant with heartbeat
+      // delay(20);
+      // Serial1.println("CB " + String(batteryCharge));
+      // delay(20);
+      // Serial1.println("CV " + String(batteryVoltage));
       
       if (status == 16 || status == 17 || status == 19 || status == 13) status = 0;
       uint8_t oldStatus = status;
@@ -581,7 +724,7 @@ void loop() {
       status = 0;
     }
     else if (millis() - countPult > 180000 && distance[1] > 150 && inChannel && currentPosition > 200) {
-      Serial1.println("Disconnect time off, dist = " + String(distance[1]));
+      makeLog(LOG_WARN, "Disconnect time off, dist = %d", distance[1]);
       if (status != 0) status = 0;
       moove_Forward();
     }
@@ -738,8 +881,7 @@ void motor_Start_Reverse() {
 void motor_Stop() {
   if (motorReverse == 2) return;
   Can1.read(CAN_RX_msg);
-  Serial.println("Motor stop, speed = " + String(oldSpeed));
-  Serial1.println("Motor stop, speed = " + String(oldSpeed));
+  makeLog(LOG_INFO, "Motor stop, speed = %d", oldSpeed);
   CAN_TX_msg.id = (100);
   CAN_TX_msg.len = 4;
   cracked_int_t hexSpeed;
@@ -814,16 +956,10 @@ void motor_Force_Stop() {
 // Подъем платформы
 void lifter_Up() {
   if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
-    Serial.println(" ");
-    Serial.println("Lifter is up... status = " + String(status));
-    Serial1.println(" ");
-    Serial1.println("Lifter is up...");
+    makeLog(LOG_INFO, "Lifter is up... status = %d", status);
     return;
   }
-  Serial.println(" ");
-  Serial.println("Moove lifter up...");
-  Serial1.println(" ");
-  Serial1.println("Moove lifter up...");
+  makeLog(LOG_INFO, "Moove lifter up...");
   int k = 0;
   int summCurrent = 0;
   int current = 0;
@@ -880,22 +1016,16 @@ void lifter_Up() {
   lifter_Stop();
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
-  Serial1.println("Summ = " + String(summCurrent));
+  makeLog(LOG_INFO, "Summ = %d", summCurrent);
 }
 
 // Опускание платформы
 void lifter_Down() {
   if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
-    Serial.println(" ");
-    Serial.println("Lifter is down... status = " + String(status));
-    Serial1.println(" ");
-    Serial1.println("Lifter is down...");
+    makeLog(LOG_INFO, "Lifter is down... status = %d", status);
     return;
   }
-  Serial.println(" ");
-  Serial.println("Moove lifter down... status = " + String(status));
-  Serial1.println(" ");
-  Serial1.println("Moove lifter down...");
+  makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
   int cnt = millis();
   cracked_int_t hexSpeed;
   CAN_TX_msg.id = (101);
@@ -942,8 +1072,7 @@ void lifter_Down() {
 
 // Остановка платформы
 void lifter_Stop() {
-  Serial.println("Stop lifter...");
-  Serial1.println("Stop lifter...");
+  makeLog(LOG_INFO, "Stop lifter...");
   cracked_int_t hexSpeed;
   hexSpeed.vint = 0;
   CAN_TX_msg.id = (101);
@@ -955,9 +1084,162 @@ void lifter_Stop() {
 
 #pragma region Служебные функции
 
+// --- Command Parser State Machine ---
+enum ParseState {
+    STATE_WAIT_SYNC1,
+    STATE_WAIT_SYNC2,
+    STATE_READ_HEADER,
+    STATE_READ_PAYLOAD,
+    STATE_READ_CRC
+};
+
+void sendAck(uint8_t seq, uint8_t result) {
+    AckPacket pkt;
+    pkt.refSeq = seq;
+    pkt.result = result;
+
+    FrameHeader* header = (FrameHeader*)txBuffer;
+    header->sync1 = PROTOCOL_SYNC_1;
+    header->sync2 = PROTOCOL_SYNC_2;
+    header->length = sizeof(AckPacket);
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_ACK;
+
+    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(AckPacket));
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    uint16_t crc = calcCRC16(txBuffer, totalLen);
+    txBuffer[totalLen] = (crc >> 8) & 0xFF;
+    txBuffer[totalLen + 1] = crc & 0xFF;
+    Serial1.write(txBuffer, totalLen + 2);
+}
+
+uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
+    if (header->msgID == MSG_COMMAND) {
+        CommandPacket* cmd = (CommandPacket*)payload;
+        sendAck(header->seq, 0); // Accepted
+
+        // Map arguments
+        if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
+            mooveDistance = cmd->arg1;
+        } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
+             UPQuant = cmd->arg1;
+        }
+
+        return cmd->cmdType;
+    } else if (header->msgID == MSG_CONFIG_SET) {
+        ConfigPacket* cfg = (ConfigPacket*)payload;
+        switch (cfg->paramID) {
+            case CFG_SHUTTLE_NUM: eepromData.shuttleNum = cfg->value; shuttleNum = cfg->value; break;
+            case CFG_INTER_PALLET: eepromData.interPalleteDistance = cfg->value; interPalleteDistance = cfg->value; break;
+            case CFG_SHUTTLE_LEN: eepromData.shuttleLength = cfg->value; shuttleLength = cfg->value; break;
+            case CFG_MAX_SPEED: eepromData.maxSpeed = cfg->value; maxSpeed = cfg->value; break;
+            case CFG_MIN_BATT: eepromData.minBattCharge = cfg->value; minBattCharge = cfg->value; break;
+            case CFG_WAIT_TIME: eepromData.waitTime = cfg->value; waitTime = cfg->value; break;
+            case CFG_MPR_OFFSET: eepromData.mprOffset = cfg->value; mprOffset = cfg->value; break;
+            case CFG_CHNL_OFFSET: eepromData.chnlOffset = cfg->value; chnlOffset = cfg->value; break;
+            case CFG_FIFO_LIFO: eepromData.fifoLifo = cfg->value; fifoLifo = cfg->value; break;
+            case CFG_REVERSE_MODE:
+                eepromData.inverse = cfg->value;
+                inverse = cfg->value;
+                currentPosition = channelLength - currentPosition - 800;
+                break;
+        }
+        saveEEPROMData(eepromData);
+        sendAck(header->seq, 0);
+        return 0; // No status change
+    }
+    return 0;
+}
+
+uint8_t parseSerial1() {
+    static ParseState state = STATE_WAIT_SYNC1;
+    static uint8_t rxBuffer[512];
+    static uint16_t rxIndex = 0;
+    static uint16_t payloadLen = 0;
+
+    while (Serial1.available()) {
+        uint8_t byte = Serial1.read();
+
+        switch (state) {
+            case STATE_WAIT_SYNC1:
+                if (byte == PROTOCOL_SYNC_1) {
+                    rxBuffer[0] = byte;
+                    state = STATE_WAIT_SYNC2;
+                }
+                break;
+            case STATE_WAIT_SYNC2:
+                if (byte == PROTOCOL_SYNC_2) {
+                    rxBuffer[1] = byte;
+                    rxIndex = 2; // Next byte is at index 2
+                    state = STATE_READ_HEADER;
+                } else {
+                    state = STATE_WAIT_SYNC1;
+                }
+                break;
+            case STATE_READ_HEADER:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader)) {
+                    FrameHeader* header = (FrameHeader*)rxBuffer;
+                    payloadLen = header->length;
+                    if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) { // -2 for CRC
+                        state = STATE_WAIT_SYNC1; // Too large
+                        makeLog(LOG_ERROR, "Packet too large: %d", payloadLen);
+                    } else if (payloadLen == 0) {
+                        state = STATE_READ_CRC;
+                    } else {
+                        state = STATE_READ_PAYLOAD;
+                    }
+                }
+                break;
+            case STATE_READ_PAYLOAD:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader) + payloadLen) {
+                    state = STATE_READ_CRC;
+                }
+                break;
+            case STATE_READ_CRC:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader) + payloadLen + 2) {
+                    // Frame complete. Check CRC.
+                    uint16_t totalLen = sizeof(FrameHeader) + payloadLen;
+                    uint16_t receivedCRC = (rxBuffer[totalLen] << 8) | rxBuffer[totalLen + 1];
+                    uint16_t calculatedCRC = calcCRC16(rxBuffer, totalLen);
+
+                    if (receivedCRC == calculatedCRC) {
+                        FrameHeader* header = (FrameHeader*)rxBuffer;
+                        uint8_t res = processPacket(header, rxBuffer + sizeof(FrameHeader));
+                        state = STATE_WAIT_SYNC1;
+                        if (res != 0) return res;
+                    } else {
+                        makeLog(LOG_WARN, "CRC Error: Calc %04X != Recv %04X", calculatedCRC, receivedCRC);
+                        state = STATE_WAIT_SYNC1;
+                    }
+                }
+                break;
+        }
+    }
+    return 0; // No status change
+}
+
 // Запрос команд с пульта ДУ
 uint8_t get_Cmd() {
   if (millis() - countLora < 20) { return status; }
+
+  // New Binary Parser
+  uint8_t newStatus = parseSerial1();
+  if (newStatus != 0) {
+      if (newStatus == CMD_FIRMWARE_UPDATE) {
+          motor_Stop();
+          jumpToBootloader();
+      } else if (newStatus == CMD_SYSTEM_RESET) {
+          makeLog(LOG_INFO, "Reboot system by external command...");
+          delay(20);
+          HAL_NVIC_SystemReset();
+      }
+      return newStatus;
+  }
+
   int8_t inByte = 0;
   int8_t data = 0;
   uint8_t distf = 1;
@@ -1150,6 +1432,7 @@ uint8_t get_Cmd() {
     }
   }
 
+/*
   inByte = 0;
   int8_t inBytes[30];
   uint8_t i = 0;
@@ -1302,11 +1585,12 @@ uint8_t get_Cmd() {
       motor_Stop();
       jumpToBootloader();
     } else if (tempStr == "Reboot__") {
-      Serial1.println("Reboot system by external command...");
+      makeLog(LOG_INFO, "Reboot system by external command...");
       delay(20);
       HAL_NVIC_SystemReset();
     }
   }
+*/
 
   if (statusTmp == 100) return status;
   else return statusTmp;
@@ -1662,6 +1946,7 @@ void send_Cmd() {
   }
 }
 
+/*
 // Опрос сенсоров
 void sensor_Report() {
   //Serial.println("Start reporting...");
@@ -1853,6 +2138,7 @@ void makeReport() {
   Serial1.write('\n');
 }
 
+*/
 // Добавление ошибки
 void add_Error(uint8_t error) {
   uint8_t i = 0;
@@ -2343,17 +2629,13 @@ void stop_Before_Pallete_F() {
     moove_Distance_F(dist, oldSpeed, 7);
   }
   motor_Stop();
-  if (distance[1] > 250) dataStr = "Stopped before pallete F...";
-  else dataStr = "Stopped at the end of channel...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  if (distance[1] > 250) makeLog(LOG_INFO, "Stopped before pallete F...");
+  else makeLog(LOG_INFO, "Stopped at the end of channel...");
 }
 
 // Остановка перед паллетом к началу канала (к выгрузке)
 void moove_Before_Pallete_F() {
-  dataStr = "Going before pallete F...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Going before pallete F...");
   uint8_t findPallete = 1;
   get_Distance();
   if (motorStart) motor_Speed(oldSpeed);
@@ -2417,20 +2699,16 @@ void moove_Before_Pallete_F() {
       count = millis();
     }
   }
-  if (distance[1] > 150) dataStr = "Before at " + String(distance[3]) + " Pos = " + String(currentPosition);
+  if (distance[1] > 150) makeLog(LOG_INFO, "Before at %d Pos = %d", distance[3], currentPosition);
   else {
-    dataStr = "End of channel F... at " + String(distance[1]);
+    makeLog(LOG_INFO, "End of channel F... at %d", distance[1]);
     currentPosition = distance[1] - 30;
   }
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
 }
 
 // Остановка перед паллетом к концу канала (загрузка)
 void stop_Before_Pallete_R() {
-  dataStr = "Start stopping before pallete R... at " + String(distance[2]);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start stopping before pallete R... at %d", distance[2]);
   moove_Before_Pallete_R();
   if (status == 5 || errorStatus[0]) return;
   if (oldSpeed == 0 && distance[0] > 250) motor_Speed(20);
@@ -2458,9 +2736,7 @@ void stop_Before_Pallete_R() {
       set_Position();      
     }
     int dist = distance[2];
-    dataStr = "Speed = " + String(oldSpeed) + "  position = " + String(currentPosition);
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_DEBUG, "Speed = %d position = %d", oldSpeed, currentPosition);
     int diff = distance[2];
     int diffP = currentPosition + startDiff;
     uint8_t i = 1;
@@ -2477,9 +2753,7 @@ void stop_Before_Pallete_R() {
       }
       count = millis();
       if (distance[2] > 300 && distance[2] < 550) {
-        dataStr = "Distance R = " + String(distance[2]);
-        Serial.println(dataStr);
-        Serial1.println(dataStr);
+        makeLog(LOG_DEBUG, "Distance R = %d", distance[2]);
         dist += distance[2];
         i++;
       }
@@ -2537,9 +2811,7 @@ void stop_Before_Pallete_R() {
 
 // Остановка перед паллетом к концу канала (загрузка)
 void moove_Before_Pallete_R() {
-  dataStr = "Going before pallete R...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Going before pallete R...");
   uint8_t findPallete = 1;
   if (motorStart) motor_Speed(oldSpeed);
   get_Distance();
@@ -2613,14 +2885,12 @@ void moove_Before_Pallete_R() {
       count = millis();
     }
   }
-  if (distance[0] > 150) dataStr = "Before at " + String(distance[2]) + " Pos = " + String(currentPosition);
+  if (distance[0] > 150) makeLog(LOG_INFO, "Before at %d Pos = %d", distance[2], currentPosition);
   else {
-    dataStr = "End of channel R... at " + String(distance[0]);
+    makeLog(LOG_INFO, "End of channel R... at %d", distance[0]);
     channelLength = currentPosition + shuttleLength + distance[0] - 30;
     endOfChannel = 1;
   }
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
 }
 
 // Движение вперед на заданное расстояние
@@ -2633,14 +2903,10 @@ void moove_Distance_F(int dist) {
 void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   get_Distance();
   if (distance[0] < 70) {
-    dataStr = "End of channel F, can't moove... ";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_WARN, "End of channel F, can't moove... ");
     return;
   }
-  dataStr = "Moove F distance = " + String(dist) + " Pos = " + String(currentPosition);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Moove F distance = %d Pos = %d", dist, currentPosition);
   uint16_t startAngle = as5600.readAngle();
   while (startAngle > 4096 || startAngle < 0) startAngle = as5600.readAngle();
   uint16_t currentAngle = startAngle;
@@ -2748,9 +3014,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
       count = millis();
     }
   }
-  dataStr = "End mooving, position = " + String(currentPosition);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "End mooving, position = %d", currentPosition);
 }
 
 // Движение назад на заданное расстояние
@@ -2768,9 +3032,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
     Serial1.println(dataStr);
     return;
   }
-  dataStr = "Moove R distance = " + String(dist) + " Pos = " + String(currentPosition);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Moove R distance = %d Pos = %d", dist, currentPosition);
   uint16_t startAngle = as5600.readAngle();
   while (startAngle > 4096 || startAngle < 0) startAngle = as5600.readAngle();
   uint16_t currentAngle = startAngle;
@@ -2881,16 +3143,12 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
       count = millis();
     }
   }
-  dataStr = "End mooving, position = " + String(currentPosition);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "End mooving, position = %d", currentPosition);
 }
 
 // Движение вперед до конца канала
 void moove_Forward() {
-  dataStr = "Start moove forward... Status = " + String(status);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start moove forward... Status = %d", status);
   motor_Start_Forward();
   detect_Pallete();
   if (lifterUp) {
@@ -2933,7 +3191,7 @@ void moove_Forward() {
           speed = 0;
           moove = 0;
           currentPosition = 60;
-          Serial1.println("End of channel, stop moove forward...");
+          makeLog(LOG_INFO, "End of channel, stop moove forward...");
         }
       }
       motor_Speed(speed);
@@ -2946,9 +3204,7 @@ void moove_Forward() {
 
 // Движение назад до конца канала
 void moove_Reverse() {
-  dataStr = "Start moove reverse... Status = " + String(status);
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start moove reverse... Status = %d", status);
   motor_Start_Reverse();
   detect_Pallete();
   if (lifterUp) {
@@ -2992,7 +3248,7 @@ void moove_Reverse() {
         moove = 0;
         channelLength = currentPosition + shuttleLength + distance[0] - 30;
         endOfChannel = 1;
-        Serial1.println("End of channel, stop moove reverse...");
+        makeLog(LOG_INFO, "End of channel, stop moove reverse...");
       }
       motor_Speed(speed);
       if (status == 5 || errorStatus[0]) return;
@@ -3004,9 +3260,7 @@ void moove_Reverse() {
 
 // Выгрузка паллеты
 void unload_Pallete() {
-  dataStr = "Start unloading pallete...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start unloading pallete...");
   if (fifoLifo) fifoLifo_Inverse();
   uint8_t moove = 0;
   uint8_t frontBoard = 0;
@@ -3082,8 +3336,7 @@ void unload_Pallete() {
       // else pltMaxLn -= 150;
       if (frontBoard && palleteLenght >=pltMaxLn) {  // Если шаттл видит видит последнюю доску не увидев заднюю проехав больше своей длины то ой
         motor_Stop();
-        Serial.println("Pallete error in BB...");
-        Serial1.println("Pallete error in BB...");
+        makeLog(LOG_ERROR, "Pallete error in BB...");
         blink_Warning();
         Serial2.print(shuttleNums[shuttleNum] + "wc004!");
         moove_Forward();
@@ -3100,8 +3353,7 @@ void unload_Pallete() {
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       if ((millis() - cnt > 2000000 / maxSpeed || distance[0] < 80)) {
-        Serial.println("Pallete error...");
-        Serial1.println("Pallete error...");
+        makeLog(LOG_ERROR, "Pallete error...");
         motor_Stop();
         Serial2.print(shuttleNums[shuttleNum] + "wc003!");
         blink_Warning();
@@ -3114,7 +3366,7 @@ void unload_Pallete() {
   }
 
   set_Position();
-  Serial1.println("Pallete lenght = " + String(palleteLenght));
+  makeLog(LOG_INFO, "Pallete lenght = %d", palleteLenght);
   if (status == 5 || errorStatus[0]) {
     if (fifoLifo) fifoLifo_Inverse();
     return;
@@ -3251,18 +3503,14 @@ void unload_Pallete() {
   if (pstn) lastPallete = 1;
   else lastPallete = 0;
   if (lastPallete) {
-    dataStr = "Last pallete position after unload = " + String(lastPalletePosition);
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_INFO, "Last pallete position after unload = %d", lastPalletePosition);
   }
   if (fifoLifo) fifoLifo_Inverse();
 }
 
 // Загрузка паллеты
 void load_Pallete() {
-  dataStr = "Start loading pallete...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start loading pallete...");
   uint8_t moove = 1;
   uint8_t frontBoard = 1;
   int currentPalletePosition;
@@ -3350,8 +3598,7 @@ void load_Pallete() {
         // else pltMaxLn -= 150;
         if (frontBoard && palleteLenght >= pltMaxLn) {  // Если шаттл видит последнюю доску проехав свою длину и не увидел заднюю то ой
           motor_Stop();
-          Serial.println("Pallete error in BB... PLenght = " + String(palleteLenght));
-          Serial1.println("Pallete error in BB... PLenght = " + String(palleteLenght));
+          makeLog(LOG_ERROR, "Pallete error in BB... PLenght = %d", palleteLenght);
           blink_Warning();
           Serial2.print(shuttleNums[shuttleNum] + "wc004!");
           moove_Forward();
@@ -3373,8 +3620,7 @@ void load_Pallete() {
           moove = 0;
         }
         if ((millis() - cnt > 2000000 / maxSpeed || distance[1] < 80)) {
-          Serial.println("Pallete error...");
-          Serial1.println("Pallete error...");
+          makeLog(LOG_ERROR, "Pallete error...");
           motor_Stop();
           Serial2.print(shuttleNums[shuttleNum] + "wc003!");
           blink_Warning();
@@ -3478,9 +3724,7 @@ void load_Pallete() {
     lastPalletePosition = currentPosition;
   }
   if (lastPallete) {
-    dataStr = "Last pallete position after load = " + String(lastPalletePosition);
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_INFO, "Last pallete position after load = %d", lastPalletePosition);
   }
 }
 
@@ -3526,7 +3770,7 @@ void single_Load() {
       Serial2.print(shuttleNums[shuttleNum] + "wc003!");
       blink_Warning();
       Serial2.print(shuttleNums[shuttleNum] + "wc000!");
-      Serial1.println("Single load fail...");
+      makeLog(LOG_ERROR, "Single load fail...");
     }
   }
   moove_Forward();
@@ -3609,7 +3853,7 @@ void pallete_Counting_F() {
           else if (distance[0] <= 100 + chnlOffset) {
             motor_Stop();
             moove = 0;
-            Serial1.println("End channel on counting with pallete ...");
+            makeLog(LOG_INFO, "End channel on counting with pallete ...");
           } else spd = 28;
           if (moove) motor_Speed(spd);
           set_Position();
@@ -3625,7 +3869,7 @@ void pallete_Counting_F() {
       else if (distance[0] <= 100 + chnlOffset) {
         motor_Stop();
         moove = 0;
-        Serial1.println("End channel on counting with pallete ...");
+        makeLog(LOG_INFO, "End channel on counting with pallete ...");
       } else spd = 28;
       if (moove) motor_Speed(spd);
       set_Position();
@@ -3640,9 +3884,7 @@ void pallete_Counting_F() {
 
 // Уплотнение вперед
 void pallete_Compacting_F() {
-  dataStr = "Start compacting pallete forward...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start compacting pallete forward...");
   if (!digitalRead(DL_DOWN)) lifter_Down();
   moove_Reverse();
   if (status == 5 || errorStatus[0]) return;
@@ -3677,9 +3919,7 @@ void pallete_Compacting_F() {
 
 // Уплотнение назад
 void pallete_Compacting_R() {
-  dataStr = "Start compacting pallete reverse...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start compacting pallete reverse...");
   moove_Forward();
   if (status == 5 || errorStatus[0]) return;
   get_Distance();
@@ -3970,9 +4210,7 @@ void long_Unload(uint8_t num) {
 
 // Движение назад в ручном режиме
 void moove_Right() {
-  dataStr = "Manual moove right...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Manual moove right...");
   uint8_t manualCount = 6;
   uint8_t moove = 1;
   motor_Start_Reverse();
@@ -3986,8 +4224,7 @@ void moove_Right() {
       stTmp = get_Cmd_Manual();
       if (stTmp == 5 || errorStatus[0] || stTmp == 55) {  //Проверка на стоп и ошибки
         motor_Stop();
-        Serial.println("Manual stop...");
-        Serial1.println("Manual stop...");
+        makeLog(LOG_INFO, "Manual stop...");
         return;
       } else if (stTmp == 100) pingCount = millis();
     }
@@ -4013,9 +4250,7 @@ void moove_Right() {
     if (millis() - pingCount > 500) {
       motor_Stop();
       moove = 0;
-      dataStr = "No ping, stop...";
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_INFO, "No ping, stop...");
       return;
     }
   }
@@ -4026,9 +4261,7 @@ void moove_Right() {
 
 // Движение назад в ручном режиме
 void moove_Left() {
-  dataStr = "Manual moove left...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Manual moove left...");
   uint8_t manualCount = 6;
   uint8_t moove = 1;
   motor_Start_Forward();
@@ -4082,9 +4315,7 @@ void moove_Left() {
 
 // Демо режим
 void demo_Mode() {
-  dataStr = "Start DEMO mode...";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start DEMO mode...");
   lifter_Down();
   moove_Reverse();
   lastPalletePosition = 0;
@@ -4211,10 +4442,8 @@ void demo_Mode() {
 
 // Процедура калибровки энкодера вперед
 void calibrate_Encoder_R() {
-  dataStr = "Start calibrating encoder to Reverse";
-  Serial.println(dataStr);
+  makeLog(LOG_INFO, "Start calibrating encoder to Reverse");
   as5600.readAngle();
-  Serial1.println(dataStr);
 
   if (inverse) {
     inverse = 0;
@@ -4267,29 +4496,27 @@ void calibrate_Encoder_R() {
   motor_Stop();
 
   //Выводим данные
-  Serial1.print("Calibrate_R data: ");
+  String calData = "Calibrate_R data: ";
   for (i = 0; i < 8; i++) {
-    Serial1.print(String(calibrateEncoder_R[i]) + "/");
+    calData += String(calibrateEncoder_R[i]) + "/";
     calibrateEncoder_R[i] = lrint(weelDia * 3.2 / 8  + calibrateEncoder_R[i] * weelDia * 3.2 / summ) / 2;
-    Serial1.print(String(calibrateEncoder_R[i]) + " ");
+    calData += String(calibrateEncoder_R[i]) + " ";
     eepromData.calibrateEncoder_R[i] = calibrateEncoder_R[i];
   }
-  Serial1.println(" ");
+  makeLog(LOG_INFO, calData.c_str());
 }
 
 // Процедура калибровки энкодера вперед
 void calibrate_Encoder_F() {
-  dataStr = "Start calibrating encoder to Reverse";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
-  dataStr = "Current calibrate F data: ";
-  for (uint8_t i = 0; i < 8; i++) dataStr += String(calibrateEncoder_F[i]) + " ";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
-  dataStr = "Current calibrate R data: ";
-  for (uint8_t i = 0; i < 8; i++) dataStr += String(calibrateEncoder_R[i]) + " ";
-  Serial.println(dataStr);
-  Serial1.println(dataStr);
+  makeLog(LOG_INFO, "Start calibrating encoder to Forward");
+
+  String calF = "Current calibrate F data: ";
+  for (uint8_t i = 0; i < 8; i++) calF += String(calibrateEncoder_F[i]) + " ";
+  makeLog(LOG_INFO, calF.c_str());
+
+  String calR = "Current calibrate R data: ";
+  for (uint8_t i = 0; i < 8; i++) calR += String(calibrateEncoder_R[i]) + " ";
+  makeLog(LOG_INFO, calR.c_str());
   delay(50);
   if (inverse) {
     inverse = 0;
@@ -4341,14 +4568,14 @@ void calibrate_Encoder_F() {
 
   //Выводим данные
 
-  Serial1.print("Calibrate_R data: ");
+  String calData = "Calibrate_F data: ";
   for (i = 0; i < 8; i++) {
-    Serial1.print(String(calibrateEncoder_F[i]) + "/");
+    calData += String(calibrateEncoder_F[i]) + "/";
     calibrateEncoder_F[i] = lrint(weelDia * 3.2 / 8 + calibrateEncoder_F[i] * weelDia * 3.2 / summ) / 2;
-    Serial1.print(String(calibrateEncoder_F[i]) + " ");
+    calData += String(calibrateEncoder_F[i]) + " ";
     eepromData.calibrateEncoder_F[i] = calibrateEncoder_F[i];
   }
-  Serial1.println(" ");
+  makeLog(LOG_INFO, calData.c_str());
 }
 
 // Сохранение текущих параметров на флэш память контроллера
@@ -4480,9 +4707,7 @@ void read_BatteryCharge() {
   uint8_t datab[7] = { 0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77 };
   if (!digitalRead(RS485)) pinMode(RS485, OUTPUT);
   else {
-    dataStr = "RS485 collision...";
-    Serial.println(dataStr);
-    Serial1.println(dataStr);
+    makeLog(LOG_ERROR, "RS485 collision...");
     return;
   }
   digitalWrite(RS485, HIGH);
@@ -4629,13 +4854,26 @@ void HardFault_Handler(void) {
       k++;
     }
     if (k == 20) {
-      dataStr = "R0 = " + String(stack_ptr->r0) + "\n R1 = " + String(stack_ptr->r1) + "\n R2 = " + String(stack_ptr->r2) + "\n R3 = " + String(stack_ptr->r3) + "\n R12 = " + String(stack_ptr->r12) + "\n LR = " + String(stack_ptr->lr) + "\n PC = " + String(stack_ptr->pc) + "\n PSR = " + String(stack_ptr->psr) + "\n BFAR = " + String(BFAR) + String(stack_ptr->psr) + "\n CFSR = " + String(CFSR) + String(stack_ptr->psr) + "\n HFSR = " + String(HFSR);
-      Serial.println(dataStr);
-      Serial1.println(dataStr);
+      makeLog(LOG_ERROR, "HardFault! R0=%lx R1=%lx R2=%lx R3=%lx R12=%lx LR=%lx PC=%lx PSR=%lx BFAR=%lx CFSR=%lx HFSR=%lx",
+              stack_ptr->r0, stack_ptr->r1, stack_ptr->r2, stack_ptr->r3, stack_ptr->r12,
+              stack_ptr->lr, stack_ptr->pc, stack_ptr->psr, BFAR, CFSR, HFSR);
       k = 0;
       IWatchdog.reload();
     }
   }
+}
+
+// Вычисление CRC16 CCITT
+uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
+    uint16_t crc = 0xFFFF; // Initial value
+    for (uint16_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
+            else crc <<= 1;
+        }
+    }
+    return crc;
 }
 
 // Служебные функции установки даты и времени
