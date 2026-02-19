@@ -382,6 +382,8 @@ void sendTelemetryPacket() {
 }
 
 void sendSensorPacket() {
+    temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
+
     SensorPacket pkt;
     pkt.distanceF = distance[1];
     pkt.distanceR = distance[0];
@@ -561,7 +563,7 @@ void setup() {
   batteryData.minBattCharge = minBattCharge;
   batteryData.batteryVoltage = batteryVoltage;
   batteryData.batteryCharge = batteryCharge;
-  // sensor_Report();
+  update_Sensors();
 
   makeLog(LOG_INFO, "Initialize RTC date and time.");
   delay(50);
@@ -693,7 +695,7 @@ void loop() {
       count = millis();
       IWatchdog.reload();
       if (reportCounter == 10) {
-        // sensor_Report();
+        update_Sensors();
         reportCounter = 0;
       }
       send_Cmd();
@@ -1772,7 +1774,10 @@ void send_Cmd() {
   }
 }
 
-void sensor_Report() {return;}
+void update_Sensors() {
+  angle = as5600.readAngle();
+  detect_Pallete();
+}
 
 // Добавление ошибки
 void add_Error(uint8_t error) {
@@ -3512,7 +3517,7 @@ void pallete_Compacting_F() {
       return;
     }
     status = 14;
-    sensor_Report();
+    update_Sensors();
   }
 }
 
@@ -3548,7 +3553,7 @@ void pallete_Compacting_R() {
     }
     status = 15;
     firstPalletePosition = currentPosition;
-    sensor_Report();
+    update_Sensors();
   }
   firstPalletePosition = 0;
 }
@@ -3718,7 +3723,7 @@ void long_Unload() {
     }
     motor_Stop();
     lifter_Down();
-    sensor_Report();
+    update_Sensors();
     moove_Distance_R(shuttleLength + 500, 80, 80);
   }
   interPalleteDistance = oldInterPalleteDistance;
@@ -3947,7 +3952,7 @@ void demo_Mode() {
         motor_Stop();
         return;
       }
-      sensor_Report();
+      update_Sensors();
       if (distance[1] < 200) status = 5;
     }
     if (status == 5 && distance[1] > 200 || errorStatus[0]) {
@@ -3973,7 +3978,7 @@ void demo_Mode() {
       blink_Work();
       get_Distance();
     }
-    sensor_Report();
+    update_Sensors();
     if (status == 5 || errorStatus[0]) return;
     while (status != 5) {
       count = millis();
@@ -3987,7 +3992,7 @@ void demo_Mode() {
         get_Distance();
       }
       unload_Pallete();
-      sensor_Report();
+      update_Sensors();
       firstPalletePosition = currentPosition;
       if (errorStatus[0]) {
         motor_Stop();
@@ -4021,7 +4026,7 @@ void demo_Mode() {
       blink_Work();
       get_Distance();
     }
-    sensor_Report();
+    update_Sensors();
     if (status == 5 || errorStatus[0]) return;
   }
 }
@@ -4358,6 +4363,13 @@ void read_BatteryCharge() {
   while (Serial3.available()) Serial3.read();
   pinMode(RS485, INPUT_PULLDOWN);
   if (batteryCharge < 20) Serial2.print(shuttleNums[shuttleNum] + "wc002!");
+  if (!errorStatus[0] && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
+        makeLog(LOG_ERROR, "Низкий уровень заряда батареи! Выполнение аварийного режима.");
+        lifter_Down();
+        moove_Forward();
+        add_Error(11);
+        status = 5;
+    }
 }
 
 // Обработка срабатывания бампера
