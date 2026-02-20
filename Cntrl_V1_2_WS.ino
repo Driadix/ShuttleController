@@ -310,7 +310,7 @@ void localLog(LogLevel level, const char* msg) {
 }
 
 void sendLog(LogLevel level, const char* msg) {
-  uint8_t logBuffer[300]; // Local buffer avoids global txBuffer collision
+  uint8_t logBuffer[300];
   uint16_t msgLen = strlen(msg);
   if (msgLen > 240) msgLen = 240;
 
@@ -1116,8 +1116,6 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
         } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
              UPQuant = cmd->arg1;
         } else if (cmd->cmdType == CMD_SET_DATETIME) {
-             // arg1 = (Year << 16) | (Month << 8) | Day
-             // arg2 = (Hour << 16) | (Minute << 8) | Second
              int year = (cmd->arg1 >> 16) & 0xFFFF;
              int month = (cmd->arg1 >> 8) & 0xFF;
              int day = cmd->arg1 & 0xFF;
@@ -1127,7 +1125,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
 
              rtc.setTime(hour, minute, second);
              rtc.setDate(getWeekDay(day, month, year), day, month, year - 2000);
-             return 0; // Consumed
+             return 0;
         }
 
         return cmd->cmdType;
@@ -1149,7 +1147,6 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
                 currentPosition = channelLength - currentPosition - 800;
                 break;
         }
-        // saveEEPROMData(eepromData); // Removed to prevent blocking
         sendAck(header->seq, 0);
         return 0;
     } else if (header->msgID == MSG_CONFIG_GET) {
