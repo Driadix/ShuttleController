@@ -310,10 +310,11 @@ void localLog(LogLevel level, const char* msg) {
 }
 
 void sendLog(LogLevel level, const char* msg) {
+  uint8_t logBuffer[300];
   uint16_t msgLen = strlen(msg);
   if (msgLen > 240) msgLen = 240;
 
-  FrameHeader* header = (FrameHeader*)txBuffer;
+  FrameHeader* header = (FrameHeader*)logBuffer;
   header->sync1 = PROTOCOL_SYNC_1;
   header->sync2 = PROTOCOL_SYNC_2;
   header->length = sizeof(LogPacket) + msgLen;
@@ -321,17 +322,17 @@ void sendLog(LogLevel level, const char* msg) {
   header->seq = seqCounter++;
   header->msgID = MSG_LOG;
 
-  LogPacket* logPkt = (LogPacket*)(txBuffer + sizeof(FrameHeader));
+  LogPacket* logPkt = (LogPacket*)(logBuffer + sizeof(FrameHeader));
   logPkt->level = level;
-  memcpy(txBuffer + sizeof(FrameHeader) + sizeof(LogPacket), msg, msgLen);
+  memcpy(logBuffer + sizeof(FrameHeader) + sizeof(LogPacket), msg, msgLen);
 
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
-  uint16_t crc = calcCRC16(txBuffer, totalLen);
+  uint16_t crc = calcCRC16(logBuffer, totalLen);
 
-  txBuffer[totalLen] = (crc >> 8) & 0xFF;
-  txBuffer[totalLen + 1] = crc & 0xFF;
+  logBuffer[totalLen] = (crc >> 8) & 0xFF;
+  logBuffer[totalLen + 1] = crc & 0xFF;
 
-  Serial1.write(txBuffer, totalLen + 2);
+  Serial1.write(logBuffer, totalLen + 2);
 }
 
 void makeLog(LogLevel level, const char* format, ...) {
@@ -1114,6 +1115,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
             mooveDistance = cmd->arg1;
         } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
              UPQuant = cmd->arg1;
+        } else if (cmd->cmdType == CMD_SET_DATETIME) {
+             int year = (cmd->arg1 >> 16) & 0xFFFF;
+             int month = (cmd->arg1 >> 8) & 0xFF;
+             int day = cmd->arg1 & 0xFF;
+             int hour = (cmd->arg2 >> 16) & 0xFFFF;
+             int minute = (cmd->arg2 >> 8) & 0xFF;
+             int second = cmd->arg2 & 0xFF;
+
+             rtc.setTime(hour, minute, second);
+             rtc.setDate(getWeekDay(day, month, year), day, month, year - 2000);
+             return 0;
         }
 
         return cmd->cmdType;
@@ -1135,8 +1147,45 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
                 currentPosition = channelLength - currentPosition - 800;
                 break;
         }
-        saveEEPROMData(eepromData);
         sendAck(header->seq, 0);
+        return 0;
+    } else if (header->msgID == MSG_CONFIG_GET) {
+        ConfigPacket* req = (ConfigPacket*)payload;
+        ConfigPacket rep;
+        rep.paramID = req->paramID;
+        rep.value = 0;
+
+        switch (req->paramID) {
+            case CFG_SHUTTLE_NUM: rep.value = shuttleNum; break;
+            case CFG_INTER_PALLET: rep.value = interPalleteDistance; break;
+            case CFG_SHUTTLE_LEN: rep.value = shuttleLength; break;
+            case CFG_MAX_SPEED: rep.value = maxSpeed; break;
+            case CFG_MIN_BATT: rep.value = minBattCharge; break;
+            case CFG_WAIT_TIME: rep.value = waitTime; break;
+            case CFG_MPR_OFFSET: rep.value = mprOffset; break;
+            case CFG_CHNL_OFFSET: rep.value = chnlOffset; break;
+            case CFG_FIFO_LIFO: rep.value = fifoLifo; break;
+            case CFG_REVERSE_MODE: rep.value = inverse; break;
+        }
+
+        FrameHeader* repHeader = (FrameHeader*)txBuffer;
+        repHeader->sync1 = PROTOCOL_SYNC_1;
+        repHeader->sync2 = PROTOCOL_SYNC_2;
+        repHeader->length = sizeof(ConfigPacket);
+        static uint8_t repSeq = 0;
+        repHeader->seq = repSeq++;
+        repHeader->msgID = MSG_CONFIG_REP;
+
+        memcpy(txBuffer + sizeof(FrameHeader), &rep, sizeof(ConfigPacket));
+
+        uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
+        uint16_t crc = calcCRC16(txBuffer, totalLen);
+
+        txBuffer[totalLen] = (crc >> 8) & 0xFF;
+        txBuffer[totalLen + 1] = crc & 0xFF;
+
+        Serial1.write(txBuffer, totalLen + 2);
+
         return 0;
     }
     return 0;
