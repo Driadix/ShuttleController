@@ -353,6 +353,7 @@ void sendTelemetryPacket() {
     pkt.speed = speed;
     pkt.batteryCharge = batteryCharge;
     pkt.batteryVoltage = batteryVoltage;
+    pkt.shuttleNumber = shuttleNum;
 
     pkt.stateFlags = 0;
     if (lifterUp) pkt.stateFlags |= (1 << 0);
@@ -1634,7 +1635,7 @@ void run_Cmd() {
   } else if (status == 23) {
     send_Cmd();
     longWork = 1;
-    localLog(LOG_DEBUG, "Pallet quant = %d", palletQuant);
+    makeLog(LOG_DEBUG, "Pallet quant = %d", palletQuant);
     lifter_Down();
     moove_Forward();
     status = 23;

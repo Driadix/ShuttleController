@@ -100,6 +100,7 @@ struct TelemetryPacket {
     // Bit 0: lifterUp, Bit 1: motorStart, Bit 2: motorReverse,
     // Bit 3: inverse, Bit 4: inChannel, Bit 5: fifoLifo
     uint16_t stateFlags;
+    uint8_t shuttleNumber; // Shuttle number
 };
 
 // 0x02: Sensors (Medium Frequency - e.g., 2Hz)
