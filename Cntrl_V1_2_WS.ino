@@ -9,6 +9,15 @@
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
 
+#define LOG_RATE_LIMITED(level, interval, format, ...) \
+    do { \
+        static uint32_t lastLog = 0; \
+        if (millis() - lastLog > (interval)) { \
+            makeLog(level, format, ##__VA_ARGS__); \
+            lastLog = millis(); \
+        } \
+    } while(0)
+
 #pragma region Пины и дефайны...
 
 #define DL_UP PD7        // Пин датчика положения лифтера в поднятом состоянии PD7
@@ -668,7 +677,7 @@ void loop() {
       reportCounter++;
       if (reportCounter == 3) {
         delay(5);
-        makeLog(LOG_INFO, "manual mode...");
+        makeLog(LOG_DEBUG, "manual mode...");
         reportCounter = 0;
       }
     }
@@ -957,7 +966,7 @@ void motor_Force_Stop() {
 // Подъем платформы
 void lifter_Up() {
   if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
-    makeLog(LOG_INFO, "Lifter is up... status = %d", status);
+    makeLog(LOG_DEBUG, "Lifter is up... status = %d", status);
     return;
   }
   makeLog(LOG_INFO, "Moove lifter up...");
@@ -994,6 +1003,7 @@ void lifter_Up() {
     if (millis() - cnt > lifterDelay) {
       lifter_Stop();
       add_Error(9);
+      makeLog(LOG_ERROR, "Lifter timeout!");
       status = 5;
       break;
     }
@@ -1017,13 +1027,13 @@ void lifter_Up() {
   lifter_Stop();
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
-  makeLog(LOG_INFO, "Summ = %d", summCurrent);
+  makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
 }
 
 // Опускание платформы
 void lifter_Down() {
   if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
-    makeLog(LOG_INFO, "Lifter is down... status = %d", status);
+    makeLog(LOG_DEBUG, "Lifter is down... status = %d", status);
     return;
   }
   makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
@@ -1056,6 +1066,7 @@ void lifter_Down() {
     if (millis() - cnt > lifterDelay) {
       lifter_Stop();
       add_Error(9);
+      makeLog(LOG_ERROR, "Lifter timeout!");
       status = 5;
       break;
     }
@@ -1910,10 +1921,19 @@ void get_Distance() {
   countSensor = millis();
   if (!TOF_Is_Device_Present(sensorIndex + 1)) {
     err[sensorIndex]++;
-    if (sensorIndex == 0 && err[sensorIndex] > 6) add_Error(1);
-    else if (sensorIndex == 1 && err[sensorIndex] > 6) add_Error(2);
-    else if (sensorIndex == 2 && err[sensorIndex] > 6) add_Error(5);
-    else if (sensorIndex == 3 && err[sensorIndex] > 6) add_Error(6);
+    if (sensorIndex == 0 && err[sensorIndex] > 6) {
+      add_Error(1);
+      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
+    } else if (sensorIndex == 1 && err[sensorIndex] > 6) {
+      add_Error(2);
+      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
+    } else if (sensorIndex == 2 && err[sensorIndex] > 6) {
+      add_Error(5);
+      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
+    } else if (sensorIndex == 3 && err[sensorIndex] > 6) {
+      add_Error(6);
+      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
+    }
     return;
   } else err[sensorIndex] = 0;
   TOF_Inquire_I2C_Decoding_ByID(sensorIndex + 1, &sensor);
@@ -2036,12 +2056,13 @@ void fifoLifo_Inverse() {
 
 // Моргание светодиодом в режиме работы
 void blink_Work() {
+  static uint16_t lastLoggedSpeed = 0xFFFF;
   if (millis() - count2 > blinkTime) { // Счетчик блинков, всего 20 по blinkTime
     counter++;
     Can1.read(CAN_RX_msg);  // Считывание Can шины для очистки буфера
     if (counter == 10 && status != 25) {  // Тики для сообщения позиции в канале
       set_Position();
-      makeLog(LOG_INFO, "Position = %d", currentPosition);
+      makeLog(LOG_DEBUG, "Position = %d", currentPosition);
       int diff = abs(currentPosition - oldPosition);
       if (currentPosition == 0) diff = abs(channelLength - shuttleLength - oldPosition);
       if (motorStart && oldSpeed && diff < 10) {
@@ -2062,15 +2083,21 @@ void blink_Work() {
       digitalWrite(GREEN_LED, HIGH);
       digitalWrite(WHITE_LED, HIGH);
     } else if ((counter == 2 || counter == 12) && status != 25) {
-      if (motorStart) makeLog(LOG_INFO, "Speed = %d", oldSpeed);
-      else makeLog(LOG_INFO, "standing...");
+      if (motorStart) {
+        if (oldSpeed != lastLoggedSpeed) {
+          makeLog(LOG_DEBUG, "Speed = %d", oldSpeed);
+          lastLoggedSpeed = oldSpeed;
+        }
+      } else {
+        makeLog(LOG_DEBUG, "standing...");
+      }
     } else if (counter == 3 || counter == 7) {
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(WHITE_LED, LOW);
       IWatchdog.reload();
     } else if (counter == 4 && status != 25) {
       if (lifterCurrent) {
-        makeLog(LOG_INFO, "LCrnt = %d", lifterCurrent);
+        makeLog(LOG_DEBUG, "LCrnt = %d", lifterCurrent);
       }
     } else if (counter == 8 && status != 25) {
       uint8_t oldStatus = status;
@@ -2253,7 +2280,7 @@ void stop_Before_Pallete_F() {
     }
     int dist = distance[3];
     int diffP = currentPosition + startDiff;
-    makeLog(LOG_INFO, "Speed = %d | Position = %d", oldSpeed, currentPosition);
+    makeLog(LOG_DEBUG, "Speed = %d | Position = %d", oldSpeed, currentPosition);
     int diff = distance[3];
     uint8_t i = 1;
     uint8_t j = 1;
@@ -2271,7 +2298,7 @@ void stop_Before_Pallete_F() {
       count = millis();
       
       if (distance[3] > 250 && distance[3] < 550) {
-        makeLog(LOG_INFO, "Distance F = %d", distance[3]);
+        makeLog(LOG_DEBUG, "Distance F = %d", distance[3]);
         dist += distance[3];
         i++;
       }
@@ -2301,22 +2328,22 @@ void stop_Before_Pallete_F() {
       } else motor_Speed(7);
       set_Position();
     }
-    makeLog(LOG_INFO, "Distance F = %d", distance[3]);
+    makeLog(LOG_DEBUG, "Distance F = %d", distance[3]);
     diffP = abs(diffP - currentPosition) / 2;
     diff = abs(diff - distance[3]) * 3 / 5;
     if (lifterCurrent) diff = (lifterCurrent - 80) / 25;
     else diff = 0;
     if (diffP > 8 && shuttleLength == 800) diff += diffP - 9;
     if (diff < 0) diff = 0;
-    makeLog(LOG_INFO, "Difference F =  %d | Diff by enc = %d", diff, diffP);
+    makeLog(LOG_DEBUG, "Difference F =  %d | Diff by enc = %d", diff, diffP);
     dist = dist / 4 - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
     moove_Distance_F(dist, oldSpeed, 7);
   }
   motor_Stop();
-  if (distance[1] > 250) makeLog(LOG_INFO, "Stopped before pallete F...");
-  else makeLog(LOG_INFO, "Stopped at the end of channel...");
+  if (distance[1] > 250) makeLog(LOG_DEBUG, "Stopped before pallete F...");
+  else makeLog(LOG_DEBUG, "Stopped at the end of channel...");
 }
 
 // Остановка перед паллетом к началу канала (к выгрузке)
@@ -2385,16 +2412,16 @@ void moove_Before_Pallete_F() {
       count = millis();
     }
   }
-  if (distance[1] > 150) makeLog(LOG_INFO, "Before at %d Pos = %d", distance[3], currentPosition);
+  if (distance[1] > 150) makeLog(LOG_DEBUG, "Before at %d Pos = %d", distance[3], currentPosition);
   else {
-    makeLog(LOG_INFO, "End of channel F... at %d", distance[1]);
+    makeLog(LOG_DEBUG, "End of channel F... at %d", distance[1]);
     currentPosition = distance[1] - 30;
   }
 }
 
 // Остановка перед паллетом к концу канала (загрузка)
 void stop_Before_Pallete_R() {
-  makeLog(LOG_INFO, "Start stopping before pallete R... at %d", distance[2]);
+  makeLog(LOG_DEBUG, "Start stopping before pallete R... at %d", distance[2]);
   moove_Before_Pallete_R();
   if (status == 5 || errorStatus[0]) return;
   if (oldSpeed == 0 && distance[0] > 250) motor_Speed(20);
@@ -2469,22 +2496,22 @@ void stop_Before_Pallete_R() {
       } else motor_Speed(7);
       set_Position();
     }
-    makeLog(LOG_INFO, "Distance R = %d", distance[2]);
+    makeLog(LOG_DEBUG, "Distance R = %d", distance[2]);
     diff = abs(diff - distance[2]) * 4 / 5;
     diffP = abs(diffP - currentPosition) / 2;
     if (lifterCurrent) diff = (lifterCurrent - 80) / 25;
     else diff = 0;
     if (diffP > 8 && shuttleLength == 800) diff += diffP - 9;
     if (diff < 0) diff = 0;
-    makeLog(LOG_INFO, "Difference R =  %d | Diff by enc = %d", diff, diffP);
+    makeLog(LOG_DEBUG, "Difference R =  %d | Diff by enc = %d", diff, diffP);
     dist = dist / 4 + diffPallete - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
     moove_Distance_R(dist, oldSpeed, 7);
   }
   motor_Stop();
-  if (distance[0] > 250) makeLog(LOG_INFO, "Stopped before pallete R...");
-  else makeLog(LOG_INFO, "Stopped at the end of channel...");  
+  if (distance[0] > 250) makeLog(LOG_DEBUG, "Stopped before pallete R...");
+  else makeLog(LOG_DEBUG, "Stopped at the end of channel...");
 }
 
 // Остановка перед паллетом к концу канала (загрузка)
@@ -2563,9 +2590,9 @@ void moove_Before_Pallete_R() {
       count = millis();
     }
   }
-  if (distance[0] > 150) makeLog(LOG_INFO, "Before at %d Pos = %d", distance[2], currentPosition);
+  if (distance[0] > 150) makeLog(LOG_DEBUG, "Before at %d Pos = %d", distance[2], currentPosition);
   else {
-    makeLog(LOG_INFO, "End of channel R... at %d", distance[0]);
+    makeLog(LOG_DEBUG, "End of channel R... at %d", distance[0]);
     channelLength = currentPosition + shuttleLength + distance[0] - 30;
     endOfChannel = 1;
   }
@@ -2692,7 +2719,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
       count = millis();
     }
   }
-  makeLog(LOG_INFO, "End mooving, position = %d", currentPosition);
+  makeLog(LOG_DEBUG, "End mooving, position = %d", currentPosition);
 }
 
 // Движение назад на заданное расстояние
@@ -2814,7 +2841,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
       count = millis();
     }
   }
-  makeLog(LOG_INFO, "End mooving, position = %d", currentPosition);
+  makeLog(LOG_DEBUG, "End mooving, position = %d", currentPosition);
 }
 
 // Движение вперед до конца канала
@@ -3037,7 +3064,7 @@ void unload_Pallete() {
   }
 
   set_Position();
-  makeLog(LOG_INFO, "Pallete lenght = %d", palleteLenght);
+  makeLog(LOG_DEBUG, "Pallete lenght = %d", palleteLenght);
   if (status == 5 || errorStatus[0]) {
     if (fifoLifo) fifoLifo_Inverse();
     return;
@@ -3174,7 +3201,7 @@ void unload_Pallete() {
   if (pstn) lastPallete = 1;
   else lastPallete = 0;
   if (lastPallete) {
-    makeLog(LOG_INFO, "Last pallete position after unload = %d", lastPalletePosition);
+    makeLog(LOG_DEBUG, "Last pallete position after unload = %d", lastPalletePosition);
   }
   if (fifoLifo) fifoLifo_Inverse();
 }
@@ -3395,7 +3422,7 @@ void load_Pallete() {
     lastPalletePosition = currentPosition;
   }
   if (lastPallete) {
-    makeLog(LOG_INFO, "Last pallete position after load = %d", lastPalletePosition);
+    makeLog(LOG_DEBUG, "Last pallete position after load = %d", lastPalletePosition);
   }
 }
 
@@ -3492,7 +3519,7 @@ void pallete_Counting_F() {
     detect_Pallete();
     if (detectPalleteR1 && detectPalleteR2) {
       boardCount++;
-      makeLog(LOG_INFO, "Find board, count = %d Time between = %d %d", boardCount, millis() - countBoard, currentPosition);
+      makeLog(LOG_DEBUG, "Find board, count = %d Time between = %d %d", boardCount, millis() - countBoard, currentPosition);
       if (boardCount - 3 * (int)(boardCount / 3) == 1) {
         set_Position();
         boardPosition = currentPosition;
@@ -3501,7 +3528,7 @@ void pallete_Counting_F() {
       }
       if (boardCount && boardCount - 3 * (int)(boardCount / 3) == 0) {
         set_Position();
-        makeLog(LOG_INFO, "Pallete width = %d %d", currentPosition - boardPosition, currentPosition);
+        makeLog(LOG_DEBUG, "Pallete width = %d %d", currentPosition - boardPosition, currentPosition);
       }
 
       while (moove && (detectPalleteR1 || detectPalleteR2)) {
@@ -3520,7 +3547,7 @@ void pallete_Counting_F() {
           else if (distance[0] <= 100 + chnlOffset) {
             motor_Stop();
             moove = 0;
-            makeLog(LOG_INFO, "End channel on counting with pallete ...");
+            makeLog(LOG_DEBUG, "End channel on counting with pallete ...");
           } else spd = 28;
           if (moove) motor_Speed(spd);
           set_Position();
@@ -3536,7 +3563,7 @@ void pallete_Counting_F() {
       else if (distance[0] <= 100 + chnlOffset) {
         motor_Stop();
         moove = 0;
-        makeLog(LOG_INFO, "End channel on counting with pallete ...");
+        makeLog(LOG_DEBUG, "End channel on counting with pallete ...");
       } else spd = 28;
       if (moove) motor_Speed(spd);
       set_Position();
@@ -4161,7 +4188,7 @@ void calibrate_Encoder_R() {
     calData += String(calibrateEncoder_R[i]) + " ";
     eepromData.calibrateEncoder_R[i] = calibrateEncoder_R[i];
   }
-  makeLog(LOG_INFO, calData.c_str());
+  makeLog(LOG_DEBUG, calData.c_str());
 }
 
 // Процедура калибровки энкодера вперед
@@ -4170,11 +4197,11 @@ void calibrate_Encoder_F() {
 
   String calF = "Current calibrate F data: ";
   for (uint8_t i = 0; i < 8; i++) calF += String(calibrateEncoder_F[i]) + " ";
-  makeLog(LOG_INFO, calF.c_str());
+  makeLog(LOG_DEBUG, calF.c_str());
 
   String calR = "Current calibrate R data: ";
   for (uint8_t i = 0; i < 8; i++) calR += String(calibrateEncoder_R[i]) + " ";
-  makeLog(LOG_INFO, calR.c_str());
+  makeLog(LOG_DEBUG, calR.c_str());
   delay(50);
   if (inverse) {
     inverse = 0;
@@ -4233,7 +4260,7 @@ void calibrate_Encoder_F() {
     calData += String(calibrateEncoder_F[i]) + " ";
     eepromData.calibrateEncoder_F[i] = calibrateEncoder_F[i];
   }
-  makeLog(LOG_INFO, calData.c_str());
+  makeLog(LOG_DEBUG, calData.c_str());
 }
 
 // Сохранение текущих параметров на флэш память контроллера
