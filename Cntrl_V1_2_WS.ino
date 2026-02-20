@@ -329,8 +329,10 @@ void sendLog(LogLevel level, const char* msg) {
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   uint16_t crc = calcCRC16(logBuffer, totalLen);
 
-  logBuffer[totalLen] = (crc >> 8) & 0xFF;
-  logBuffer[totalLen + 1] = crc & 0xFF;
+  logBuffer[totalLen] = crc & 0xFF;
+
+
+  logBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
 
   Serial1.write(logBuffer, totalLen + 2);
 }
@@ -377,8 +379,10 @@ void sendTelemetryPacket() {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     uint16_t crc = calcCRC16(txBuffer, totalLen);
 
-    txBuffer[totalLen] = (crc >> 8) & 0xFF;
-    txBuffer[totalLen + 1] = crc & 0xFF;
+    txBuffer[totalLen] = crc & 0xFF;
+
+
+    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
 
     Serial1.write(txBuffer, totalLen + 2);
 }
@@ -418,8 +422,10 @@ void sendSensorPacket() {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     uint16_t crc = calcCRC16(txBuffer, totalLen);
 
-    txBuffer[totalLen] = (crc >> 8) & 0xFF;
-    txBuffer[totalLen + 1] = crc & 0xFF;
+    txBuffer[totalLen] = crc & 0xFF;
+
+
+    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
 
     Serial1.write(txBuffer, totalLen + 2);
 }
@@ -447,8 +453,10 @@ void sendStatsPacket() {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     uint16_t crc = calcCRC16(txBuffer, totalLen);
 
-    txBuffer[totalLen] = (crc >> 8) & 0xFF;
-    txBuffer[totalLen + 1] = crc & 0xFF;
+    txBuffer[totalLen] = crc & 0xFF;
+
+
+    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
 
     Serial1.write(txBuffer, totalLen + 2);
 }
@@ -1101,8 +1109,9 @@ void sendAck(uint8_t seq, uint8_t result) {
     memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(AckPacket));
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     uint16_t crc = calcCRC16(txBuffer, totalLen);
-    txBuffer[totalLen] = (crc >> 8) & 0xFF;
-    txBuffer[totalLen + 1] = crc & 0xFF;
+    txBuffer[totalLen] = crc & 0xFF;
+
+    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
     Serial1.write(txBuffer, totalLen + 2);
 }
 
@@ -1181,8 +1190,10 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
         uint16_t crc = calcCRC16(txBuffer, totalLen);
 
-        txBuffer[totalLen] = (crc >> 8) & 0xFF;
-        txBuffer[totalLen + 1] = crc & 0xFF;
+        txBuffer[totalLen] = crc & 0xFF;
+
+
+        txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
 
         Serial1.write(txBuffer, totalLen + 2);
 
@@ -1223,9 +1234,11 @@ uint8_t parseSerial1() {
                     FrameHeader* header = (FrameHeader*)rxBuffer;
                     payloadLen = header->length;
                     if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) {
-                        state = STATE_WAIT_SYNC1;
-                        rxIndex = 0; payloadLen = 0;
                         makeLog(LOG_ERROR, "Packet too large: %d", payloadLen);
+
+                        state = STATE_WAIT_SYNC1;
+
+                        rxIndex = 0; payloadLen = 0;
                     } else if (payloadLen == 0) {
                         state = STATE_READ_CRC;
                     } else {
@@ -1243,7 +1256,7 @@ uint8_t parseSerial1() {
                 rxBuffer[rxIndex++] = byte;
                 if (rxIndex >= sizeof(FrameHeader) + payloadLen + 2) {
                     uint16_t totalLen = sizeof(FrameHeader) + payloadLen;
-                    uint16_t receivedCRC = (rxBuffer[totalLen] << 8) | rxBuffer[totalLen + 1];
+                    uint16_t receivedCRC = rxBuffer[totalLen] | (rxBuffer[totalLen + 1] << 8);
                     uint16_t calculatedCRC = calcCRC16(rxBuffer, totalLen);
 
                     if (receivedCRC == calculatedCRC) {
