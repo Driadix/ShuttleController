@@ -53,6 +53,12 @@
 #define VL53L0X_REG_IDENTIFICATION_MODEL_ID         0xC0
 #define VL53L0X_EXPECTED_MODEL_ID                   0xEEAA // Ожидаемый ID для VL53L0X
 
+#define EEPROM_DATA_START_PAGE 0
+#define EEPROM_DATA_PAGES 4
+#define EEPROM_STAT_START_PAGE 4
+#define EEPROM_STAT_PAGES 4
+#define EEPROM_STAT_HEADER_ID 2
+
 #pragma endregion
 
 #pragma region Переменные...
@@ -212,6 +218,8 @@ int countMoove = count;                // Счетчик времени обно
 int countBatt = count;                 // Счетчик времени батареи
 int pageAddressData = 0;               // Адрес флэш памяти с параметрами
 int pageAddressStat = 0;               // Адрес флэш памяти со статистикой
+bool statsDirty = false;               // Флаг изменения статистики
+uint32_t lastSavedTotalDist = 0;       // Последнее сохраненное значение дистанции
 uint16_t speed = 0;                    // Скорость движения в канале в %
 uint16_t maxSpeed = 96;                // Максимальное значение скорости (от 0 до 100 %) -сохранять-
 uint16_t minSpeed = 3;                 // Минимальное значение скорости (лаг для АЦП) -сохранять-
@@ -604,6 +612,13 @@ void setup() {
 // Основной цикл
 
 void loop() {
+  // Save Stats Logic
+  if ((status == 0 && statsDirty) || (totalDist > lastSavedTotalDist + 50000 && statsDirty)) {
+      saveEEPROMStat();
+      statsDirty = false;
+      lastSavedTotalDist = totalDist;
+  }
+
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
   static uint32_t timerStats = 0;
@@ -1013,7 +1028,10 @@ void lifter_Up() {
     }
   }
   Can1.write(CAN_TX_msg);
-  if (digitalRead(DL_DOWN)) lifterUp = 1;
+  if (digitalRead(DL_DOWN)) {
+    lifterUp = 1;
+    liftUpCounter++; eepromStat.liftUp++; statsDirty = true;
+  }
   lifter_Stop();
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
@@ -1065,7 +1083,10 @@ void lifter_Down() {
     get_Distance();
   }
   
-  if (!digitalRead(DL_DOWN)) lifterUp = 0;
+  if (!digitalRead(DL_DOWN)) {
+    lifterUp = 0;
+    liftDownCounter++; eepromStat.liftDown++; statsDirty = true;
+  }
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
@@ -1985,9 +2006,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition -= diff;
       oldAngle = angle;
+      if (diff < 500) { totalDist += diff; eepromStat.totalDist += diff; statsDirty = true; }
     } else if (diff > 0) {
       currentPosition += diff;
       oldAngle = angle;
+      if (diff < 500) { totalDist += diff; eepromStat.totalDist += diff; statsDirty = true; }
     }
   } else if (motorReverse == 1 ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
@@ -2011,9 +2034,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition += diff;
       oldAngle = angle;
+      if (diff < 500) { totalDist += diff; eepromStat.totalDist += diff; statsDirty = true; }
     } else if (diff != 0) {
       currentPosition -= diff;
       oldAngle = angle;
+      if (diff < 500) { totalDist += diff; eepromStat.totalDist += diff; statsDirty = true; }
     }
   }
   if (currentPosition < 0) {
@@ -3176,6 +3201,7 @@ void unload_Pallete() {
   if (lastPallete) {
     makeLog(LOG_INFO, "Last pallete position after unload = %d", lastPalletePosition);
   }
+  if (status != 5 && !errorStatus[0]) { unloadCounter++; eepromStat.unload++; statsDirty = true; }
   if (fifoLifo) fifoLifo_Inverse();
 }
 
@@ -3385,6 +3411,7 @@ void load_Pallete() {
     lifter_Up();
     diffPallete = 0;
   }
+  if (status != 5 && !errorStatus[0]) { loadCounter++; eepromStat.load++; statsDirty = true; }
   //Везем на выгрузку
   stop_Before_Pallete_R();
   if (status == 5 || errorStatus[0]) return;
@@ -4237,12 +4264,20 @@ void calibrate_Encoder_F() {
 }
 
 // Сохранение текущих параметров на флэш память контроллера
-int findActivePage() {
-  for (int i = 0; i < EEPROM_TOTAL_PAGES; i++) {
+int findActivePageGeneric(int startPage, int numPages, uint8_t headerID) {
+  for (int i = startPage; i < startPage + numPages; i++) {
     int pageAddress = i * EEPROM_PAGE_SIZE;
-    if (EEPROM.read(pageAddress) == 1) return i;
+    if (EEPROM.read(pageAddress) == headerID) return i;
   }
   return -1;
+}
+
+int findActivePage() {
+  return findActivePageGeneric(0, EEPROM_TOTAL_PAGES, 1);
+}
+
+int findActiveStatPage() {
+  return findActivePageGeneric(EEPROM_STAT_START_PAGE, EEPROM_STAT_PAGES, EEPROM_STAT_HEADER_ID);
 }
 
 void clearPageHeader(int pageNum) {
@@ -4255,22 +4290,72 @@ void setPageHeader(int pageNum) {
   EEPROM.write(pageAddress, 1);
 }
 
+void clearStatPageHeader(int pageNum) {
+  clearPageHeader(pageNum);
+}
+
+void setStatPageHeader(int pageNum) {
+  int pageAddress = pageNum * EEPROM_PAGE_SIZE;
+  EEPROM.write(pageAddress, EEPROM_STAT_HEADER_ID);
+}
+
 void saveEEPROMData(const EEPROMData& data) {
   int activePage = findActivePage();
-  int nextPage = (activePage + 1) % EEPROM_TOTAL_PAGES;
+  int nextPage = 0;
 
-  clearPageHeader(activePage);
+  if (activePage != -1) {
+      if (activePage < EEPROM_DATA_PAGES) {
+          nextPage = (activePage + 1) % EEPROM_DATA_PAGES;
+      } else {
+          // Migration: if data is in legacy area (>= 4), move to 0
+          nextPage = 0;
+      }
+  } else {
+      nextPage = 0;
+  }
 
   int pageAddress = nextPage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
   const uint8_t* dataPtr = (const uint8_t*)&data;
-  int cnt = millis();
   int sz = sizeof(EEPROMData);
   for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(pageAddress + i, dataPtr[i]);
   eeprom_buffer_flush();
   setPageHeader(nextPage);
+
+  if (activePage != -1) clearPageHeader(activePage);
+
   digitalWrite(ZOOMER, HIGH);
   delay(1000);
   digitalWrite(ZOOMER, LOW);
+}
+
+void saveEEPROMStat() {
+  int activePage = findActiveStatPage();
+  int nextPage = EEPROM_STAT_START_PAGE;
+
+  if (activePage != -1) {
+      nextPage = EEPROM_STAT_START_PAGE + (activePage - EEPROM_STAT_START_PAGE + 1) % EEPROM_STAT_PAGES;
+  }
+
+  int pageAddress = nextPage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
+  const uint8_t* dataPtr = (const uint8_t*)&eepromStat;
+  int sz = sizeof(EEPROMStat);
+  for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(pageAddress + i, dataPtr[i]);
+  eeprom_buffer_flush();
+  setStatPageHeader(nextPage);
+
+  if (activePage != -1) clearStatPageHeader(activePage);
+}
+
+bool readEEPROMStat(EEPROMStat& stat) {
+  int activePage = findActiveStatPage();
+  if (activePage == -1) return false;
+
+  int pageAddress = activePage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
+  uint8_t* dataPtr = (uint8_t*)&stat;
+  for (int i = 0; i < sizeof(EEPROMStat); i++) {
+    dataPtr[i] = EEPROM.read(pageAddress + i);
+  }
+  return true;
 }
 
 // Чтение параметров с флэш памяти контроллера
@@ -4309,6 +4394,9 @@ void read_EEPROM_Data() {
   eepromData.chnlOffset = chnlOffset;
 
   if (readEEPROMData(eepromData)) {
+    if (findActivePage() >= EEPROM_DATA_PAGES) {
+      saveEEPROMData(eepromData);
+    }
     for (uint8_t i = 0; i < 8; i++) {
       calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
       calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
@@ -4336,12 +4424,22 @@ void read_EEPROM_Data() {
   if (waitTime < 5000) waitTime = 5000;
   else if (waitTime > 30000) waitTime = 30000;
 
-  eepromStat.load = 0;
-  eepromStat.unload = 0;
-  eepromStat.compact = 0;
-  eepromStat.liftUp = 0;
-  eepromStat.liftDown = 0;
-  eepromStat.totalDist = 0;
+  if (!readEEPROMStat(eepromStat)) {
+    eepromStat.load = 0;
+    eepromStat.unload = 0;
+    eepromStat.compact = 0;
+    eepromStat.liftUp = 0;
+    eepromStat.liftDown = 0;
+    eepromStat.totalDist = 0;
+    saveEEPROMStat();
+  }
+
+  loadCounter = eepromStat.load;
+  unloadCounter = eepromStat.unload;
+  compact = eepromStat.compact;
+  liftUpCounter = eepromStat.liftUp;
+  liftDownCounter = eepromStat.liftDown;
+  totalDist = eepromStat.totalDist;
 
 }
 
