@@ -3,7 +3,6 @@
 #include "TOF_Sense.h"
 #include <String.h>
 #include "STM32_CAN.h"
-#include <EEPROM.h>
 #include "STM32TimerInterrupt.h"
 #include <IWatchdog.h>
 #include <STM32RTC.h>
@@ -17,6 +16,34 @@
             lastLog = millis(); \
         } \
     } while(0)
+
+// --- Added for Stats in Backup SRAM ---
+#define STATS_MAGIC_WORD 0xAA55BEEF
+#define BKPSRAM_BASE_ADDR 0x40024000
+
+#pragma pack(push, 1)
+struct SecureStats {
+    uint32_t magicWord;
+    StatsPacket payload;
+    uint32_t crc32; // Computed over the payload
+};
+#pragma pack(pop)
+
+// Map the pointer directly to the hardware address
+SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
+
+// --- Added for Configs in Flash Sector 7 ---
+#define CONFIG_SECTOR        FLASH_SECTOR_7
+#define CONFIG_SECTOR_BASE   0x08060000
+#define CONFIG_SECTOR_SIZE   (128 * 1024)
+#define CONFIG_PAGE_SIZE     512
+#define CONFIG_TOTAL_PAGES   (CONFIG_SECTOR_SIZE / CONFIG_PAGE_SIZE)
+
+struct ConfigPageHeader {
+    uint8_t state;       // 0xFF = Empty, 0xAA = Active, 0x00 = Obsolete
+    uint8_t reserved[3]; // Padding for 32-bit alignment
+    uint32_t crc32;      // Payload CRC
+};
 
 #pragma region Пины и дефайны...
 
@@ -134,16 +161,6 @@ struct EEPROMData  // Структура данных параметров дл�
   int8_t chnlOffset;
 } eepromData;
 
-struct EEPROMStat  // Структура данных статистики для сохранения а EEProm
-{
-  uint32_t load;
-  uint32_t unload;
-  uint32_t compact;
-  uint32_t liftUp;
-  uint32_t liftDown;
-  uint32_t totalDist;
-} eepromStat;
-
 struct ReportData {
   // Основные характеристики
   uint8_t shuttleNumber;          // Номер шаттла
@@ -170,7 +187,6 @@ struct ReportData {
   int blinkTime;          // Время квантования красивых морганий
 
   // Статистика
-  struct EEPROMStat shuttleStats;
   float temp;                      // Температура чипа
   struct GlobalDateTime dateTime;  // Время и дата согласно rtc
 
@@ -238,7 +254,7 @@ uint8_t detectPalleteF1;               // Флаг датчика обнаруж
 uint8_t detectPalleteF2;               // Флаг датчика обнаружения паллеты вперед 2
 uint8_t detectPalleteR1;               // Флаг датчика обнаружения паллеты назад 1
 uint8_t detectPalleteR2;               // Флаг датчика обнаружения паллеты назад 2
-uint8_t palleteCount = 0;              // Счетчик паллет
+#define palleteCount sramStats->payload.palleteCount
 uint8_t motorStart = false;            // Флаг запуска двигателя движения
 uint8_t motorReverse = 0;              // Флаг реверсивного (1) или прямого (0) движения
 uint8_t turnFlag = 0;                  // Флаг совершения оборота колесом шаттла
@@ -280,12 +296,14 @@ int lifterDelay = 3800;                // Задержка лифтера
 int oldChannelDistanse = 0;            // Канальная дистанция для фильтрации фантомных срабатываний
 int oldPalleteDistanse = 0;            // Паллетная дистанция для фильтрации фантомных срабатываний
 uint32_t timingBudget = 40;            // Время измерения датчиками
-uint32_t loadCounter = 0;              // Счетчик загрузок
-uint32_t unloadCounter = 0;            // Счетчик выгрузок
-uint32_t compact = 0;                  // Счетчик уплотнений
-uint32_t liftUpCounter = 0;            // Счетчик поднятий платформы
-uint32_t liftDownCounter = 0;          // Счетчик опусканий платформы
-uint32_t totalDist = 0;                // Счетчик пробега
+
+#define loadCounter sramStats->payload.loadCounter
+#define unloadCounter sramStats->payload.unloadCounter
+#define compact sramStats->payload.compactCounter
+#define liftUpCounter sramStats->payload.liftUpCounter
+#define liftDownCounter sramStats->payload.liftDownCounter
+#define totalDist sramStats->payload.totalDist
+
 float temp = 0;                        // Температура чипа
 float weelDia = 100;                   // Диаметр колеса
 
@@ -513,6 +531,7 @@ void setup() {
 
   while (!Serial1) {}
 
+  initStatsSRAM();
   read_EEPROM_Data();
   analogReadResolution(12);
 
@@ -554,7 +573,7 @@ void setup() {
   // delay(20);
   // digitalWrite(LORA, LOW);
   
-  makeLog(LOG_DEBUG, "Total struct size = %d  %d", sizeof(EEPROMData) + sizeof(EEPROMStat), sizeof(EEPROMData));
+  makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
 
   read_BatteryCharge();
@@ -1028,6 +1047,8 @@ void lifter_Up() {
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
   makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
+  liftUpCounter++;
+  updateStatsCRC();
 }
 
 // Опускание платформы
@@ -1080,6 +1101,8 @@ void lifter_Down() {
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
+  liftDownCounter++;
+  updateStatsCRC();
 }
 
 // Остановка платформы
@@ -2005,9 +2028,13 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition -= diff;
       oldAngle = angle;
+      totalDist += diff;
+      updateStatsCRC();
     } else if (diff > 0) {
       currentPosition += diff;
       oldAngle = angle;
+      totalDist += diff;
+      updateStatsCRC();
     }
   } else if (motorReverse == 1 ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
@@ -2031,9 +2058,13 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition += diff;
       oldAngle = angle;
+      totalDist += diff;
+      updateStatsCRC();
     } else if (diff != 0) {
       currentPosition -= diff;
       oldAngle = angle;
+      totalDist += abs(diff);
+      updateStatsCRC();
     }
   }
   if (currentPosition < 0) {
@@ -3203,6 +3234,8 @@ void unload_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after unload = %d", lastPalletePosition);
   }
+  unloadCounter++;
+  updateStatsCRC();
   if (fifoLifo) fifoLifo_Inverse();
 }
 
@@ -3424,6 +3457,8 @@ void load_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after load = %d", lastPalletePosition);
   }
+  loadCounter++;
+  updateStatsCRC();
 }
 
 // Единичная загрузка
@@ -3600,6 +3635,8 @@ void pallete_Compacting_F() {
   while (status != 5) {
     blink_Work();
     load_Pallete();
+    compact++;
+    updateStatsCRC();
     if (distance[1] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -3635,6 +3672,8 @@ void pallete_Compacting_R() {
   while (status != 5) {
     blink_Work();
     unload_Pallete();
+    compact++;
+    updateStatsCRC();
     if (distance[0] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -4125,6 +4164,37 @@ void demo_Mode() {
 
 #pragma region Технические функции
 
+void updateStatsCRC() {
+    sramStats->crc32 = calculateCRC32((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
+}
+
+void initStatsSRAM() {
+    // 1. Enable Power Clock and Backup Access
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+
+    // 2. Enable Backup SRAM Clock and Regulator (keeps it alive on VBAT)
+    __HAL_RCC_BKPSRAM_CLK_ENABLE();
+    HAL_PWREx_EnableBkUpReg();
+
+    // Wait for regulator to stabilize
+    delay(10);
+
+    // 3. Validate existing data
+    if (sramStats->magicWord != STATS_MAGIC_WORD ||
+        calculateCRC32((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc32) {
+
+        // Memory is corrupt or uninitialized (e.g., dead battery or first boot)
+        makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
+
+        memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
+        sramStats->magicWord = STATS_MAGIC_WORD;
+        updateStatsCRC();
+    } else {
+        makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
+    }
+}
+
 // Процедура калибровки энкодера вперед
 void calibrate_Encoder_R() {
   makeLog(LOG_INFO, "Start calibrating encoder to Reverse");
@@ -4263,41 +4333,108 @@ void calibrate_Encoder_F() {
   makeLog(LOG_DEBUG, calData.c_str());
 }
 
-// Сохранение текущих параметров на флэш память контроллера
-int findActivePage() {
-  for (int i = 0; i < EEPROM_TOTAL_PAGES; i++) {
-    int pageAddress = i * EEPROM_PAGE_SIZE;
-    if (EEPROM.read(pageAddress) == 1) return i;
-  }
-  return -1;
+bool loadConfigsFromFlash() {
+    bool found = false;
+    for (uint16_t i = 0; i < CONFIG_TOTAL_PAGES; i++) {
+        uint32_t pageAddr = CONFIG_SECTOR_BASE + (i * CONFIG_PAGE_SIZE);
+        ConfigPageHeader* header = (ConfigPageHeader*)pageAddr;
+
+        if (header->state == 0xAA) {
+            uint32_t payloadAddr = pageAddr + sizeof(ConfigPageHeader);
+            uint32_t crc = calculateCRC32((uint8_t*)payloadAddr, sizeof(EEPROMData));
+
+            if (crc == header->crc32) {
+                memcpy(&eepromData, (void*)payloadAddr, sizeof(EEPROMData));
+                found = true;
+                break;
+            } else {
+                makeLog(LOG_WARN, "Config page %d CRC mismatch", i);
+            }
+        }
+    }
+    return found;
 }
 
-void clearPageHeader(int pageNum) {
-  int pageAddress = pageNum * EEPROM_PAGE_SIZE;
-  EEPROM.write(pageAddress, 0);
+void saveConfigsToFlash() {
+    HAL_FLASH_Unlock();
+
+    int currentActivePageIdx = -1;
+    for (int i = 0; i < CONFIG_TOTAL_PAGES; i++) {
+         if (((ConfigPageHeader*)(CONFIG_SECTOR_BASE + i * CONFIG_PAGE_SIZE))->state == 0xAA) {
+             currentActivePageIdx = i;
+             break;
+         }
+    }
+
+    uint16_t nextPageIdx = (currentActivePageIdx == -1) ? 0 : (currentActivePageIdx + 1);
+    if (nextPageIdx >= CONFIG_TOTAL_PAGES) nextPageIdx = 0;
+
+    bool needErase = false;
+    if (nextPageIdx == 0 && currentActivePageIdx != -1) needErase = true;
+    else {
+        ConfigPageHeader* nextHeader = (ConfigPageHeader*)(CONFIG_SECTOR_BASE + nextPageIdx * CONFIG_PAGE_SIZE);
+        if (nextHeader->state != 0xFF) {
+             needErase = true;
+             nextPageIdx = 0;
+        }
+    }
+
+    if (needErase) {
+        FLASH_EraseInitTypeDef eraseStruct;
+        uint32_t sectorError = 0;
+        eraseStruct.TypeErase = FLASH_TYPEERASE_SECTORS;
+        eraseStruct.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+        eraseStruct.Sector = CONFIG_SECTOR;
+        eraseStruct.NbSectors = 1;
+
+        HAL_FLASHEx_Erase(&eraseStruct, &sectorError);
+        nextPageIdx = 0;
+        currentActivePageIdx = -1;
+    }
+
+    uint32_t newPageAddr = CONFIG_SECTOR_BASE + (nextPageIdx * CONFIG_PAGE_SIZE);
+
+    ConfigPageHeader header;
+    header.state = 0xAA;
+    memset(header.reserved, 0xFF, 3);
+    header.crc32 = calculateCRC32((uint8_t*)&eepromData, sizeof(EEPROMData));
+
+    // Write Header (word by word)
+    for (size_t i = 0; i < sizeof(ConfigPageHeader); i+=4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + i, *(uint32_t*)((uint8_t*)&header + i));
+    }
+
+    // Write Payload (word by word)
+    uint32_t* dataPtr = (uint32_t*)&eepromData;
+    size_t dataLenWords = sizeof(EEPROMData) / 4;
+    size_t remainder = sizeof(EEPROMData) % 4;
+
+    for (size_t i = 0; i < dataLenWords; i++) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + sizeof(ConfigPageHeader) + (i * 4), dataPtr[i]);
+    }
+
+    if (remainder > 0) {
+        uint32_t lastWord = 0xFFFFFFFF;
+        memcpy(&lastWord, (uint8_t*)dataPtr + (dataLenWords * 4), remainder);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + sizeof(ConfigPageHeader) + (dataLenWords * 4), lastWord);
+    }
+
+    if (currentActivePageIdx != -1 && currentActivePageIdx != nextPageIdx) {
+        uint32_t oldPageAddr = CONFIG_SECTOR_BASE + (currentActivePageIdx * CONFIG_PAGE_SIZE);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, oldPageAddr, 0x00000000);
+    }
+
+    HAL_FLASH_Lock();
+    makeLog(LOG_INFO, "Configs saved to Flash Page %d", nextPageIdx);
+
+    digitalWrite(ZOOMER, HIGH);
+    delay(1000);
+    digitalWrite(ZOOMER, LOW);
 }
 
-void setPageHeader(int pageNum) {
-  int pageAddress = pageNum * EEPROM_PAGE_SIZE;
-  EEPROM.write(pageAddress, 1);
-}
-
+// Wrapper for compatibility
 void saveEEPROMData(const EEPROMData& data) {
-  int activePage = findActivePage();
-  int nextPage = (activePage + 1) % EEPROM_TOTAL_PAGES;
-
-  clearPageHeader(activePage);
-
-  int pageAddress = nextPage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
-  const uint8_t* dataPtr = (const uint8_t*)&data;
-  int cnt = millis();
-  int sz = sizeof(EEPROMData);
-  for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(pageAddress + i, dataPtr[i]);
-  eeprom_buffer_flush();
-  setPageHeader(nextPage);
-  digitalWrite(ZOOMER, HIGH);
-  delay(1000);
-  digitalWrite(ZOOMER, LOW);
+    saveConfigsToFlash();
 }
 
 // Чтение параметров с флэш памяти контроллера
@@ -4335,7 +4472,7 @@ void read_EEPROM_Data() {
   eepromData.BotRightYR = 4;
   eepromData.chnlOffset = chnlOffset;
 
-  if (readEEPROMData(eepromData)) {
+  if (loadConfigsFromFlash()) {
     for (uint8_t i = 0; i < 8; i++) {
       calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
       calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
@@ -4358,31 +4495,10 @@ void read_EEPROM_Data() {
     waitTime = eepromData.waitTime;
     mprOffset = eepromData.mprOffset;
     chnlOffset = eepromData.chnlOffset;
-  } else saveEEPROMData(eepromData);
+  } else saveConfigsToFlash();
   if (minBattCharge > 50) minBattCharge = 20;
   if (waitTime < 5000) waitTime = 5000;
   else if (waitTime > 30000) waitTime = 30000;
-
-  eepromStat.load = 0;
-  eepromStat.unload = 0;
-  eepromStat.compact = 0;
-  eepromStat.liftUp = 0;
-  eepromStat.liftDown = 0;
-  eepromStat.totalDist = 0;
-
-}
-
-bool readEEPROMData(EEPROMData& data) {
-  int activePage = findActivePage();
-  if (activePage == -1) return false;
-  int pageAddress = activePage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
-  uint8_t* dataPtr = (uint8_t*)&data;
-  int cnt = millis();
-  for (int i = 0; i < sizeof(EEPROMData); i++) {
-    cnt = millis();
-    dataPtr[i] = EEPROM.read(pageAddress + i);
-  }
-  return true;
 }
 
 // Считывание параметров с BMS батареи
@@ -4531,6 +4647,19 @@ void HardFault_Handler(void) {
       IWatchdog.reload();
     }
   }
+}
+
+// Вычисление CRC32
+uint32_t calculateCRC32(const uint8_t *data, size_t length) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < length; i++) {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
+            else crc >>= 1;
+        }
+    }
+    return ~crc;
 }
 
 // Вычисление CRC16 CCITT
