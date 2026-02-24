@@ -8,7 +8,7 @@
 #define PROTOCOL_SYNC_2           0x55
 #define PROTOCOL_VER              1
 
-#define TARGET_ID_DISPLAY         0x00  // Direct UART line, target ID doesn't matter
+#define TARGET_ID_ANY             0x00  // Direct UART line, target ID doesn't matter
 #define TARGET_ID_BROADCAST       0xFF  // Global command to all shuttles listening (use carefully)
 
 #pragma pack(push, 1)
