@@ -29,7 +29,17 @@ struct SecureStats {
 };
 #pragma pack(pop)
 
+uint16_t calcCRC16(const uint8_t* data, uint16_t length);
+
 SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
+
+#define STATS_ATOMIC_UPDATE(action) \
+    do { \
+        __disable_irq(); \
+        action; \
+        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
+        __enable_irq(); \
+    } while(0)
 
 #define CONFIG_SECTOR        FLASH_SECTOR_7
 #define CONFIG_SECTOR_BASE   0x08060000
@@ -252,7 +262,7 @@ uint8_t detectPalleteF1;               // Флаг датчика обнаруж
 uint8_t detectPalleteF2;               // Флаг датчика обнаружения паллеты вперед 2
 uint8_t detectPalleteR1;               // Флаг датчика обнаружения паллеты назад 1
 uint8_t detectPalleteR2;               // Флаг датчика обнаружения паллеты назад 2
-#define palleteCount sramStats->payload.palleteCount
+uint8_t palleteCount = 0;              // Количество паллет
 uint8_t motorStart = false;            // Флаг запуска двигателя движения
 uint8_t motorReverse = 0;              // Флаг реверсивного (1) или прямого (0) движения
 uint8_t turnFlag = 0;                  // Флаг совершения оборота колесом шаттла
@@ -301,6 +311,13 @@ uint32_t timingBudget = 40;            // Время измерения датч
 #define liftUpCounter sramStats->payload.liftUpCounter
 #define liftDownCounter sramStats->payload.liftDownCounter
 #define totalDist sramStats->payload.totalDist
+#define lifetimePalletsDetected sramStats->payload.lifetimePalletsDetected
+#define totalUptimeMinutes sramStats->payload.totalUptimeMinutes
+#define motorStallCount sramStats->payload.motorStallCount
+#define lifterOverloadCount sramStats->payload.lifterOverloadCount
+#define crashCount sramStats->payload.crashCount
+#define watchdogResets sramStats->payload.watchdogResets
+#define lowBatteryEvents sramStats->payload.lowBatteryEvents
 
 float temp = 0;                        // Температура чипа
 float weelDia = 100;                   // Диаметр колеса
@@ -382,6 +399,7 @@ void sendTelemetryPacket() {
     pkt.batteryCharge = batteryCharge;
     pkt.batteryVoltage = batteryVoltage;
     pkt.shuttleNumber = shuttleNum;
+    pkt.palleteCount = palleteCount;
 
     pkt.stateFlags = 0;
     if (lifterUp) pkt.stateFlags |= (1 << 0);
@@ -463,7 +481,13 @@ void sendStatsPacket() {
     pkt.compactCounter = compact;
     pkt.liftUpCounter = liftUpCounter;
     pkt.liftDownCounter = liftDownCounter;
-    pkt.palleteCount = palleteCount;
+    pkt.lifetimePalletsDetected = lifetimePalletsDetected;
+    pkt.totalUptimeMinutes = totalUptimeMinutes;
+    pkt.motorStallCount = motorStallCount;
+    pkt.lifterOverloadCount = lifterOverloadCount;
+    pkt.crashCount = crashCount;
+    pkt.watchdogResets = watchdogResets;
+    pkt.lowBatteryEvents = lowBatteryEvents;
 
     FrameHeader* header = (FrameHeader*)txBuffer;
     header->sync1 = PROTOCOL_SYNC_1;
@@ -530,6 +554,12 @@ void setup() {
   while (!Serial1) {}
 
   initStatsSRAM();
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) || __HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)) {
+      STATS_ATOMIC_UPDATE(watchdogResets++);
+  }
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+
   read_EEPROM_Data();
   analogReadResolution(12);
 
@@ -633,6 +663,7 @@ void loop() {
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
   static uint32_t timerStats = 0;
+  static uint32_t timerUptime = 0;
 
   if (millis() - timerTelemetry >= 300) {
     timerTelemetry = millis();
@@ -645,6 +676,10 @@ void loop() {
   if (millis() - timerStats >= 5000) {
     timerStats = millis();
     sendStatsPacket();
+  }
+  if (millis() - timerUptime >= 60000) {
+      timerUptime = millis();
+      STATS_ATOMIC_UPDATE(totalUptimeMinutes++);
   }
 
   static int cntSns = millis();
@@ -1043,7 +1078,10 @@ void lifter_Up() {
   if (digitalRead(DL_DOWN)) lifterUp = 1;
   lifter_Stop();
   summCurrent /= k;
-  if (lifterCurrent > 500) lifterCurrent = 250;
+  if (lifterCurrent > 500) {
+      STATS_ATOMIC_UPDATE(lifterOverloadCount++);
+      lifterCurrent = 250;
+  }
   makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
   STATS_ATOMIC_UPDATE(liftUpCounter++);
 }
@@ -2100,6 +2138,7 @@ void blink_Work() {
         motor_Stop();
         status = 5;
         add_Error(10);
+        STATS_ATOMIC_UPDATE(motorStallCount++);
         return;
       }
     } else if (counter == 1 || counter == 5) {
@@ -3550,6 +3589,7 @@ void pallete_Counting_F() {
         boardPosition = currentPosition;
         palletePosition[palleteCount] = currentPosition;
         palleteCount++;
+        STATS_ATOMIC_UPDATE(lifetimePalletsDetected++);
       }
       if (boardCount && boardCount - 3 * (int)(boardCount / 3) == 0) {
         set_Position();
@@ -4167,17 +4207,18 @@ void initStatsSRAM() {
         }
     }
 
-    if (sramStats->magicWord != STATS_MAGIC_WORD ||
-        calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc16) {
-
-        makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
-
-        memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
-        sramStats->magicWord = STATS_MAGIC_WORD;
-        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
-    } else {
-        makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
+    if (sramStats->magicWord == STATS_MAGIC_WORD) {
+        uint16_t calcCRC = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
+        if (calcCRC == sramStats->crc16) {
+             makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
+             return;
+        }
     }
+
+    makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
+    memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
+    sramStats->magicWord = STATS_MAGIC_WORD;
+    sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
 }
 
 // Процедура калибровки энкодера вперед
@@ -4341,6 +4382,11 @@ bool loadConfigsFromFlash() {
 }
 
 void saveConfigsToFlash() {
+    if (motorStart || (status != 0 && status != 5 && status != 25)) {
+        makeLog(LOG_ERROR, "FATAL: Trying to erase Flash while moving!");
+        return;
+    }
+
     uint8_t pageBuffer[CONFIG_PAGE_SIZE];
     memset(pageBuffer, 0xFF, CONFIG_PAGE_SIZE);
 
@@ -4547,6 +4593,7 @@ void read_BatteryCharge() {
         lifter_Down();
         moove_Forward();
         add_Error(11);
+        STATS_ATOMIC_UPDATE(lowBatteryEvents++);
         status = 5;
     }
 }
@@ -4557,6 +4604,7 @@ void crash() {
     motor_Force_Stop();
     status = 5;
     add_Error(12);
+    STATS_ATOMIC_UPDATE(crashCount++);
     oldSpeed = 0;
   }
 }
@@ -4621,14 +4669,6 @@ void HardFault_Handler(void) {
     }
   }
 }
-
-#define STATS_ATOMIC_UPDATE(action) \
-    do { \
-        __disable_irq(); \
-        action; \
-        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
-        __enable_irq(); \
-    } while(0)
 
 // Вычисление CRC16 CCITT
 uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
