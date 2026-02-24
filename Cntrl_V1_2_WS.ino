@@ -3,7 +3,6 @@
 #include "TOF_Sense.h"
 #include <String.h>
 #include "STM32_CAN.h"
-#include <EEPROM.h>
 #include "STM32TimerInterrupt.h"
 #include <IWatchdog.h>
 #include <STM32RTC.h>
@@ -17,6 +16,32 @@
             lastLog = millis(); \
         } \
     } while(0)
+
+#define STATS_MAGIC_WORD 0xAA55BEEF
+#define BKPSRAM_BASE_ADDR 0x40024000
+
+#pragma pack(push, 1)
+struct SecureStats {
+    uint32_t magicWord;
+    StatsPacket payload;
+    uint16_t crc16;
+    uint16_t reserved;
+};
+#pragma pack(pop)
+
+SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
+
+#define CONFIG_SECTOR        FLASH_SECTOR_7
+#define CONFIG_SECTOR_BASE   0x08060000
+#define CONFIG_SECTOR_SIZE   (128 * 1024)
+#define CONFIG_PAGE_SIZE     512
+#define CONFIG_TOTAL_PAGES   (CONFIG_SECTOR_SIZE / CONFIG_PAGE_SIZE)
+
+struct ConfigPageHeader {
+    uint8_t state;
+    uint8_t reserved[1];
+    uint16_t crc16;
+};
 
 #pragma region Пины и дефайны...
 
@@ -134,16 +159,6 @@ struct EEPROMData  // Структура данных параметров дл�
   int8_t chnlOffset;
 } eepromData;
 
-struct EEPROMStat  // Структура данных статистики для сохранения а EEProm
-{
-  uint32_t load;
-  uint32_t unload;
-  uint32_t compact;
-  uint32_t liftUp;
-  uint32_t liftDown;
-  uint32_t totalDist;
-} eepromStat;
-
 struct ReportData {
   // Основные характеристики
   uint8_t shuttleNumber;          // Номер шаттла
@@ -170,7 +185,6 @@ struct ReportData {
   int blinkTime;          // Время квантования красивых морганий
 
   // Статистика
-  struct EEPROMStat shuttleStats;
   float temp;                      // Температура чипа
   struct GlobalDateTime dateTime;  // Время и дата согласно rtc
 
@@ -280,12 +294,14 @@ int lifterDelay = 3800;                // Задержка лифтера
 int oldChannelDistanse = 0;            // Канальная дистанция для фильтрации фантомных срабатываний
 int oldPalleteDistanse = 0;            // Паллетная дистанция для фильтрации фантомных срабатываний
 uint32_t timingBudget = 40;            // Время измерения датчиками
-uint32_t loadCounter = 0;              // Счетчик загрузок
-uint32_t unloadCounter = 0;            // Счетчик выгрузок
-uint32_t compact = 0;                  // Счетчик уплотнений
-uint32_t liftUpCounter = 0;            // Счетчик поднятий платформы
-uint32_t liftDownCounter = 0;          // Счетчик опусканий платформы
-uint32_t totalDist = 0;                // Счетчик пробега
+
+#define loadCounter sramStats->payload.loadCounter
+#define unloadCounter sramStats->payload.unloadCounter
+#define compact sramStats->payload.compactCounter
+#define liftUpCounter sramStats->payload.liftUpCounter
+#define liftDownCounter sramStats->payload.liftDownCounter
+#define totalDist sramStats->payload.totalDist
+
 float temp = 0;                        // Температура чипа
 float weelDia = 100;                   // Диаметр колеса
 
@@ -513,6 +529,7 @@ void setup() {
 
   while (!Serial1) {}
 
+  initStatsSRAM();
   read_EEPROM_Data();
   analogReadResolution(12);
 
@@ -554,7 +571,7 @@ void setup() {
   // delay(20);
   // digitalWrite(LORA, LOW);
   
-  makeLog(LOG_DEBUG, "Total struct size = %d  %d", sizeof(EEPROMData) + sizeof(EEPROMStat), sizeof(EEPROMData));
+  makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
 
   read_BatteryCharge();
@@ -1028,6 +1045,7 @@ void lifter_Up() {
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
   makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
+  STATS_ATOMIC_UPDATE(liftUpCounter++);
 }
 
 // Опускание платформы
@@ -1080,6 +1098,7 @@ void lifter_Down() {
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
+  STATS_ATOMIC_UPDATE(liftDownCounter++);
 }
 
 // Остановка платформы
@@ -2005,9 +2024,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition -= diff;
       oldAngle = angle;
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     } else if (diff > 0) {
       currentPosition += diff;
       oldAngle = angle;
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     }
   } else if (motorReverse == 1 ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
@@ -2031,9 +2052,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition += diff;
       oldAngle = angle;
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     } else if (diff != 0) {
       currentPosition -= diff;
       oldAngle = angle;
+      STATS_ATOMIC_UPDATE(totalDist += abs(diff));
     }
   }
   if (currentPosition < 0) {
@@ -3203,6 +3226,7 @@ void unload_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after unload = %d", lastPalletePosition);
   }
+  STATS_ATOMIC_UPDATE(unloadCounter++);
   if (fifoLifo) fifoLifo_Inverse();
 }
 
@@ -3424,6 +3448,7 @@ void load_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after load = %d", lastPalletePosition);
   }
+  STATS_ATOMIC_UPDATE(loadCounter++);
 }
 
 // Единичная загрузка
@@ -3600,6 +3625,7 @@ void pallete_Compacting_F() {
   while (status != 5) {
     blink_Work();
     load_Pallete();
+    STATS_ATOMIC_UPDATE(compact++);
     if (distance[1] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -3635,6 +3661,7 @@ void pallete_Compacting_R() {
   while (status != 5) {
     blink_Work();
     unload_Pallete();
+    STATS_ATOMIC_UPDATE(compact++);
     if (distance[0] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -4125,6 +4152,34 @@ void demo_Mode() {
 
 #pragma region Технические функции
 
+void initStatsSRAM() {
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+
+    __HAL_RCC_BKPSRAM_CLK_ENABLE();
+    HAL_PWREx_EnableBkUpReg();
+
+    uint32_t start = millis();
+    while(__HAL_PWR_GET_FLAG(PWR_FLAG_BRR) == RESET) {
+        if (millis() - start > 100) {
+             makeLog(LOG_ERROR, "Backup Regulator timeout!");
+             break;
+        }
+    }
+
+    if (sramStats->magicWord != STATS_MAGIC_WORD ||
+        calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc16) {
+
+        makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
+
+        memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
+        sramStats->magicWord = STATS_MAGIC_WORD;
+        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
+    } else {
+        makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
+    }
+}
+
 // Процедура калибровки энкодера вперед
 void calibrate_Encoder_R() {
   makeLog(LOG_INFO, "Start calibrating encoder to Reverse");
@@ -4263,41 +4318,95 @@ void calibrate_Encoder_F() {
   makeLog(LOG_DEBUG, calData.c_str());
 }
 
-// Сохранение текущих параметров на флэш память контроллера
-int findActivePage() {
-  for (int i = 0; i < EEPROM_TOTAL_PAGES; i++) {
-    int pageAddress = i * EEPROM_PAGE_SIZE;
-    if (EEPROM.read(pageAddress) == 1) return i;
-  }
-  return -1;
+bool loadConfigsFromFlash() {
+    bool found = false;
+    for (uint16_t i = 0; i < CONFIG_TOTAL_PAGES; i++) {
+        uint32_t pageAddr = CONFIG_SECTOR_BASE + (i * CONFIG_PAGE_SIZE);
+        ConfigPageHeader* header = (ConfigPageHeader*)pageAddr;
+
+        if (header->state == 0xAA) {
+            uint32_t payloadAddr = pageAddr + sizeof(ConfigPageHeader);
+            uint16_t crc = calcCRC16((uint8_t*)payloadAddr, sizeof(EEPROMData));
+
+            if (crc == header->crc16) {
+                memcpy(&eepromData, (void*)payloadAddr, sizeof(EEPROMData));
+                found = true;
+                break;
+            } else {
+                makeLog(LOG_WARN, "Config page %d CRC mismatch", i);
+            }
+        }
+    }
+    return found;
 }
 
-void clearPageHeader(int pageNum) {
-  int pageAddress = pageNum * EEPROM_PAGE_SIZE;
-  EEPROM.write(pageAddress, 0);
-}
+void saveConfigsToFlash() {
+    uint8_t pageBuffer[CONFIG_PAGE_SIZE];
+    memset(pageBuffer, 0xFF, CONFIG_PAGE_SIZE);
 
-void setPageHeader(int pageNum) {
-  int pageAddress = pageNum * EEPROM_PAGE_SIZE;
-  EEPROM.write(pageAddress, 1);
+    ConfigPageHeader* header = (ConfigPageHeader*)pageBuffer;
+    header->state = 0xAA;
+    memcpy(pageBuffer + sizeof(ConfigPageHeader), &eepromData, sizeof(EEPROMData));
+    header->crc16 = calcCRC16((uint8_t*)&eepromData, sizeof(EEPROMData));
+
+    HAL_FLASH_Unlock();
+
+    int currentActivePageIdx = -1;
+    for (int i = 0; i < CONFIG_TOTAL_PAGES; i++) {
+         if (((ConfigPageHeader*)(CONFIG_SECTOR_BASE + i * CONFIG_PAGE_SIZE))->state == 0xAA) {
+             currentActivePageIdx = i;
+             break;
+         }
+    }
+
+    uint16_t nextPageIdx = (currentActivePageIdx == -1) ? 0 : (currentActivePageIdx + 1);
+    if (nextPageIdx >= CONFIG_TOTAL_PAGES) nextPageIdx = 0;
+
+    bool needErase = false;
+    if (nextPageIdx == 0 && currentActivePageIdx != -1) needErase = true;
+    else {
+        ConfigPageHeader* nextHeader = (ConfigPageHeader*)(CONFIG_SECTOR_BASE + nextPageIdx * CONFIG_PAGE_SIZE);
+        if (nextHeader->state != 0xFF) {
+             needErase = true;
+             nextPageIdx = 0;
+        }
+    }
+
+    if (needErase) {
+        FLASH_EraseInitTypeDef eraseStruct;
+        uint32_t sectorError = 0;
+        eraseStruct.TypeErase = FLASH_TYPEERASE_SECTORS;
+        eraseStruct.VoltageRange = FLASH_VOLTAGE_RANGE_3;
+        eraseStruct.Sector = CONFIG_SECTOR;
+        eraseStruct.NbSectors = 1;
+
+        HAL_FLASHEx_Erase(&eraseStruct, &sectorError);
+        nextPageIdx = 0;
+        currentActivePageIdx = -1;
+    }
+
+    uint32_t newPageAddr = CONFIG_SECTOR_BASE + (nextPageIdx * CONFIG_PAGE_SIZE);
+
+    uint32_t* dataPtr = (uint32_t*)pageBuffer;
+    for (size_t i = 0; i < CONFIG_PAGE_SIZE; i+=4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + i, *dataPtr++);
+    }
+
+    if (currentActivePageIdx != -1 && currentActivePageIdx != nextPageIdx) {
+        uint32_t oldPageAddr = CONFIG_SECTOR_BASE + (currentActivePageIdx * CONFIG_PAGE_SIZE);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, oldPageAddr, 0x00);
+    }
+
+    HAL_FLASH_Lock();
+    makeLog(LOG_INFO, "Configs saved to Flash Page %d", nextPageIdx);
+
+    digitalWrite(ZOOMER, HIGH);
+    delay(1000);
+    digitalWrite(ZOOMER, LOW);
 }
 
 void saveEEPROMData(const EEPROMData& data) {
-  int activePage = findActivePage();
-  int nextPage = (activePage + 1) % EEPROM_TOTAL_PAGES;
-
-  clearPageHeader(activePage);
-
-  int pageAddress = nextPage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
-  const uint8_t* dataPtr = (const uint8_t*)&data;
-  int cnt = millis();
-  int sz = sizeof(EEPROMData);
-  for (int i = 0; i < sz; i++) eeprom_buffered_write_byte(pageAddress + i, dataPtr[i]);
-  eeprom_buffer_flush();
-  setPageHeader(nextPage);
-  digitalWrite(ZOOMER, HIGH);
-  delay(1000);
-  digitalWrite(ZOOMER, LOW);
+    saveConfigsToFlash();
 }
 
 // Чтение параметров с флэш памяти контроллера
@@ -4335,7 +4444,7 @@ void read_EEPROM_Data() {
   eepromData.BotRightYR = 4;
   eepromData.chnlOffset = chnlOffset;
 
-  if (readEEPROMData(eepromData)) {
+  if (loadConfigsFromFlash()) {
     for (uint8_t i = 0; i < 8; i++) {
       calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
       calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
@@ -4358,31 +4467,10 @@ void read_EEPROM_Data() {
     waitTime = eepromData.waitTime;
     mprOffset = eepromData.mprOffset;
     chnlOffset = eepromData.chnlOffset;
-  } else saveEEPROMData(eepromData);
+  } else saveConfigsToFlash();
   if (minBattCharge > 50) minBattCharge = 20;
   if (waitTime < 5000) waitTime = 5000;
   else if (waitTime > 30000) waitTime = 30000;
-
-  eepromStat.load = 0;
-  eepromStat.unload = 0;
-  eepromStat.compact = 0;
-  eepromStat.liftUp = 0;
-  eepromStat.liftDown = 0;
-  eepromStat.totalDist = 0;
-
-}
-
-bool readEEPROMData(EEPROMData& data) {
-  int activePage = findActivePage();
-  if (activePage == -1) return false;
-  int pageAddress = activePage * EEPROM_PAGE_SIZE + EEPROM_HEADER_SIZE;
-  uint8_t* dataPtr = (uint8_t*)&data;
-  int cnt = millis();
-  for (int i = 0; i < sizeof(EEPROMData); i++) {
-    cnt = millis();
-    dataPtr[i] = EEPROM.read(pageAddress + i);
-  }
-  return true;
 }
 
 // Считывание параметров с BMS батареи
@@ -4532,6 +4620,14 @@ void HardFault_Handler(void) {
     }
   }
 }
+
+#define STATS_ATOMIC_UPDATE(action) \
+    do { \
+        __disable_irq(); \
+        action; \
+        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
+        __enable_irq(); \
+    } while(0)
 
 // Вычисление CRC16 CCITT
 uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
