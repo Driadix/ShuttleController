@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 // --- Transport Layer: Frame Definition ---
 #define PROTOCOL_SYNC_1    0xAA
@@ -12,6 +13,7 @@ typedef struct {
     uint8_t  sync1;      // Always 0xAA
     uint8_t  sync2;      // Always 0x55
     uint16_t length;     // Length of Payload ONLY (excludes header and CRC)
+    uint8_t  targetID;   // 0x00 = Display (Direct), 0x01-0x20 = Specific Shuttle
     uint8_t  seq;        // Rolling sequence counter (0-255)
     uint8_t  msgID;      // Identifies the Payload struct
 } FrameHeader;
@@ -21,6 +23,9 @@ enum MsgID : uint8_t {
     MSG_HEARTBEAT      = 0x01, // High freq: Position, Speed, State
     MSG_SENSORS        = 0x02, // Med freq: TOF, Encoders, Pallet sensors
     MSG_STATS          = 0x03, // Low freq: Odometry, Cycles
+    MSG_REQ_HEARTBEAT  = 0x04, // Pult -> Shuttle: Request Telemetry
+    MSG_REQ_SENSORS    = 0x05, // Pult -> Shuttle: Request Sensors (Only on Sensor Page)
+    MSG_REQ_STATS      = 0x06, // Pult -> Shuttle: Request Stats (Only on Stats Page)
     MSG_LOG            = 0x10, // Async: Human readable strings with levels
     MSG_CONFIG_SET     = 0x20, // Display -> Shuttle: Set EEPROM param
     MSG_CONFIG_GET     = 0x21, // Display -> Shuttle: Request param
@@ -37,9 +42,9 @@ enum LogLevel : uint8_t {
 // Mapped from Cntrl_V1_2_WS.ino get_Cmd() / run_Cmd() strings
 enum CmdType : uint8_t {
     CMD_STOP            = 5,   // "dStop_"
-    //CMD_STOP_MANUAL     = 55,  // "dStopM"
-    //CMD_MOVE_RIGHT_MAN  = 1,   // "dRight"
-    //CMD_MOVE_LEFT_MAN   = 2,   // "dLeft_"
+    CMD_STOP_MANUAL     = 55,  // "dStopM"
+    CMD_MOVE_RIGHT_MAN  = 1,   // "dRight"
+    CMD_MOVE_LEFT_MAN   = 2,   // "dLeft_"
     CMD_LIFT_UP         = 3,   // "dUp___"
     CMD_LIFT_DOWN       = 4,   // "dDown_"
     CMD_LOAD            = 6,   // "dLoad_"
@@ -55,16 +60,16 @@ enum CmdType : uint8_t {
     CMD_GET_CONFIG      = 16,  // "dSGet_" / "dSpGet"
     //CMD_TEST_SENSORS    = 17,  // "dDataP"
     //CMD_ERROR_REQ       = 19,  // "tError"
-    //CMD_EVACUATE_ON     = 20,  // "dEvOn_"
+    CMD_EVACUATE_ON     = 20,  // "dEvOn_"
     //CMD_EVACUATE_OFF    = 28,  // "dEvOff"
     CMD_LONG_LOAD       = 21,  // "dLLoad"
     CMD_LONG_UNLOAD     = 22,  // "dLUnld"
     CMD_LONG_UNLOAD_QTY = 23,  // "dQt"
     CMD_RESET_ERROR     = 24,  // "dReset"
-    //CMD_MANUAL_MODE     = 25,  // "dManua"
-    //CMD_LOG_MODE        = 26,  // "dGetLg"
+    CMD_MANUAL_MODE     = 25,  // "dManua"
+    CMD_LOG_MODE        = 26,  // "dGetLg"
     CMD_HOME            = 27,  // "dHome_"
-    //CMD_PING            = 100, // "ngPing"
+    CMD_PING            = 100, // "ngPing"
     CMD_FIRMWARE_UPDATE = 200, // "Firmware"
     CMD_SYSTEM_RESET    = 201, // "Reboot__"
     CMD_SET_DATETIME    = 202  // "DT"
@@ -163,3 +168,111 @@ struct AckPacket {
 };
 
 #pragma pack(pop)
+
+class ShuttleProtocol {
+public:
+    static uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
+        uint16_t crc = 0xFFFF;
+        for (uint16_t i = 0; i < length; i++) {
+            crc ^= (uint16_t)data[i] << 8;
+            for (uint8_t j = 0; j < 8; j++) {
+                if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
+                else crc <<= 1;
+            }
+        }
+        return crc;
+    }
+};
+
+class ProtocolParser {
+public:
+    enum State {
+        STATE_WAIT_SYNC1,
+        STATE_WAIT_SYNC2,
+        STATE_READ_HEADER,
+        STATE_READ_PAYLOAD,
+        STATE_READ_CRC
+    };
+
+    bool crcError;
+
+    void init() {
+        reset();
+    }
+
+    void reset() {
+        state = STATE_WAIT_SYNC1;
+        rxIndex = 0;
+        payloadLen = 0;
+        crcError = false;
+    }
+
+    FrameHeader* feed(uint8_t byte) {
+        switch (state) {
+            case STATE_WAIT_SYNC1:
+                crcError = false;
+                if (byte == PROTOCOL_SYNC_1) {
+                    rxBuffer[0] = byte;
+                    state = STATE_WAIT_SYNC2;
+                }
+                break;
+            case STATE_WAIT_SYNC2:
+                if (byte == PROTOCOL_SYNC_2) {
+                    rxBuffer[1] = byte;
+                    rxIndex = 2;
+                    state = STATE_READ_HEADER;
+                } else {
+                    state = STATE_WAIT_SYNC1;
+                }
+                break;
+            case STATE_READ_HEADER:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader)) {
+                    FrameHeader* header = (FrameHeader*)rxBuffer;
+                    payloadLen = header->length;
+                    if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) {
+                        state = STATE_WAIT_SYNC1;
+                        rxIndex = 0;
+                    } else if (payloadLen == 0) {
+                        state = STATE_READ_CRC;
+                    } else {
+                        state = STATE_READ_PAYLOAD;
+                    }
+                }
+                break;
+            case STATE_READ_PAYLOAD:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader) + payloadLen) {
+                    state = STATE_READ_CRC;
+                }
+                break;
+            case STATE_READ_CRC:
+                rxBuffer[rxIndex++] = byte;
+                if (rxIndex >= sizeof(FrameHeader) + payloadLen + 2) {
+                    uint16_t totalLen = sizeof(FrameHeader) + payloadLen;
+                    uint16_t receivedCRC = rxBuffer[totalLen] | (rxBuffer[totalLen+1] << 8);
+                    uint16_t calculatedCRC = ShuttleProtocol::calcCRC16(rxBuffer, totalLen);
+
+                    state = STATE_WAIT_SYNC1;
+
+                    if (receivedCRC == calculatedCRC) {
+                        return (FrameHeader*)rxBuffer;
+                    } else {
+                        crcError = true;
+                        return nullptr;
+                    }
+                }
+                break;
+        }
+        return nullptr;
+    }
+
+    uint8_t* getBuffer() { return rxBuffer; }
+    uint16_t getTotalLength() { return sizeof(FrameHeader) + payloadLen; }
+
+private:
+    State state;
+    uint8_t rxBuffer[512];
+    uint16_t rxIndex;
+    uint16_t payloadLen;
+};
