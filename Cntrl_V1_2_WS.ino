@@ -17,6 +17,10 @@
         } \
     } while(0)
 
+<<<<<<< HEAD
+=======
+// --- Added for Stats in Backup SRAM ---
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
 
@@ -24,6 +28,7 @@
 struct SecureStats {
     uint32_t magicWord;
     StatsPacket payload;
+<<<<<<< HEAD
     uint16_t crc16;
     uint16_t reserved;
 };
@@ -31,6 +36,17 @@ struct SecureStats {
 
 SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
 
+=======
+    uint16_t crc16;     // CRC16 over the payload
+    uint16_t reserved;  // 32-bit alignment
+};
+#pragma pack(pop)
+
+// Map the pointer directly to the hardware address
+SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
+
+// --- Added for Configs in Flash Sector 7 ---
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
 #define CONFIG_SECTOR        FLASH_SECTOR_7
 #define CONFIG_SECTOR_BASE   0x08060000
 #define CONFIG_SECTOR_SIZE   (128 * 1024)
@@ -38,9 +54,15 @@ SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
 #define CONFIG_TOTAL_PAGES   (CONFIG_SECTOR_SIZE / CONFIG_PAGE_SIZE)
 
 struct ConfigPageHeader {
+<<<<<<< HEAD
     uint8_t state;
     uint8_t reserved[1];
     uint16_t crc16;
+=======
+    uint8_t state;       // 0xFF = Empty, 0xAA = Active, 0x00 = Obsolete
+    uint8_t reserved[1]; // Padding for 32-bit alignment (1+1+2=4)
+    uint16_t crc16;      // Payload CRC16
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
 };
 
 #pragma region Пины и дефайны...
@@ -252,7 +274,7 @@ uint8_t detectPalleteF1;               // Флаг датчика обнаруж
 uint8_t detectPalleteF2;               // Флаг датчика обнаружения паллеты вперед 2
 uint8_t detectPalleteR1;               // Флаг датчика обнаружения паллеты назад 1
 uint8_t detectPalleteR2;               // Флаг датчика обнаружения паллеты назад 2
-uint8_t palleteCount = 0;              // Счетчик паллет
+#define palleteCount sramStats->payload.palleteCount
 uint8_t motorStart = false;            // Флаг запуска двигателя движения
 uint8_t motorReverse = 0;              // Флаг реверсивного (1) или прямого (0) движения
 uint8_t turnFlag = 0;                  // Флаг совершения оборота колесом шаттла
@@ -4153,12 +4175,24 @@ void demo_Mode() {
 #pragma region Технические функции
 
 void initStatsSRAM() {
+<<<<<<< HEAD
     __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
 
     __HAL_RCC_BKPSRAM_CLK_ENABLE();
     HAL_PWREx_EnableBkUpReg();
 
+=======
+    // 1. Enable Power Clock and Backup Access
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+
+    // 2. Enable Backup SRAM Clock and Regulator (keeps it alive on VBAT)
+    __HAL_RCC_BKPSRAM_CLK_ENABLE();
+    HAL_PWREx_EnableBkUpReg();
+
+    // Wait for regulator to stabilize with timeout
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
     uint32_t start = millis();
     while(__HAL_PWR_GET_FLAG(PWR_FLAG_BRR) == RESET) {
         if (millis() - start > 100) {
@@ -4167,9 +4201,17 @@ void initStatsSRAM() {
         }
     }
 
+<<<<<<< HEAD
     if (sramStats->magicWord != STATS_MAGIC_WORD ||
         calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc16) {
 
+=======
+    // 3. Validate existing data
+    if (sramStats->magicWord != STATS_MAGIC_WORD ||
+        calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc16) {
+
+        // Memory is corrupt or uninitialized (e.g., dead battery or first boot)
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
         makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
 
         memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
@@ -4341,12 +4383,24 @@ bool loadConfigsFromFlash() {
 }
 
 void saveConfigsToFlash() {
+<<<<<<< HEAD
     uint8_t pageBuffer[CONFIG_PAGE_SIZE];
     memset(pageBuffer, 0xFF, CONFIG_PAGE_SIZE);
 
     ConfigPageHeader* header = (ConfigPageHeader*)pageBuffer;
     header->state = 0xAA;
     memcpy(pageBuffer + sizeof(ConfigPageHeader), &eepromData, sizeof(EEPROMData));
+=======
+    uint8_t pageBuffer[CONFIG_PAGE_SIZE]; // Use stack buffer
+    memset(pageBuffer, 0xFF, CONFIG_PAGE_SIZE); // Reset to Flash state
+
+    // Prepare Header
+    ConfigPageHeader* header = (ConfigPageHeader*)pageBuffer;
+    header->state = 0xAA;
+    // Copy Payload
+    memcpy(pageBuffer + sizeof(ConfigPageHeader), &eepromData, sizeof(EEPROMData));
+    // Calc CRC16
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
     header->crc16 = calcCRC16((uint8_t*)&eepromData, sizeof(EEPROMData));
 
     HAL_FLASH_Unlock();
@@ -4387,6 +4441,10 @@ void saveConfigsToFlash() {
 
     uint32_t newPageAddr = CONFIG_SECTOR_BASE + (nextPageIdx * CONFIG_PAGE_SIZE);
 
+<<<<<<< HEAD
+=======
+    // Write Buffer (word by word)
+>>>>>>> 6d9dd5f5cf47cf4ded803aed4829b4ffa0e29410
     uint32_t* dataPtr = (uint32_t*)pageBuffer;
     for (size_t i = 0; i < CONFIG_PAGE_SIZE; i+=4) {
         HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + i, *dataPtr++);
@@ -4405,6 +4463,7 @@ void saveConfigsToFlash() {
     digitalWrite(ZOOMER, LOW);
 }
 
+// Wrapper for compatibility
 void saveEEPROMData(const EEPROMData& data) {
     saveConfigsToFlash();
 }
