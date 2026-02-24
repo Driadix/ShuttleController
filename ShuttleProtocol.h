@@ -101,6 +101,7 @@ struct TelemetryPacket {
     // Bit 3: inverse, Bit 4: inChannel, Bit 5: fifoLifo
     uint16_t stateFlags;
     uint8_t shuttleNumber; // Shuttle number
+    uint8_t palleteCount;  // Runtime pallet count (reset per op)
 };
 
 // 0x02: Sensors (Medium Frequency - e.g., 2Hz)
@@ -121,13 +122,19 @@ struct SensorPacket {
 
 // 0x03: Stats (Low Frequency - e.g., 0.1Hz or on change)
 struct StatsPacket {
-    uint32_t totalDist;        //
-    uint32_t loadCounter;      //
-    uint32_t unloadCounter;    //
-    uint32_t compactCounter;   //
-    uint32_t liftUpCounter;    //
-    uint32_t liftDownCounter;  //
-    uint8_t  palleteCount;     //
+    uint32_t totalDist;                // Odometer (mm)
+    uint32_t loadCounter;              // Number of loads
+    uint32_t unloadCounter;            // Number of unloads
+    uint32_t compactCounter;           // Number of compactions
+    uint32_t liftUpCounter;            // Number of lift ups
+    uint32_t liftDownCounter;          // Number of lift downs
+    uint32_t lifetimePalletsDetected;  // Total pallets detected (never resets)
+    uint32_t totalUptimeMinutes;       // Total system uptime
+    uint32_t motorStallCount;          // Number of motor stalls (Error 10)
+    uint32_t lifterOverloadCount;      // Number of lifter overloads
+    uint16_t crashCount;               // Number of crashes
+    uint16_t watchdogResets;           // Number of WDT/HardFault resets
+    uint16_t lowBatteryEvents;         // Number of low battery events (Error 11)
 };
 
 // 0x10: Log (Asynchronous)
