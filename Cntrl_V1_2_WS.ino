@@ -29,15 +29,16 @@ struct SecureStats {
 };
 #pragma pack(pop)
 
-uint16_t calcCRC16(const uint8_t* data, uint16_t length);
-
 SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
+
+ProtocolParser parserRadio;
+ProtocolParser parserDisplay;
 
 #define STATS_ATOMIC_UPDATE(action) \
     do { \
         __disable_irq(); \
         action; \
-        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
+        sramStats->crc16 = ProtocolUtils::calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
         __enable_irq(); \
     } while(0)
 
@@ -338,7 +339,7 @@ void localLog(LogLevel level, const char* msg) {
   Serial.println(msg);
 }
 
-void sendLog(LogLevel level, const char* msg) {
+void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   uint8_t logBuffer[300];
   uint16_t msgLen = strlen(msg);
   if (msgLen > 240) msgLen = 240;
@@ -346,24 +347,19 @@ void sendLog(LogLevel level, const char* msg) {
   FrameHeader* header = (FrameHeader*)logBuffer;
   header->sync1 = PROTOCOL_SYNC_1;
   header->sync2 = PROTOCOL_SYNC_2;
-  header->length = sizeof(LogPacket) + msgLen;
+  header->length = 1 + msgLen; // Level + Msg
+  header->targetID = TARGET_ID_NONE;
   static uint8_t seqCounter = 0;
   header->seq = seqCounter++;
   header->msgID = MSG_LOG;
 
-  LogPacket* logPkt = (LogPacket*)(logBuffer + sizeof(FrameHeader));
-  logPkt->level = level;
-  memcpy(logBuffer + sizeof(FrameHeader) + sizeof(LogPacket), msg, msgLen);
+  logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
+  memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
 
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
-  uint16_t crc = calcCRC16(logBuffer, totalLen);
+  ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-  logBuffer[totalLen] = crc & 0xFF;
-
-
-  logBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-
-  Serial1.write(logBuffer, totalLen + 2);
+  port->write(logBuffer, totalLen + 2);
 }
 
 void makeLog(LogLevel level, const char* format, ...) {
@@ -373,10 +369,11 @@ void makeLog(LogLevel level, const char* format, ...) {
   va_end(args);
 
   localLog(level, logStringBuffer);
-  sendLog(level, logStringBuffer);
+  sendLog(level, logStringBuffer, &Serial1);
 }
 
-void sendTelemetryPacket() {
+void sendTelemetryPacket(Stream* port) {
+    if (!port) return;
     TelemetryPacket pkt;
     pkt.timestamp = millis();
     pkt.errorCode = errorCode;
@@ -400,6 +397,7 @@ void sendTelemetryPacket() {
     header->sync1 = PROTOCOL_SYNC_1;
     header->sync2 = PROTOCOL_SYNC_2;
     header->length = sizeof(TelemetryPacket);
+    header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
     header->seq = seqCounter++;
     header->msgID = MSG_HEARTBEAT;
@@ -407,17 +405,13 @@ void sendTelemetryPacket() {
     memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    uint16_t crc = calcCRC16(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-    txBuffer[totalLen] = crc & 0xFF;
-
-
-    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-
-    Serial1.write(txBuffer, totalLen + 2);
+    port->write(txBuffer, totalLen + 2);
 }
 
-void sendSensorPacket() {
+void sendSensorPacket(Stream* port) {
+    if (!port) return;
     temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
 
     SensorPacket pkt;
@@ -443,6 +437,7 @@ void sendSensorPacket() {
     header->sync1 = PROTOCOL_SYNC_1;
     header->sync2 = PROTOCOL_SYNC_2;
     header->length = sizeof(SensorPacket);
+    header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
     header->seq = seqCounter++;
     header->msgID = MSG_SENSORS;
@@ -450,17 +445,13 @@ void sendSensorPacket() {
     memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    uint16_t crc = calcCRC16(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-    txBuffer[totalLen] = crc & 0xFF;
-
-
-    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-
-    Serial1.write(txBuffer, totalLen + 2);
+    port->write(txBuffer, totalLen + 2);
 }
 
-void sendStatsPacket() {
+void sendStatsPacket(Stream* port) {
+    if (!port) return;
     StatsPacket pkt;
     pkt.totalDist = sramStats->payload.totalDist;
     pkt.loadCounter = sramStats->payload.loadCounter;
@@ -480,6 +471,7 @@ void sendStatsPacket() {
     header->sync1 = PROTOCOL_SYNC_1;
     header->sync2 = PROTOCOL_SYNC_2;
     header->length = sizeof(StatsPacket);
+    header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
     header->seq = seqCounter++;
     header->msgID = MSG_STATS;
@@ -487,14 +479,9 @@ void sendStatsPacket() {
     memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    uint16_t crc = calcCRC16(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-    txBuffer[totalLen] = crc & 0xFF;
-
-
-    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-
-    Serial1.write(txBuffer, totalLen + 2);
+    port->write(txBuffer, totalLen + 2);
 }
 
 // Инициация устройств
@@ -654,15 +641,15 @@ void loop() {
 
   if (millis() - timerTelemetry >= 300) {
     timerTelemetry = millis();
-    sendTelemetryPacket();
+    sendTelemetryPacket(&Serial2);
   }
   if (millis() - timerSensors >= 500) {
     timerSensors = millis();
-    sendSensorPacket();
+    sendSensorPacket(&Serial2);
   }
   if (millis() - timerStats >= 5000) {
     timerStats = millis();
-    sendStatsPacket();
+    sendStatsPacket(&Serial2);
   }
   if (millis() - timerUptime >= 60000) {
       timerUptime = millis();
@@ -1148,7 +1135,8 @@ enum ParseState {
     STATE_READ_CRC
 };
 
-void sendAck(uint8_t seq, uint8_t result) {
+void sendAck(uint8_t seq, uint8_t result, Stream* port) {
+    if (!port) return;
     AckPacket pkt;
     pkt.refSeq = seq;
     pkt.result = result;
@@ -1157,23 +1145,31 @@ void sendAck(uint8_t seq, uint8_t result) {
     header->sync1 = PROTOCOL_SYNC_1;
     header->sync2 = PROTOCOL_SYNC_2;
     header->length = sizeof(AckPacket);
+    header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
     header->seq = seqCounter++;
     header->msgID = MSG_ACK;
 
     memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(AckPacket));
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    uint16_t crc = calcCRC16(txBuffer, totalLen);
-    txBuffer[totalLen] = crc & 0xFF;
+    ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-    txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-    Serial1.write(txBuffer, totalLen + 2);
+    port->write(txBuffer, totalLen + 2);
 }
 
-uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
-    if (header->msgID == MSG_COMMAND) {
+uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
+    if (header->msgID == MSG_REQ_HEARTBEAT) {
+        sendTelemetryPacket(replyPort);
+        return 0;
+    } else if (header->msgID == MSG_REQ_SENSORS) {
+        sendSensorPacket(replyPort);
+        return 0;
+    } else if (header->msgID == MSG_REQ_STATS) {
+        sendStatsPacket(replyPort);
+        return 0;
+    } else if (header->msgID == MSG_COMMAND) {
         CommandPacket* cmd = (CommandPacket*)payload;
-        sendAck(header->seq, 0);
+        sendAck(header->seq, 0, replyPort);
 
         if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
             mooveDistance = cmd->arg1;
@@ -1211,7 +1207,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
                 currentPosition = channelLength - currentPosition - 800;
                 break;
         }
-        sendAck(header->seq, 0);
+        sendAck(header->seq, 0, replyPort);
         return 0;
     } else if (header->msgID == MSG_CONFIG_GET) {
         ConfigPacket* req = (ConfigPacket*)payload;
@@ -1236,6 +1232,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
         repHeader->sync1 = PROTOCOL_SYNC_1;
         repHeader->sync2 = PROTOCOL_SYNC_2;
         repHeader->length = sizeof(ConfigPacket);
+        repHeader->targetID = TARGET_ID_NONE;
         static uint8_t repSeq = 0;
         repHeader->seq = repSeq++;
         repHeader->msgID = MSG_CONFIG_REP;
@@ -1243,100 +1240,30 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload) {
         memcpy(txBuffer + sizeof(FrameHeader), &rep, sizeof(ConfigPacket));
 
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
-        uint16_t crc = calcCRC16(txBuffer, totalLen);
+        ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-        txBuffer[totalLen] = crc & 0xFF;
-
-
-        txBuffer[totalLen + 1] = (crc >> 8) & 0xFF;
-
-        Serial1.write(txBuffer, totalLen + 2);
+        replyPort->write(txBuffer, totalLen + 2);
 
         return 0;
     }
     return 0;
 }
 
-uint8_t parseSerial1() {
-    static ParseState state = STATE_WAIT_SYNC1;
-    static uint8_t rxBuffer[512];
-    static uint16_t rxIndex = 0;
-    static uint16_t payloadLen = 0;
-
-    while (Serial1.available()) {
-        uint8_t byte = Serial1.read();
-
-        switch (state) {
-            case STATE_WAIT_SYNC1:
-                if (byte == PROTOCOL_SYNC_1) {
-                    rxBuffer[0] = byte;
-                    state = STATE_WAIT_SYNC2;
-                }
-                break;
-            case STATE_WAIT_SYNC2:
-                if (byte == PROTOCOL_SYNC_2) {
-                    rxBuffer[1] = byte;
-                    rxIndex = 2;
-                    state = STATE_READ_HEADER;
-                } else {
-                    state = STATE_WAIT_SYNC1;
-                    rxIndex = 0; payloadLen = 0;
-                }
-                break;
-            case STATE_READ_HEADER:
-                rxBuffer[rxIndex++] = byte;
-                if (rxIndex >= sizeof(FrameHeader)) {
-                    FrameHeader* header = (FrameHeader*)rxBuffer;
-                    payloadLen = header->length;
-                    if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) {
-                        makeLog(LOG_ERROR, "Packet too large: %d", payloadLen);
-
-                        state = STATE_WAIT_SYNC1;
-
-                        rxIndex = 0; payloadLen = 0;
-                    } else if (payloadLen == 0) {
-                        state = STATE_READ_CRC;
-                    } else {
-                        state = STATE_READ_PAYLOAD;
-                    }
-                }
-                break;
-            case STATE_READ_PAYLOAD:
-                rxBuffer[rxIndex++] = byte;
-                if (rxIndex >= sizeof(FrameHeader) + payloadLen) {
-                    state = STATE_READ_CRC;
-                }
-                break;
-            case STATE_READ_CRC:
-                rxBuffer[rxIndex++] = byte;
-                if (rxIndex >= sizeof(FrameHeader) + payloadLen + 2) {
-                    uint16_t totalLen = sizeof(FrameHeader) + payloadLen;
-                    uint16_t receivedCRC = rxBuffer[totalLen] | (rxBuffer[totalLen + 1] << 8);
-                    uint16_t calculatedCRC = calcCRC16(rxBuffer, totalLen);
-
-                    if (receivedCRC == calculatedCRC) {
-                        FrameHeader* header = (FrameHeader*)rxBuffer;
-                        uint8_t res = processPacket(header, rxBuffer + sizeof(FrameHeader));
-                        state = STATE_WAIT_SYNC1;
-                        rxIndex = 0; payloadLen = 0;
-                        if (res != 0) return res;
-                    } else {
-                        makeLog(LOG_WARN, "CRC Error: Calc %04X != Recv %04X", calculatedCRC, receivedCRC);
-                        state = STATE_WAIT_SYNC1;
-                        rxIndex = 0; payloadLen = 0;
-                    }
-                }
-                break;
+uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
+    while (port.available()) {
+        FrameHeader* header = parser.feed(port.read());
+        if (header) {
+            uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
+            if (res != 0) return res;
         }
     }
     return 0;
 }
 
-// Запрос команд с пульта ДУ
+// Запрос команд
 uint8_t get_Cmd() {
-  if (millis() - countLora < 20) { return status; }
-
-  uint8_t newStatus = parseSerial1();
+  // Poll Radio
+  uint8_t newStatus = pollSerial(Serial1, parserRadio);
   if (newStatus != 0) {
       if (newStatus == CMD_FIRMWARE_UPDATE) {
           motor_Stop();
@@ -1349,300 +1276,34 @@ uint8_t get_Cmd() {
       return newStatus;
   }
 
-  int8_t inByte = 0;
-  int8_t data = 0;
-  uint8_t distf = 1;
-  uint8_t statusTmp = 100;
-  countLora = millis();
-  String inStr = "";
-  if (Serial2.available()) {
-    inByte = Serial2.read();
-    char inChar = (char)inByte;
-    inStr += inChar;
-    delayMicroseconds(1750);
-    inByte = Serial2.read();
-    inChar = (char)inByte;
-    inStr += inChar;
-    while (inStr != shuttleNums[shuttleNum] && Serial2.available()) {
-      inStr = inStr.substring(1, 2);
-      delayMicroseconds(1750);
-      inByte = Serial2.read();
-      inChar = (char)inByte;
-      inStr += inChar;
-    }
-    if (inStr == shuttleNums[shuttleNum]) {
-      data = 1;
-      int cnt = millis();
-      while (inStr.length() <= 7 && millis() - cnt < 50) {
-        delayMicroseconds(100);
-        if (Serial2.available()) {
-          inByte = Serial2.read();
-          inChar = (char)inByte;
-          inStr += inChar;
-        }
+  // Poll Display
+  newStatus = pollSerial(Serial2, parserDisplay);
+  if (newStatus != 0) {
+      if (newStatus == CMD_FIRMWARE_UPDATE) {
+          motor_Stop();
+          jumpToBootloader();
+      } else if (newStatus == CMD_SYSTEM_RESET) {
+          makeLog(LOG_INFO, "Reboot system by external command...");
+          delay(20);
+          HAL_NVIC_SystemReset();
       }
-      //if (inStr.length() == 8) while (Serial2.available()) Serial2.read();
-    }
-  }
-  if (data) {
-    String tempStr = inStr.substring(0, 2);
-    if (tempStr == shuttleNums[shuttleNum]) {
-      if (!pultConnect) {  // Подключение с пультом
-        digitalWrite(ZOOMER, HIGH);
-        delay(500);
-        digitalWrite(ZOOMER, LOW);
-        pultConnect = 1;
-      }
-      countPult = millis();
-      tempStr = inStr.substring(2, 8);
-      if (tempStr == "dCharg") send_Cmd();  // Запрос с пульта хартбита
-      else if (tempStr == "dUp___") {  // Поднять платформу вверх
-        Serial2.print(inStr + "!");
-        statusTmp = 3;
-      } else if (tempStr == "dDown_") {  // Опустить платфоорму
-        Serial2.print(inStr + "!");
-        statusTmp = 4;
-      } else if (tempStr == "dStop_") {  // Остановка
-        statusTmp = 5;
-        Serial2.print(inStr + "!");
-        diffPallete = 0;
-      } else if (tempStr == "dLoad_") {  // Загрузка паллеты
-        Serial2.print(inStr + "!");
-        statusTmp = 6;
-      } else if (tempStr == "dUnld_") {  // Выгрузка паллеты
-        Serial2.print(inStr + "!");
-        statusTmp = 7;
-      } else if (tempStr == "dClbr_") {  // Калибровка
-        Serial2.print(inStr + "!");
-        statusTmp = 10;
-      } else if (tempStr == "dDemo_") {  // Демо режим
-        Serial2.print(inStr + "!");
-        statusTmp = 11;
-      } else if (tempStr == "dGetQu") {  // Подсчет паллет
-        Serial2.print(inStr + "!");
-        statusTmp = 12;
-      } else if (tempStr == "dSaveC") {  // Сохранение параметров на флэш память
-        Serial2.print(inStr + "!");
-        statusTmp = 13;
-      } else if (tempStr == "dComFo") {  // Уплотнение паллет вперед
-        Serial2.print(inStr + "!");
-        statusTmp = 14;
-      } else if (tempStr == "dComBa") {  // Уплотнение паллет назад
-        Serial2.print(inStr + "!");
-        statusTmp = 15;
-      } else if (tempStr == "dSGet_") {  // Запрос параметров из настроек
-        Serial2.print(inStr + "!");
-        statusTmp = 16;
-        send_Cmd();
-      } else if (tempStr == "dDataP") {  // Запрос данных из отладки
-        Serial2.print(inStr + "!");
-        statusTmp = 17;
-        send_Cmd();
-      } else if (tempStr == "tError") {  // Запрос ошибок
-        Serial2.print(inStr + "!");
-        statusTmp = 19;
-      } else if (tempStr == "dEvOn_") {  // Включение режима эвакуации
-        Serial2.print(inStr + "!");
-        statusTmp = 20;
-        evacuate = 1;
-      } else if (tempStr == "dLLoad") {  // Продолжительная загрузка
-        Serial2.print(inStr + "!");
-        statusTmp = 21;
-      } else if (tempStr == "dLUnld") {  // Продолжительная выгрузка
-        Serial2.print(inStr + "!");
-        statusTmp = 22;
-      } else if (tempStr == "dReset") {  // Сброс ошибок
-        Serial2.print(inStr + "!");
-        statusTmp = 24;
-      } else if (tempStr == "dManua") {  // Ручной режим
-        Serial2.print(inStr + "!");
-        statusTmp = 25;
-        countManual = millis();
-        send_Cmd();
-      } else if (tempStr == "dGetLg") {  // Журналирование
-        Serial2.print(inStr + "!");
-        statusTmp = 26;
-        send_Cmd();
-      } else if (tempStr == "dHome_") {  // В начало канала
-        Serial2.print(inStr + "!");
-        statusTmp = 27;
-      } else if (tempStr == "dWaitT") {  // Время ожидания при загрузке
-        Serial2.print(inStr + "!");
-        statusTmp = 29;
-      } else if (tempStr == "dMprOf") {  // Запрос смещения МПР
-        Serial2.print(inStr + "!");
-        statusTmp = 30;
-      } else if (tempStr == "dEvOff") {  // Выключение режима эвакуации
-        Serial2.print(inStr);
-        evacuate = 0;
-      } else if (tempStr == "ngPing") {  // Удержание движения
-        if (millis() - pingCount < 800) pingCount = millis();
-      } else if (tempStr == "dFIFO_") {  // Установка режима FIFO
-        Serial2.print(inStr + "!");
-        fifoLifo = 0;
-        eepromData.fifoLifo = fifoLifo;
-      } else if (tempStr == "dLIFO_") {  // Установка режима LIFO
-        Serial2.print(inStr + "!");
-        fifoLifo = 1;
-        eepromData.fifoLifo = fifoLifo;
-      } else if (tempStr == "dRevOn") {  // Включение реверса
-        Serial2.print(inStr + "!");
-        inverse = 0;
-        eepromData.inverse = inverse;
-        currentPosition = channelLength - currentPosition - 800;
-      } else if (tempStr == "dReOff") {  // Выключение реверса
-        Serial2.print(inStr + "!");
-        inverse = 1;
-        eepromData.inverse = inverse;
-        currentPosition = channelLength - currentPosition - 800;
-      }
-      tempStr = inStr.substring(2, 5);
-      if (tempStr == "dNN") {  // Установка номера шаттла
-        shuttleNum = inStr.substring(5, 8).toInt() - 1;
-        eepromData.shuttleNum = shuttleNum;
-      } else if (tempStr == "dQt") {  // Выгрузка заданного количества паллет
-        UPQuant = inStr.substring(5, 8).toInt();
-        statusTmp = 23;
-      } else if (tempStr == "dDm") {  // Установка межпаллетного расстояния
-        interPalleteDistance = inStr.substring(5, 8).toInt();
-        eepromData.interPalleteDistance = interPalleteDistance;
-      } else if (tempStr == "dSl") {  // Установка длинны шаттла
-        shuttleLength = inStr.substring(5, 8).toInt() * 10;
-        eepromData.shuttleLength = shuttleLength;
-      } else if (tempStr == "dSp") {  // Установка максимальной скорости
-        maxSpeed = inStr.substring(5, 8).toInt();
-        if (maxSpeed > 96) maxSpeed = 96;
-        if (maxSpeed < minSpeed) maxSpeed = minSpeed + 5;
-        eepromData.maxSpeed = maxSpeed;
-      } else if (tempStr == "dBc") {  // Установка минимального заряда батареи
-        minBattCharge = inStr.substring(5, 8).toInt();
-        if (minBattCharge > 50) minBattCharge = 50;
-        if (minBattCharge < 0) minBattCharge = 0;
-        eepromData.minBattCharge = minBattCharge;
-      } else if (tempStr == "dMr") {  // Движение назад на заданное расстояние
-        statusTmp = 8;
-        mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dMf") {  // Движение вперед на заданное расстояние
-        statusTmp = 9;
-        mooveDistance = inStr.substring(5, 8).toInt() * 10;
-      } else if (tempStr == "dWt") {  // Время ожидания при выгрузке
-        statusTmp = 0;
-        waitTime = inStr.substring(5, 7).toInt() * 1000;
-        eepromData.waitTime = waitTime;
-      } else if (tempStr == "dMo") {  // Смещение МПР
-        statusTmp = 0;
-        mprOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
-        eepromData.mprOffset = mprOffset;
-      } else if (tempStr == "dMc") {  // Смещение конца канала
-        statusTmp = 0;
-        chnlOffset = (int8_t)inStr.substring(5, 8).toInt() - 100;
-        eepromData.chnlOffset = chnlOffset;
-      }
-    }
+      return newStatus;
   }
 
-  if (statusTmp == 100) return status;
-  else return statusTmp;
+  return status;
 }
 
-// Запрос команд с пульта ДУ
+// Запрос команд (ручной режим)
 uint8_t get_Cmd_Manual() {
-  int8_t inByte = 0;
-  int8_t data = 0;
-  char inChar;
-  String inStr = "";
-  countLora = millis();
-  if (Serial2.available())  // Получаем команду
-  {
-    inByte = Serial2.read();
-    inChar = (char)inByte;
-    inStr += inChar;
-    delayMicroseconds(1750);
-    inByte = Serial2.read();
-    inChar = (char)inByte;
-    inStr += inChar;
-    while (inStr != shuttleNums[shuttleNum] && Serial2.available()) {
-      inStr = inStr.substring(1, 2);
-      delayMicroseconds(1750);
-      inByte = Serial2.read();
-      inChar = (char)inByte;
-      inStr += inChar;
-    }
-    if (inStr.substring(0, 2) == shuttleNums[shuttleNum]) {
-      int cnt = millis();
-      while (inStr.length() <= 7 && millis() - cnt < 50) {
-        delayMicroseconds(1750);
-        if (Serial2.available()) {
-          inByte = Serial2.read();
-          inChar = (char)inByte;
-          inStr += inChar;
-        }
-      }
-      if (inStr.length() == 8) data = 1;
-    }
-  }
-  Serial.println(inStr);
-  if (data) {
-    String tempStr = inStr.substring(2, 8);
-    //if (!pultConnect) {digitalWrite(ZOOMER, HIGH); delay(500); digitalWrite(ZOOMER, LOW); pultConnect = 1;}
-    if (!pultConnect) {
-      digitalWrite(ZOOMER, HIGH);
-      delay(500);
-      digitalWrite(ZOOMER, LOW);
-      pultConnect = 1;
-    }
-    countPult = millis();
-    if (tempStr == "dCharg") send_Cmd();  // Коннект с пультом
-    else if (tempStr == "dRight") {
-      send_Cmd();
-      return 1;
-    }  // Движение вперед
-    else if (tempStr == "dLeft_") {
-      send_Cmd();
-      return 2;
-    }  // Движение назад
-    else if (tempStr == "dUp___") {
-      send_Cmd();
-      return 3;
-    }  // Поднять платформу вверх
-    else if (tempStr == "dDown_") {
-      send_Cmd();
-      return 4;
-    }  // Опустить платфоорму
-    else if (tempStr == "dLoad_") {
-      status = 6;
-      send_Cmd();
-      return 6;
-    }  // Выгрузка паллеты
-    else if (tempStr == "dUnld_") {
-      status = 7;
-      send_Cmd();
-      return 7;
-    }  // Загрузка паллеты
-    else if (tempStr == "dLLoad") {
-      send_Cmd();
-      return 21;
-    }  // Продолжительная загрузка
-    else if (tempStr == "dLUnld") {
-      send_Cmd();
-      return 22;
-    }  // Продолжительная выгрузка
-    else if (tempStr == "dStop_") {
-      status = 5;
-      send_Cmd();
-      return status;
-    }  // Остановка
-    else if (tempStr == "dStopM") {
-      send_Cmd();
-      return 55;
-    }  // Остановка в ручном режиме
-    else if (tempStr == "ngPing") {
-      send_Cmd();
-      pingCount = millis();
-      return 100;
-    }  // Удержание движения
-  }
-  return 0;
+   // Poll Radio
+   uint8_t newStatus = pollSerial(Serial1, parserRadio);
+   if (newStatus != 0) return newStatus;
+
+   // Poll Display
+   newStatus = pollSerial(Serial2, parserDisplay);
+   if (newStatus != 0) return newStatus;
+
+   return 0;
 }
 
 // Выполнение команд с пульта ДУ
@@ -2277,7 +1938,7 @@ void blink_Error() {
       
       makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
       
-      sendTelemetryPacket();
+      sendTelemetryPacket(&Serial1);
     }
     else if (debuger == 10) {
       debuger = 0;    
@@ -4195,7 +3856,7 @@ void initStatsSRAM() {
     }
 
     if (sramStats->magicWord == STATS_MAGIC_WORD) {
-        uint16_t calcCRC = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
+        uint16_t calcCRC = ProtocolUtils::calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
         if (calcCRC == sramStats->crc16) {
              makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
              return;
@@ -4205,7 +3866,7 @@ void initStatsSRAM() {
     makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
     memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
     sramStats->magicWord = STATS_MAGIC_WORD;
-    sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
+    sramStats->crc16 = ProtocolUtils::calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
 }
 
 // Процедура калибровки энкодера вперед
@@ -4354,7 +4015,7 @@ bool loadConfigsFromFlash() {
 
         if (header->state == 0xAA) {
             uint32_t payloadAddr = pageAddr + sizeof(ConfigPageHeader);
-            uint16_t crc = calcCRC16((uint8_t*)payloadAddr, sizeof(EEPROMData));
+            uint16_t crc = ProtocolUtils::calcCRC16((uint8_t*)payloadAddr, sizeof(EEPROMData));
 
             if (crc == header->crc16) {
                 memcpy(&eepromData, (void*)payloadAddr, sizeof(EEPROMData));
@@ -4380,7 +4041,7 @@ void saveConfigsToFlash() {
     ConfigPageHeader* header = (ConfigPageHeader*)pageBuffer;
     header->state = 0xAA;
     memcpy(pageBuffer + sizeof(ConfigPageHeader), &eepromData, sizeof(EEPROMData));
-    header->crc16 = calcCRC16((uint8_t*)&eepromData, sizeof(EEPROMData));
+    header->crc16 = ProtocolUtils::calcCRC16((uint8_t*)&eepromData, sizeof(EEPROMData));
 
     HAL_FLASH_Unlock();
 
@@ -4657,18 +4318,6 @@ void HardFault_Handler(void) {
   }
 }
 
-// Вычисление CRC16 CCITT
-uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
-    uint16_t crc = 0xFFFF;
-    for (uint16_t i = 0; i < length; i++) {
-        crc ^= (uint16_t)data[i] << 8;
-        for (uint8_t j = 0; j < 8; j++) {
-            if (crc & 0x8000) crc = (crc << 1) ^ 0x1021;
-            else crc <<= 1;
-        }
-    }
-    return crc;
-}
 
 // Служебные функции установки даты и времени
 bool isValidDateTime(int hour, int minute, int second, int day, int month, int year) {

@@ -8,7 +8,7 @@
 #define PROTOCOL_SYNC_2           0x55
 #define PROTOCOL_VER              1
 
-#define TARGET_ID_ANY             0x00  // Direct UART line, target ID doesn't matter
+#define TARGET_ID_NONE        0x00  // Direct UART line, target ID doesn't matter
 #define TARGET_ID_BROADCAST       0xFF  // Global command to all shuttles listening (use carefully)
 
 #pragma pack(push, 1)
@@ -43,15 +43,15 @@ enum LogLevel : uint8_t {
 
 enum CmdType : uint8_t {
     CMD_STOP            = 5,
-    CMD_STOP_MANUAL     = 55, 
-    CMD_MOVE_RIGHT_MAN  = 1, 
-    CMD_MOVE_LEFT_MAN   = 2, 
-    CMD_LIFT_UP         = 3, 
-    CMD_LIFT_DOWN       = 4, 
-    CMD_LOAD            = 6, 
-    CMD_UNLOAD          = 7, 
-    CMD_MOVE_DIST_R     = 8, 
-    CMD_MOVE_DIST_F     = 9, 
+    CMD_STOP_MANUAL     = 55,
+    CMD_MOVE_RIGHT_MAN  = 1,
+    CMD_MOVE_LEFT_MAN   = 2,
+    CMD_LIFT_UP         = 3,
+    CMD_LIFT_DOWN       = 4,
+    CMD_LOAD            = 6,
+    CMD_UNLOAD          = 7,
+    CMD_MOVE_DIST_R     = 8,
+    CMD_MOVE_DIST_F     = 9,
     CMD_CALIBRATE       = 10,
     CMD_DEMO            = 11,
     CMD_COUNT_PALLETS   = 12,
@@ -70,7 +70,7 @@ enum CmdType : uint8_t {
     CMD_PING            = 100,
     CMD_FIRMWARE_UPDATE = 200,
     CMD_SYSTEM_RESET    = 201,
-    CMD_SET_DATETIME    = 202 
+    CMD_SET_DATETIME    = 202
 };
 
 enum ConfigParamID : uint8_t {
@@ -96,17 +96,17 @@ struct TelemetryPacket {
     uint8_t  batteryCharge;    // %
     float    batteryVoltage;   // Volts
     uint16_t stateFlags;       // Bit 0: lifterUp, 1: motorStart, 2: reverse, 3: inv, 4: inChnl, 5: fifoLifo
-    uint8_t  shuttleNumber;    
+    uint8_t  shuttleNumber;
     uint8_t  palleteCount;     // Runtime pallet count
 };
 
 struct SensorPacket {
-    uint16_t distanceF;        
-    uint16_t distanceR;        
-    uint16_t distancePltF;     
-    uint16_t distancePltR;     
+    uint16_t distanceF;
+    uint16_t distanceR;
+    uint16_t distancePltF;
+    uint16_t distancePltR;
     uint16_t angle;            // as5600.readAngle()
-    int16_t  lifterCurrent;    
+    int16_t  lifterCurrent;
     float    temperature;      // Chip temp
     uint8_t  hardwareFlags;    // Discrete sensors bitmask
 };
@@ -198,7 +198,7 @@ public:
                     state = STATE_WAIT_SYNC2;
                 }
                 break;
-                
+
             case STATE_WAIT_SYNC2:
                 if (byte == PROTOCOL_SYNC_2) {
                     rxBuffer[1] = byte;
@@ -208,13 +208,13 @@ public:
                     state = STATE_WAIT_SYNC1;
                 }
                 break;
-                
+
             case STATE_READ_HEADER:
                 rxBuffer[rxIndex++] = byte;
                 if (rxIndex >= sizeof(FrameHeader)) {
                     FrameHeader* header = (FrameHeader*)rxBuffer;
                     payloadLen = header->length;
-                    
+
                     if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2) {
                         state = STATE_WAIT_SYNC1;
                         rxIndex = 0;
@@ -225,19 +225,19 @@ public:
                     }
                 }
                 break;
-                
+
             case STATE_READ_PAYLOAD:
                 rxBuffer[rxIndex++] = byte;
                 if (rxIndex >= sizeof(FrameHeader) + payloadLen) {
                     state = STATE_READ_CRC;
                 }
                 break;
-                
+
             case STATE_READ_CRC:
                 rxBuffer[rxIndex++] = byte;
                 if (rxIndex >= sizeof(FrameHeader) + payloadLen + 2) {
                     uint16_t totalLen = sizeof(FrameHeader) + payloadLen;
-                    
+
                     uint16_t receivedCRC = rxBuffer[totalLen] | (rxBuffer[totalLen+1] << 8);
                     uint16_t calculatedCRC = ProtocolUtils::calcCRC16(rxBuffer, totalLen);
 
