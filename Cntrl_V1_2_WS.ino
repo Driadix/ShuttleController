@@ -25,7 +25,8 @@
 struct SecureStats {
     uint32_t magicWord;
     StatsPacket payload;
-    uint32_t crc32; // Computed over the payload
+    uint16_t crc16;     // CRC16 over the payload
+    uint16_t reserved;  // 32-bit alignment
 };
 #pragma pack(pop)
 
@@ -41,8 +42,8 @@ SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
 
 struct ConfigPageHeader {
     uint8_t state;       // 0xFF = Empty, 0xAA = Active, 0x00 = Obsolete
-    uint8_t reserved[3]; // Padding for 32-bit alignment
-    uint32_t crc32;      // Payload CRC
+    uint8_t reserved[1]; // Padding for 32-bit alignment (1+1+2=4)
+    uint16_t crc16;      // Payload CRC16
 };
 
 #pragma region Пины и дефайны...
@@ -1047,8 +1048,7 @@ void lifter_Up() {
   summCurrent /= k;
   if (lifterCurrent > 500) lifterCurrent = 250;
   makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
-  liftUpCounter++;
-  updateStatsCRC();
+  STATS_ATOMIC_UPDATE(liftUpCounter++);
 }
 
 // Опускание платформы
@@ -1101,8 +1101,7 @@ void lifter_Down() {
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
-  liftDownCounter++;
-  updateStatsCRC();
+  STATS_ATOMIC_UPDATE(liftDownCounter++);
 }
 
 // Остановка платформы
@@ -2028,13 +2027,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition -= diff;
       oldAngle = angle;
-      totalDist += diff;
-      updateStatsCRC();
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     } else if (diff > 0) {
       currentPosition += diff;
       oldAngle = angle;
-      totalDist += diff;
-      updateStatsCRC();
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     }
   } else if (motorReverse == 1 ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
@@ -2058,13 +2055,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition += diff;
       oldAngle = angle;
-      totalDist += diff;
-      updateStatsCRC();
+      STATS_ATOMIC_UPDATE(totalDist += diff);
     } else if (diff != 0) {
       currentPosition -= diff;
       oldAngle = angle;
-      totalDist += abs(diff);
-      updateStatsCRC();
+      STATS_ATOMIC_UPDATE(totalDist += abs(diff));
     }
   }
   if (currentPosition < 0) {
@@ -3234,8 +3229,7 @@ void unload_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after unload = %d", lastPalletePosition);
   }
-  unloadCounter++;
-  updateStatsCRC();
+  STATS_ATOMIC_UPDATE(unloadCounter++);
   if (fifoLifo) fifoLifo_Inverse();
 }
 
@@ -3457,8 +3451,7 @@ void load_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after load = %d", lastPalletePosition);
   }
-  loadCounter++;
-  updateStatsCRC();
+  STATS_ATOMIC_UPDATE(loadCounter++);
 }
 
 // Единичная загрузка
@@ -3635,8 +3628,7 @@ void pallete_Compacting_F() {
   while (status != 5) {
     blink_Work();
     load_Pallete();
-    compact++;
-    updateStatsCRC();
+    STATS_ATOMIC_UPDATE(compact++);
     if (distance[1] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -3672,8 +3664,7 @@ void pallete_Compacting_R() {
   while (status != 5) {
     blink_Work();
     unload_Pallete();
-    compact++;
-    updateStatsCRC();
+    STATS_ATOMIC_UPDATE(compact++);
     if (distance[0] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -4164,10 +4155,6 @@ void demo_Mode() {
 
 #pragma region Технические функции
 
-void updateStatsCRC() {
-    sramStats->crc32 = calculateCRC32((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
-}
-
 void initStatsSRAM() {
     // 1. Enable Power Clock and Backup Access
     __HAL_RCC_PWR_CLK_ENABLE();
@@ -4177,19 +4164,25 @@ void initStatsSRAM() {
     __HAL_RCC_BKPSRAM_CLK_ENABLE();
     HAL_PWREx_EnableBkUpReg();
 
-    // Wait for regulator to stabilize
-    delay(10);
+    // Wait for regulator to stabilize with timeout
+    uint32_t start = millis();
+    while(__HAL_PWR_GET_FLAG(PWR_FLAG_BRR) == RESET) {
+        if (millis() - start > 100) {
+             makeLog(LOG_ERROR, "Backup Regulator timeout!");
+             break;
+        }
+    }
 
     // 3. Validate existing data
     if (sramStats->magicWord != STATS_MAGIC_WORD ||
-        calculateCRC32((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc32) {
+        calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)) != sramStats->crc16) {
 
         // Memory is corrupt or uninitialized (e.g., dead battery or first boot)
         makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
 
         memset((void*)&sramStats->payload, 0, sizeof(StatsPacket));
         sramStats->magicWord = STATS_MAGIC_WORD;
-        updateStatsCRC();
+        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket));
     } else {
         makeLog(LOG_INFO, "SRAM Stats loaded successfully.");
     }
@@ -4341,9 +4334,9 @@ bool loadConfigsFromFlash() {
 
         if (header->state == 0xAA) {
             uint32_t payloadAddr = pageAddr + sizeof(ConfigPageHeader);
-            uint32_t crc = calculateCRC32((uint8_t*)payloadAddr, sizeof(EEPROMData));
+            uint16_t crc = calcCRC16((uint8_t*)payloadAddr, sizeof(EEPROMData));
 
-            if (crc == header->crc32) {
+            if (crc == header->crc16) {
                 memcpy(&eepromData, (void*)payloadAddr, sizeof(EEPROMData));
                 found = true;
                 break;
@@ -4356,6 +4349,17 @@ bool loadConfigsFromFlash() {
 }
 
 void saveConfigsToFlash() {
+    uint8_t pageBuffer[CONFIG_PAGE_SIZE]; // Use stack buffer
+    memset(pageBuffer, 0xFF, CONFIG_PAGE_SIZE); // Reset to Flash state
+
+    // Prepare Header
+    ConfigPageHeader* header = (ConfigPageHeader*)pageBuffer;
+    header->state = 0xAA;
+    // Copy Payload
+    memcpy(pageBuffer + sizeof(ConfigPageHeader), &eepromData, sizeof(EEPROMData));
+    // Calc CRC16
+    header->crc16 = calcCRC16((uint8_t*)&eepromData, sizeof(EEPROMData));
+
     HAL_FLASH_Unlock();
 
     int currentActivePageIdx = -1;
@@ -4394,34 +4398,15 @@ void saveConfigsToFlash() {
 
     uint32_t newPageAddr = CONFIG_SECTOR_BASE + (nextPageIdx * CONFIG_PAGE_SIZE);
 
-    ConfigPageHeader header;
-    header.state = 0xAA;
-    memset(header.reserved, 0xFF, 3);
-    header.crc32 = calculateCRC32((uint8_t*)&eepromData, sizeof(EEPROMData));
-
-    // Write Header (word by word)
-    for (size_t i = 0; i < sizeof(ConfigPageHeader); i+=4) {
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + i, *(uint32_t*)((uint8_t*)&header + i));
-    }
-
-    // Write Payload (word by word)
-    uint32_t* dataPtr = (uint32_t*)&eepromData;
-    size_t dataLenWords = sizeof(EEPROMData) / 4;
-    size_t remainder = sizeof(EEPROMData) % 4;
-
-    for (size_t i = 0; i < dataLenWords; i++) {
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + sizeof(ConfigPageHeader) + (i * 4), dataPtr[i]);
-    }
-
-    if (remainder > 0) {
-        uint32_t lastWord = 0xFFFFFFFF;
-        memcpy(&lastWord, (uint8_t*)dataPtr + (dataLenWords * 4), remainder);
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + sizeof(ConfigPageHeader) + (dataLenWords * 4), lastWord);
+    // Write Buffer (word by word)
+    uint32_t* dataPtr = (uint32_t*)pageBuffer;
+    for (size_t i = 0; i < CONFIG_PAGE_SIZE; i+=4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, newPageAddr + i, *dataPtr++);
     }
 
     if (currentActivePageIdx != -1 && currentActivePageIdx != nextPageIdx) {
         uint32_t oldPageAddr = CONFIG_SECTOR_BASE + (currentActivePageIdx * CONFIG_PAGE_SIZE);
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, oldPageAddr, 0x00000000);
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, oldPageAddr, 0x00);
     }
 
     HAL_FLASH_Lock();
@@ -4649,18 +4634,13 @@ void HardFault_Handler(void) {
   }
 }
 
-// Вычисление CRC32
-uint32_t calculateCRC32(const uint8_t *data, size_t length) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < length; i++) {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++) {
-            if (crc & 1) crc = (crc >> 1) ^ 0xEDB88320;
-            else crc >>= 1;
-        }
-    }
-    return ~crc;
-}
+#define STATS_ATOMIC_UPDATE(action) \
+    do { \
+        __disable_irq(); \
+        action; \
+        sramStats->crc16 = calcCRC16((uint8_t*)&sramStats->payload, sizeof(StatsPacket)); \
+        __enable_irq(); \
+    } while(0)
 
 // Вычисление CRC16 CCITT
 uint16_t calcCRC16(const uint8_t* data, uint16_t length) {
