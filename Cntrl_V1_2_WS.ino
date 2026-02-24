@@ -305,19 +305,6 @@ int oldChannelDistanse = 0;            // Канальная дистанция 
 int oldPalleteDistanse = 0;            // Паллетная дистанция для фильтрации фантомных срабатываний
 uint32_t timingBudget = 40;            // Время измерения датчиками
 
-#define loadCounter sramStats->payload.loadCounter
-#define unloadCounter sramStats->payload.unloadCounter
-#define compact sramStats->payload.compactCounter
-#define liftUpCounter sramStats->payload.liftUpCounter
-#define liftDownCounter sramStats->payload.liftDownCounter
-#define totalDist sramStats->payload.totalDist
-#define lifetimePalletsDetected sramStats->payload.lifetimePalletsDetected
-#define totalUptimeMinutes sramStats->payload.totalUptimeMinutes
-#define motorStallCount sramStats->payload.motorStallCount
-#define lifterOverloadCount sramStats->payload.lifterOverloadCount
-#define crashCount sramStats->payload.crashCount
-#define watchdogResets sramStats->payload.watchdogResets
-#define lowBatteryEvents sramStats->payload.lowBatteryEvents
 
 float temp = 0;                        // Температура чипа
 float weelDia = 100;                   // Диаметр колеса
@@ -475,19 +462,19 @@ void sendSensorPacket() {
 
 void sendStatsPacket() {
     StatsPacket pkt;
-    pkt.totalDist = totalDist;
-    pkt.loadCounter = loadCounter;
-    pkt.unloadCounter = unloadCounter;
-    pkt.compactCounter = compact;
-    pkt.liftUpCounter = liftUpCounter;
-    pkt.liftDownCounter = liftDownCounter;
-    pkt.lifetimePalletsDetected = lifetimePalletsDetected;
-    pkt.totalUptimeMinutes = totalUptimeMinutes;
-    pkt.motorStallCount = motorStallCount;
-    pkt.lifterOverloadCount = lifterOverloadCount;
-    pkt.crashCount = crashCount;
-    pkt.watchdogResets = watchdogResets;
-    pkt.lowBatteryEvents = lowBatteryEvents;
+    pkt.totalDist = sramStats->payload.totalDist;
+    pkt.loadCounter = sramStats->payload.loadCounter;
+    pkt.unloadCounter = sramStats->payload.unloadCounter;
+    pkt.compactCounter = sramStats->payload.compactCounter;
+    pkt.liftUpCounter = sramStats->payload.liftUpCounter;
+    pkt.liftDownCounter = sramStats->payload.liftDownCounter;
+    pkt.lifetimePalletsDetected = sramStats->payload.lifetimePalletsDetected;
+    pkt.totalUptimeMinutes = sramStats->payload.totalUptimeMinutes;
+    pkt.motorStallCount = sramStats->payload.motorStallCount;
+    pkt.lifterOverloadCount = sramStats->payload.lifterOverloadCount;
+    pkt.crashCount = sramStats->payload.crashCount;
+    pkt.watchdogResets = sramStats->payload.watchdogResets;
+    pkt.lowBatteryEvents = sramStats->payload.lowBatteryEvents;
 
     FrameHeader* header = (FrameHeader*)txBuffer;
     header->sync1 = PROTOCOL_SYNC_1;
@@ -556,7 +543,7 @@ void setup() {
   initStatsSRAM();
 
   if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) || __HAL_RCC_GET_FLAG(RCC_FLAG_PINRST)) {
-      STATS_ATOMIC_UPDATE(watchdogResets++);
+      STATS_ATOMIC_UPDATE(sramStats->payload.watchdogResets++);
   }
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
@@ -679,7 +666,7 @@ void loop() {
   }
   if (millis() - timerUptime >= 60000) {
       timerUptime = millis();
-      STATS_ATOMIC_UPDATE(totalUptimeMinutes++);
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
   }
 
   static int cntSns = millis();
@@ -1079,11 +1066,11 @@ void lifter_Up() {
   lifter_Stop();
   summCurrent /= k;
   if (lifterCurrent > 500) {
-      STATS_ATOMIC_UPDATE(lifterOverloadCount++);
+      STATS_ATOMIC_UPDATE(sramStats->payload.lifterOverloadCount++);
       lifterCurrent = 250;
   }
   makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
-  STATS_ATOMIC_UPDATE(liftUpCounter++);
+  STATS_ATOMIC_UPDATE(sramStats->payload.liftUpCounter++);
 }
 
 // Опускание платформы
@@ -1136,7 +1123,7 @@ void lifter_Down() {
   lifter_Stop();
   load = 0;
   lifterCurrent = 0;
-  STATS_ATOMIC_UPDATE(liftDownCounter++);
+  STATS_ATOMIC_UPDATE(sramStats->payload.liftDownCounter++);
 }
 
 // Остановка платформы
@@ -2062,11 +2049,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition -= diff;
       oldAngle = angle;
-      STATS_ATOMIC_UPDATE(totalDist += diff);
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalDist += diff);
     } else if (diff > 0) {
       currentPosition += diff;
       oldAngle = angle;
-      STATS_ATOMIC_UPDATE(totalDist += diff);
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalDist += diff);
     }
   } else if (motorReverse == 1 ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
@@ -2090,11 +2077,11 @@ void set_Position() {
     if (diff > 0 && !inverse) {
       currentPosition += diff;
       oldAngle = angle;
-      STATS_ATOMIC_UPDATE(totalDist += diff);
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalDist += diff);
     } else if (diff != 0) {
       currentPosition -= diff;
       oldAngle = angle;
-      STATS_ATOMIC_UPDATE(totalDist += abs(diff));
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalDist += abs(diff));
     }
   }
   if (currentPosition < 0) {
@@ -2138,7 +2125,7 @@ void blink_Work() {
         motor_Stop();
         status = 5;
         add_Error(10);
-        STATS_ATOMIC_UPDATE(motorStallCount++);
+        STATS_ATOMIC_UPDATE(sramStats->payload.motorStallCount++);
         return;
       }
     } else if (counter == 1 || counter == 5) {
@@ -3265,7 +3252,7 @@ void unload_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after unload = %d", lastPalletePosition);
   }
-  STATS_ATOMIC_UPDATE(unloadCounter++);
+  STATS_ATOMIC_UPDATE(sramStats->payload.unloadCounter++);
   if (fifoLifo) fifoLifo_Inverse();
 }
 
@@ -3487,7 +3474,7 @@ void load_Pallete() {
   if (lastPallete) {
     makeLog(LOG_DEBUG, "Last pallete position after load = %d", lastPalletePosition);
   }
-  STATS_ATOMIC_UPDATE(loadCounter++);
+  STATS_ATOMIC_UPDATE(sramStats->payload.loadCounter++);
 }
 
 // Единичная загрузка
@@ -3589,7 +3576,7 @@ void pallete_Counting_F() {
         boardPosition = currentPosition;
         palletePosition[palleteCount] = currentPosition;
         palleteCount++;
-        STATS_ATOMIC_UPDATE(lifetimePalletsDetected++);
+        STATS_ATOMIC_UPDATE(sramStats->payload.lifetimePalletsDetected++);
       }
       if (boardCount && boardCount - 3 * (int)(boardCount / 3) == 0) {
         set_Position();
@@ -3665,7 +3652,7 @@ void pallete_Compacting_F() {
   while (status != 5) {
     blink_Work();
     load_Pallete();
-    STATS_ATOMIC_UPDATE(compact++);
+    STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
     if (distance[1] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -3701,7 +3688,7 @@ void pallete_Compacting_R() {
   while (status != 5) {
     blink_Work();
     unload_Pallete();
-    STATS_ATOMIC_UPDATE(compact++);
+    STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
     if (distance[0] < 150 && !lifterUp) return;
     if (get_Cmd() == 5 || errorStatus[0]) {
       motor_Stop();
@@ -4593,7 +4580,7 @@ void read_BatteryCharge() {
         lifter_Down();
         moove_Forward();
         add_Error(11);
-        STATS_ATOMIC_UPDATE(lowBatteryEvents++);
+        STATS_ATOMIC_UPDATE(sramStats->payload.lowBatteryEvents++);
         status = 5;
     }
 }
@@ -4604,7 +4591,7 @@ void crash() {
     motor_Force_Stop();
     status = 5;
     add_Error(12);
-    STATS_ATOMIC_UPDATE(crashCount++);
+    STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
     oldSpeed = 0;
   }
 }
