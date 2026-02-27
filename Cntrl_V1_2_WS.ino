@@ -370,7 +370,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   ProtocolUtils::appendCRC(logBuffer, totalLen);
 
   port->write(logBuffer, totalLen + 2);
-}\n
+}
 void makeLog(LogLevel level, const char* format, ...) {
   va_list args;
   va_start(args, format);
@@ -1239,8 +1239,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
 
         FrameHeader* repHeader = (FrameHeader*)txBuffer;
-        repHeader->sync1 = PROTOCOL_SYNC_1;
-        repHeader->sync2 = PROTOCOL_SYNC_2;
+        repHeader->sync1 = PROTOCOL_SYNC_1_V2;
+        repHeader->sync2 = PROTOCOL_SYNC_2_V2;
         repHeader->length = sizeof(ConfigPacket);
         repHeader->targetID = TARGET_ID_NONE;
         static uint8_t repSeq = 0;
