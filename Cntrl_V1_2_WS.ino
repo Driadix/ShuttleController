@@ -521,8 +521,8 @@ void setup() {
   // digitalWrite(LORA, HIGH);
 
   Serial.begin(115200);               // USBшный UART порт
-  Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, используется для радиомодуля
-  Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, на экранчик (LILYGO-S3)
+  Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
+  Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, используется для радиомодуля
   Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
 
   while (!Serial1) {}
