@@ -340,28 +340,37 @@ void localLog(LogLevel level, const char* msg) {
 }
 
 void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
-  uint8_t logBuffer[300];
+  uint8_t logBuffer[300]; // Ample room for header + MAX_LOG_STRING_LEN + CRC
   uint16_t msgLen = strlen(msg);
-  if (msgLen > 240) msgLen = 240;
+
+  // SECURE BOUNDS: Cap at 253 bytes to leave room for the null terminator
+  // ensuring total payload never exceeds MAX_LOG_STRING_LEN
+  if (msgLen > MAX_LOG_STRING_LEN - 1) {
+      msgLen = MAX_LOG_STRING_LEN - 1;
+  }
 
   FrameHeader* header = (FrameHeader*)logBuffer;
-  header->sync1 = PROTOCOL_SYNC_1;
-  header->sync2 = PROTOCOL_SYNC_2;
-  header->length = 1 + msgLen; // Level + Msg
+  header->sync1 = PROTOCOL_SYNC_1_V2; // CHANGED
+  header->sync2 = PROTOCOL_SYNC_2_V2; // CHANGED
+  header->length = 1 + msgLen + 1;    // Level byte + Msg bytes + Null terminator
   header->targetID = TARGET_ID_NONE;
+
   static uint8_t seqCounter = 0;
   header->seq = seqCounter++;
   header->msgID = MSG_LOG;
 
   logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
+
+  // Safe memory copy, implicitly including the null terminator because
+  // logBuffer is zeroed out or we explicitly terminate it
   memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
+  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0'; // Force null termination
 
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
 
   port->write(logBuffer, totalLen + 2);
-}
-
+}\n
 void makeLog(LogLevel level, const char* format, ...) {
   va_list args;
   va_start(args, format);
@@ -375,13 +384,13 @@ void makeLog(LogLevel level, const char* format, ...) {
 void sendTelemetryPacket(Stream* port) {
     if (!port) return;
     TelemetryPacket pkt;
-    pkt.timestamp = millis();
+
     pkt.errorCode = errorCode;
     pkt.shuttleStatus = status;
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;
     pkt.batteryCharge = batteryCharge;
-    pkt.batteryVoltage = batteryVoltage;
+    pkt.batteryVoltage_mV = (uint16_t)(batteryVoltage * 1000);
     pkt.shuttleNumber = shuttleNum;
     pkt.palleteCount = palleteCount;
 
@@ -394,8 +403,8 @@ void sendTelemetryPacket(Stream* port) {
     if (fifoLifo) pkt.stateFlags |= (1 << 5);
 
     FrameHeader* header = (FrameHeader*)txBuffer;
-    header->sync1 = PROTOCOL_SYNC_1;
-    header->sync2 = PROTOCOL_SYNC_2;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(TelemetryPacket);
     header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
@@ -421,7 +430,7 @@ void sendSensorPacket(Stream* port) {
     pkt.distancePltR = distance[2];
     pkt.angle = as5600.readAngle();
     pkt.lifterCurrent = lifterCurrent;
-    pkt.temperature = temp;
+    pkt.temperature_dC = (int16_t)(temp * 10);
 
     pkt.hardwareFlags = 0;
     if (detectPalleteF1) pkt.hardwareFlags |= (1 << 0);
@@ -434,8 +443,8 @@ void sendSensorPacket(Stream* port) {
     if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
 
     FrameHeader* header = (FrameHeader*)txBuffer;
-    header->sync1 = PROTOCOL_SYNC_1;
-    header->sync2 = PROTOCOL_SYNC_2;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(SensorPacket);
     header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
@@ -468,8 +477,8 @@ void sendStatsPacket(Stream* port) {
     pkt.lowBatteryEvents = sramStats->payload.lowBatteryEvents;
 
     FrameHeader* header = (FrameHeader*)txBuffer;
-    header->sync1 = PROTOCOL_SYNC_1;
-    header->sync2 = PROTOCOL_SYNC_2;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(StatsPacket);
     header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
@@ -641,15 +650,15 @@ void loop() {
 
   if (millis() - timerTelemetry >= 300) {
     timerTelemetry = millis();
-    sendTelemetryPacket(&Serial2);
+    sendTelemetryPacket(&Serial1);
   }
   if (millis() - timerSensors >= 500) {
     timerSensors = millis();
-    sendSensorPacket(&Serial2);
+    sendSensorPacket(&Serial1);
   }
   if (millis() - timerStats >= 5000) {
     timerStats = millis();
-    sendStatsPacket(&Serial2);
+    sendStatsPacket(&Serial1);
   }
   if (millis() - timerUptime >= 60000) {
       timerUptime = millis();
@@ -1142,8 +1151,8 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     pkt.result = result;
 
     FrameHeader* header = (FrameHeader*)txBuffer;
-    header->sync1 = PROTOCOL_SYNC_1;
-    header->sync2 = PROTOCOL_SYNC_2;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(AckPacket);
     header->targetID = TARGET_ID_NONE;
     static uint8_t seqCounter = 0;
@@ -1167,28 +1176,29 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     } else if (header->msgID == MSG_REQ_STATS) {
         sendStatsPacket(replyPort);
         return 0;
-    } else if (header->msgID == MSG_COMMAND) {
-        CommandPacket* cmd = (CommandPacket*)payload;
+    } else if (header->msgID == MSG_CMD_SIMPLE) {
+        SimpleCmdPacket* cmd = (SimpleCmdPacket*)payload;
+        sendAck(header->seq, 0, replyPort);
+        return cmd->cmdType;
+
+    } else if (header->msgID == MSG_CMD_WITH_ARG) {
+        ParamCmdPacket* cmd = (ParamCmdPacket*)payload;
         sendAck(header->seq, 0, replyPort);
 
         if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
-            mooveDistance = cmd->arg1;
+            mooveDistance = cmd->arg;
         } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
-             UPQuant = cmd->arg1;
-        } else if (cmd->cmdType == CMD_SET_DATETIME) {
-             int year = (cmd->arg1 >> 16) & 0xFFFF;
-             int month = (cmd->arg1 >> 8) & 0xFF;
-             int day = cmd->arg1 & 0xFF;
-             int hour = (cmd->arg2 >> 16) & 0xFFFF;
-             int minute = (cmd->arg2 >> 8) & 0xFF;
-             int second = cmd->arg2 & 0xFF;
-
-             rtc.setTime(hour, minute, second);
-             rtc.setDate(getWeekDay(day, month, year), day, month, year - 2000);
-             return 0;
+            UPQuant = (uint8_t)cmd->arg;
         }
-
         return cmd->cmdType;
+
+    } else if (header->msgID == MSG_SET_DATETIME) {
+        DateTimePacket* dt = (DateTimePacket*)payload;
+        sendAck(header->seq, 0, replyPort);
+
+        rtc.setTime(dt->hour, dt->minute, dt->second);
+        rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
+        return 0;
     } else if (header->msgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
         switch (cfg->paramID) {
@@ -1251,7 +1261,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
     while (port.available()) {
-        FrameHeader* header = parser.feed(port.read());
+        FrameHeader* header = parser.feed(port.read(), millis());
         if (header) {
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
             if (res != 0) return res;
@@ -1263,7 +1273,7 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
 // Запрос команд
 uint8_t get_Cmd() {
   // Poll Radio
-  uint8_t newStatus = pollSerial(Serial1, parserRadio);
+  uint8_t newStatus = pollSerial(Serial1, parserDisplay);
   if (newStatus != 0) {
       if (newStatus == CMD_FIRMWARE_UPDATE) {
           motor_Stop();
@@ -1277,7 +1287,7 @@ uint8_t get_Cmd() {
   }
 
   // Poll Display
-  newStatus = pollSerial(Serial2, parserDisplay);
+  newStatus = pollSerial(Serial2, parserRadio);
   if (newStatus != 0) {
       if (newStatus == CMD_FIRMWARE_UPDATE) {
           motor_Stop();
@@ -1296,11 +1306,11 @@ uint8_t get_Cmd() {
 // Запрос команд (ручной режим)
 uint8_t get_Cmd_Manual() {
    // Poll Radio
-   uint8_t newStatus = pollSerial(Serial1, parserRadio);
+   uint8_t newStatus = pollSerial(Serial1, parserDisplay);
    if (newStatus != 0) return newStatus;
 
    // Poll Display
-   newStatus = pollSerial(Serial2, parserDisplay);
+   newStatus = pollSerial(Serial2, parserRadio);
    if (newStatus != 0) return newStatus;
 
    return 0;
@@ -1434,123 +1444,9 @@ void run_Cmd() {
 
 // Ответы на запросы от пульта или сетевого клиента
 void send_Cmd() {
-  char report[64];
-  String tempStr = shuttleNums[shuttleNum] + "t1" + fifoLifo;
-  uint8_t mpro = 100 + mprOffset;
-  uint8_t chnlo = 100 + chnlOffset;
-  if (!errorStatus[0]) {
-    switch (status) {
-      case 0:  // Ожидание
-        Serial2.print(tempStr + "10:" + batteryCharge + ":" + palleteCount + "!");
-        Serial2.print(shuttleNums[shuttleNum] + "t3" + String(palleteCount) + "!");
-        break;
-      case 1:  // Ручной движение вперед
-        Serial2.print(tempStr + "14:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 2:  // Ручной движение назад
-        Serial2.print(tempStr + "15:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 3:  // Ручной поднятие платформы
-        Serial2.print(tempStr + "16:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 4:  // Ручной опускание платформы
-        Serial2.print(tempStr + "17:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 5:  // Ожидание (Стоп режим)
-        Serial2.print(tempStr + "10:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 6:  // Загрузка
-        Serial2.print(tempStr + "2:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 7:  // Выгрузка
-        Serial2.print(tempStr + "3:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 11:  // Демо режим
-        Serial2.print(tempStr + "6:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 12:  // Подсчет паллет
-        Serial2.print(tempStr + "7:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 13:  // Подсчет паллет
-        Serial2.print(shuttleNums[shuttleNum] + "t3" + String(palleteCount) + "!");
-        break;
-      case 14:  // Уплотнение вперед
-        Serial2.print(tempStr + "4:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 15:  // плотнение вперед
-        Serial2.print(tempStr + "4:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 16:  // Передача данных из настроек
-        Serial2.print(shuttleNums[shuttleNum] + "t4" + inverse + String(maxSpeed) + ":" + interPalleteDistance + ":" + minBattCharge + ":" + String(shuttleLength) + "!");
-        delay(20);
-        tempStr = shuttleNums[shuttleNum] + "wo";
-        if (mpro < 10) tempStr += "00" + String(mpro);
-        else if (mpro < 100) tempStr += "0" + String(mpro);
-        else tempStr += String(mpro);
-        tempStr += ":";
-        if (chnlo < 9) tempStr += "00" + String(chnlo);
-        else if (chnlo < 99) tempStr += "0" + String(chnlo);
-        else tempStr += String(chnlo);
-        Serial2.print(tempStr + "!");
-        delay(20);
-        tempStr = shuttleNums[shuttleNum] + "wt";
-        if (waitTime < 10000) tempStr += "0" + String(waitTime / 1000);
-        else tempStr += String(waitTime / 1000);
-        Serial2.print(tempStr + "!");
-        break;
-      case 17:  // Передача данных отладки
-        detect_Pallete();
-        get_Distance();
-        tempStr = shuttleNums[shuttleNum] + "yt%4d:%4d:%4d:%4d:%4d:%1d:%1d:%1d:%1d!";
-        snprintf(report, sizeof(report), tempStr.c_str(), distance[0], distance[1],
-                 distance[2], distance[3], as5600.readAngle(), detectPalleteF1, detectPalleteF2,
-                 detectPalleteR1, detectPalleteR2);
-        Serial2.print(report);
-        break;
-      case 19:  // Выгрузка ошибок
-        tempStr = shuttleNums[shuttleNum] + "rc";
-        for (uint8_t i = 0; i < sizeof(errorStatus); i++) bitWrite(errorCode, errorStatus[i], 1);
-        Serial2.print(tempStr + "0" + errorCode + ":0!");
-        break;
-      case 21:  // Продолжительная загрузка
-        Serial2.print(tempStr + "11:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 22:  // Продолжительная выгрузка
-        Serial2.print(tempStr + "12:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 23:  // Продолжительная выгрузка
-        tempStr = shuttleNums[shuttleNum] + "pq";
-        Serial2.print(tempStr + "0" + String(UPQuant) + "!");
-        break;
-      case 25:  // Ручной режим
-        Serial2.print(tempStr + "1:" + batteryCharge + ":" + palleteCount + "!");
-        break;
-      case 29:  // Время ожидания при загрузке
-        tempStr = shuttleNums[shuttleNum] + "wt";
-        if (waitTime < 10000) tempStr += "0" + String(waitTime / 1000);
-        else tempStr += String(waitTime / 1000);
-        Serial2.print(tempStr + "!");
-        break;
-      case 30:  // Смещение МПР
-        tempStr = shuttleNums[shuttleNum] + "wo";
-        if (mpro < 9) tempStr += "00" + String(mpro);
-        else if (mpro < 99) tempStr += "0" + String(mpro);
-        else tempStr += String(mpro);
-        tempStr += ":";
-        if (chnlo < 9) tempStr += "00" + String(chnlo);
-        else if (chnlo < 99) tempStr += "0" + String(chnlo);
-        else tempStr += String(chnlo);
-        Serial2.print(tempStr + "!");
-        break;
-    }
-  } else {
-    Serial2.print(tempStr + "9:" + batteryCharge + ":" + palleteCount + "!");
-    delay(50);
-    tempStr = shuttleNums[shuttleNum] + "rc";
-    for (uint8_t i = 0; i < sizeof(errorStatus); i++) bitWrite(errorCode, errorStatus[i], 1);
-    bitWrite(errorCode, 0, 1);
-    Serial2.print(tempStr + "0" + errorCode + ":0!");
-  }
+  // Push an immediate state update strictly to the fast display UART
+  // The C# backend will parse the updated shuttleStatus byte instantly.
+  sendTelemetryPacket(&Serial1);
 }
 
 void update_Sensors() {
