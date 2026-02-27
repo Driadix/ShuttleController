@@ -1168,6 +1168,38 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
 
 constexpr uint8_t NO_NEW_CMD = 0xFF;
 
+// Translates new protocol Enums into Legacy Shuttle Magic Numbers
+uint8_t mapCommandToLegacyStatus(uint8_t cmdEnum) {
+    switch (cmdEnum) {
+        case CMD_STOP:            return 5;
+        case CMD_MOVE_RIGHT_MAN:  return 1;
+        case CMD_MOVE_LEFT_MAN:   return 2;
+        case CMD_LIFT_UP:         return 3;
+        case CMD_LIFT_DOWN:       return 4;
+        case CMD_LOAD:            return 6;
+        case CMD_UNLOAD:          return 7;
+        case CMD_MOVE_DIST_R:     return 8;
+        case CMD_MOVE_DIST_F:     return 9;
+        case CMD_CALIBRATE:       return 10;
+        case CMD_DEMO:            return 11;
+        case CMD_COUNT_PALLETS:   return 12;
+        case CMD_SAVE_EEPROM:     return 13;
+        case CMD_COMPACT_F:       return 14;
+        case CMD_COMPACT_R:       return 15;
+        case CMD_LONG_LOAD:       return 21;
+        case CMD_LONG_UNLOAD:     return 22;
+        case CMD_LONG_UNLOAD_QTY: return 23;
+        case CMD_HOME:            return 27;
+
+        // System commands (Interceptor will catch these, but mapping just in case)
+        case CMD_FIRMWARE_UPDATE: return 253;
+        case CMD_SYSTEM_RESET:    return 254;
+
+        default:
+            return NO_NEW_CMD;
+    }
+}
+
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
@@ -1176,17 +1208,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     }
     if (header->msgID == MSG_REQ_HEARTBEAT) {
         sendTelemetryPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_REQ_SENSORS) {
         sendSensorPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_REQ_STATS) {
         sendStatsPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CMD_SIMPLE) {
         SimpleCmdPacket* cmd = (SimpleCmdPacket*)payload;
         sendAck(header->seq, 0, replyPort);
-        return cmd->cmdType;
+        return mapCommandToLegacyStatus(cmd->cmdType);
 
     } else if (header->msgID == MSG_CMD_WITH_ARG) {
         ParamCmdPacket* cmd = (ParamCmdPacket*)payload;
@@ -1197,7 +1229,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
             UPQuant = (uint8_t)cmd->arg;
         }
-        return cmd->cmdType;
+        return mapCommandToLegacyStatus(cmd->cmdType);
 
     } else if (header->msgID == MSG_SET_DATETIME) {
         DateTimePacket* dt = (DateTimePacket*)payload;
@@ -1205,7 +1237,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         rtc.setTime(dt->hour, dt->minute, dt->second);
         rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
         switch (cfg->paramID) {
@@ -1225,7 +1257,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 break;
         }
         sendAck(header->seq, 0, replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_GET) {
         ConfigPacket* req = (ConfigPacket*)payload;
         ConfigPacket rep;
@@ -1261,9 +1293,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         replyPort->write(txBuffer, totalLen + 2);
 
-        return 0;
+        return NO_NEW_CMD;
     }
-    return 0;
+    return NO_NEW_CMD;
 }
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
@@ -1282,10 +1314,10 @@ uint8_t get_Cmd() {
   // Poll Radio
   uint8_t newStatus = pollSerial(Serial1, parserDisplay);
   if (newStatus != NO_NEW_CMD) {
-      if (newStatus == CMD_FIRMWARE_UPDATE) {
+      if (newStatus == 253) { // 253 will be our mapped Firmware Update
           motor_Stop();
           jumpToBootloader();
-      } else if (newStatus == CMD_SYSTEM_RESET) {
+      } else if (newStatus == 254) { // 254 will be our mapped Reset
           makeLog(LOG_INFO, "Reboot system by external command...");
           delay(20);
           HAL_NVIC_SystemReset();
@@ -1296,10 +1328,10 @@ uint8_t get_Cmd() {
   // Poll Display
   newStatus = pollSerial(Serial2, parserRadio);
   if (newStatus != NO_NEW_CMD) {
-      if (newStatus == CMD_FIRMWARE_UPDATE) {
+      if (newStatus == 253) {
           motor_Stop();
           jumpToBootloader();
-      } else if (newStatus == CMD_SYSTEM_RESET) {
+      } else if (newStatus == 254) {
           makeLog(LOG_INFO, "Reboot system by external command...");
           delay(20);
           HAL_NVIC_SystemReset();
