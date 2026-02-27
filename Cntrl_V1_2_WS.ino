@@ -343,10 +343,6 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   uint8_t logBuffer[300]; // Ample room for header + MAX_LOG_STRING_LEN + CRC
   uint16_t msgLen = strlen(msg);
 
-void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
-  uint8_t logBuffer[300]; // Ample room for header + MAX_LOG_STRING_LEN + CRC
-  uint16_t msgLen = strlen(msg);
-
   // SECURE BOUNDS: Cap at 253 bytes to leave room for the null terminator
   // ensuring total payload never exceeds MAX_LOG_STRING_LEN
   if (msgLen > MAX_LOG_STRING_LEN - 1) {
@@ -368,7 +364,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   // Safe memory copy, implicitly including the null terminator because
   // logBuffer is zeroed out or we explicitly terminate it
   memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
-  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = "\0"; // Force null termination
+  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0'; // Force null termination
 
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
