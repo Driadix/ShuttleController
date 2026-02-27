@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-// --- Transport Layer Constants ---
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
 constexpr uint8_t PROTOCOL_VER = 2;
@@ -11,44 +10,51 @@ constexpr uint8_t PROTOCOL_VER = 2;
 constexpr uint8_t TARGET_ID_NONE = 0x00;       // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF;  // Global command
 
+constexpr uint8_t MAX_LOG_STRING_LEN = 254; // Not forget about null terminator, so human payload is 253 bytes
+
 #pragma pack(push, 1)
 
 typedef struct {
     uint8_t  sync1;      // Always 0xBB
     uint8_t  sync2;      // Always 0xCC
-    uint8_t  msgID;      // Identifies the Payload struct
+    uint8_t  msgID;      // Identifies the Payload struct (MsgID enum)
     uint8_t  targetID;   // Routing identifier
     uint8_t  seq;        // Rolling sequence counter (0-255)
     uint8_t  length;     // Length of Payload ONLY (excludes header and CRC)
 } FrameHeader;
 
 enum MsgID : uint8_t {
-    // Routine Telemetry
-    MSG_HEARTBEAT      = 0x01, 
-    MSG_SENSORS        = 0x02, 
-    MSG_STATS          = 0x03, 
-    MSG_REQ_HEARTBEAT  = 0x04, 
-    MSG_REQ_SENSORS    = 0x05, 
-    MSG_REQ_STATS      = 0x06, 
+    // Routine Telemetry (Push/Pull)
+    MSG_HEARTBEAT        = 0x01, // Pushed ONLY on request
+    MSG_SENSORS          = 0x02, // Pushed ONLY on request
+    MSG_STATS            = 0x03, // Pushed ONLY on request
+    MSG_REQ_HEARTBEAT    = 0x04, // Pult -> Shuttle: Request Heartbeat (Keep-Alive)
+    MSG_REQ_SENSORS      = 0x05, // Pult -> Shuttle: Request Sensors
+    MSG_REQ_STATS        = 0x06, // Pult -> Shuttle: Request Stats
     
     // Asynchronous
-    MSG_LOG            = 0x10, 
+    MSG_LOG              = 0x10, // Shuttle -> Display: Truncated vsnprintf string
     
     // Configuration
-    MSG_CONFIG_SET     = 0x20, 
-    MSG_CONFIG_GET     = 0x21, 
-    MSG_CONFIG_REP     = 0x22, 
-    MSG_CONFIG_SYNC_REQ  = 0x23, 
-    MSG_CONFIG_SYNC_PUSH = 0x24, 
-    MSG_CONFIG_SYNC_REP  = 0x25, 
+    MSG_CONFIG_SET       = 0x20, // Pult/Display -> Shuttle: Set single EEPROM param
+    MSG_CONFIG_GET       = 0x21, // Pult/Display -> Shuttle: Request single param
+    MSG_CONFIG_REP       = 0x22, // Shuttle -> Pult/Display: Reply with single param
+    MSG_CONFIG_SYNC_REQ  = 0x23, // Pult/Display -> Shuttle: Request FullConfigPacket
+    MSG_CONFIG_SYNC_PUSH = 0x24, // Pult/Display -> Shuttle: Send FullConfigPacket to save
+    MSG_CONFIG_SYNC_REP  = 0x25, // Shuttle -> Pult/Display: Reply with FullConfigPacket
 
-    // Action
-    MSG_COMMAND        = 0x30, 
-    MSG_ACK            = 0x31  
+    // Action Commands (Split for bandwidth efficiency)
+    MSG_CMD_SIMPLE       = 0x30, // Pult/Display -> Shuttle: 1-byte payload (No arguments)
+    MSG_CMD_WITH_ARG     = 0x31, // Pult/Display -> Shuttle: 5-byte payload (Cmd + int32_t arg)
+    MSG_SET_DATETIME     = 0x32, // Display -> Shuttle: RTC Sync (DateTimePacket)
+    MSG_ACK              = 0x33  // Shuttle -> Pult/Display: Command acknowledgment
 };
 
 enum LogLevel : uint8_t {
-    LOG_INFO = 0, LOG_WARN = 1, LOG_ERROR = 2, LOG_DEBUG = 3
+    LOG_INFO = 0, 
+    LOG_WARN = 1, 
+    LOG_ERROR = 2, 
+    LOG_DEBUG = 3
 };
 
 enum CmdType : uint8_t {
@@ -65,8 +71,8 @@ enum CmdType : uint8_t {
     // -- 0x10 Block: Core Movement --
     CMD_MOVE_RIGHT_MAN  = 0x10,
     CMD_MOVE_LEFT_MAN   = 0x11,
-    CMD_MOVE_DIST_R     = 0x12,
-    CMD_MOVE_DIST_F     = 0x13,
+    CMD_MOVE_DIST_R     = 0x12, // Requires MSG_CMD_WITH_ARG
+    CMD_MOVE_DIST_F     = 0x13, // Requires MSG_CMD_WITH_ARG
     CMD_LIFT_UP         = 0x14,
     CMD_LIFT_DOWN       = 0x15,
     CMD_CALIBRATE       = 0x16,
@@ -76,7 +82,7 @@ enum CmdType : uint8_t {
     CMD_UNLOAD          = 0x21,
     CMD_LONG_LOAD       = 0x22,
     CMD_LONG_UNLOAD     = 0x23,
-    CMD_LONG_UNLOAD_QTY = 0x24,
+    CMD_LONG_UNLOAD_QTY = 0x24, // Requires MSG_CMD_WITH_ARG
     CMD_COMPACT_F       = 0x25,
     CMD_COMPACT_R       = 0x26,
     CMD_COUNT_PALLETS   = 0x27,
@@ -85,8 +91,7 @@ enum CmdType : uint8_t {
     // -- 0x30 Block: Configuration Updates --
     CMD_SAVE_EEPROM     = 0x30,
     CMD_GET_CONFIG      = 0x31,
-    CMD_FIRMWARE_UPDATE = 0x32,
-    CMD_SET_DATETIME    = 0x33
+    CMD_FIRMWARE_UPDATE = 0x32
 };
 
 enum ConfigParamID : uint8_t {
@@ -102,30 +107,27 @@ enum ConfigParamID : uint8_t {
     CFG_REVERSE_MODE    = 10
 };
 
-// --- 4. Payloads
-
 struct TelemetryPacket {
-    uint32_t timestamp;        // 4 bytes
-    uint16_t errorCode;        // 2 bytes
-    uint16_t currentPosition;  // 2 bytes
-    uint16_t speed;            // 2 bytes
-    uint16_t batteryVoltage_mV;// 2 bytes (12500 = 12.5V)
-    uint16_t stateFlags;       // 2 bytes
-    uint8_t  shuttleStatus;    // 1 byte
-    uint8_t  batteryCharge;    // 1 byte
-    uint8_t  shuttleNumber;    // 1 byte
-    uint8_t  palleteCount;     // 1 byte
+    uint16_t errorCode;        
+    uint16_t currentPosition;  // mm
+    uint16_t speed;
+    uint16_t batteryVoltage_mV;// 12500 = 12.5V
+    uint16_t stateFlags;       // Bit 0: lifterUp, 1: motorStart, 2: reverse, 3: inv, 4: inChnl, 5: fifoLifo
+    uint8_t  shuttleStatus;    // Current Cmd/Status
+    uint8_t  batteryCharge;    // %
+    uint8_t  shuttleNumber;    
+    uint8_t  palleteCount;     
 };
 
 struct SensorPacket {
-    uint16_t distanceF;        // 2 bytes
-    uint16_t distanceR;        // 2 bytes
-    uint16_t distancePltF;     // 2 bytes
-    uint16_t distancePltR;     // 2 bytes
-    uint16_t angle;            // 2 bytes
-    int16_t  lifterCurrent;    // 2 bytes
-    int16_t  temperature_dC;   // 2 bytes (255 = 25.5C)
-    uint16_t hardwareFlags;    // 2 bytes
+    uint16_t distanceF;
+    uint16_t distanceR;
+    uint16_t distancePltF;
+    uint16_t distancePltR;
+    uint16_t angle;            
+    int16_t  lifterCurrent;
+    int16_t  temperature_dC;   // 255 = 25.5C
+    uint16_t hardwareFlags;    // Bitmask for discretes
 };
 
 struct StatsPacket {
@@ -137,16 +139,11 @@ struct StatsPacket {
     uint32_t liftDownCounter;          
     uint32_t lifetimePalletsDetected;  
     uint32_t totalUptimeMinutes;       
-    uint32_t motorStallCount;          
-    uint32_t lifterOverloadCount;      
+    uint16_t motorStallCount;          
+    uint16_t lifterOverloadCount;      
     uint16_t crashCount;               
     uint16_t watchdogResets;           
     uint16_t lowBatteryEvents;         
-};
-
-struct ConfigPacket {
-    int32_t value;             // 4 bytes
-    uint8_t paramID;           // 1 byte
 };
 
 struct FullConfigPacket {
@@ -162,14 +159,42 @@ struct FullConfigPacket {
     uint8_t  reverseMode;
 };
 
-struct CommandPacket {
-    int32_t arg1;              // 4 bytes
-    int32_t arg2;              // 4 bytes
-    uint8_t cmdType;           // 1 byte
+// Used with MSG_CONFIG_SET / MSG_CONFIG_GET / MSG_CONFIG_REP (5 bytes)
+struct ConfigPacket {
+    int32_t value;             
+    uint8_t paramID;           
 };
 
+// Used with MSG_CMD_SIMPLE (1 byte)
+struct SimpleCmdPacket {
+    uint8_t cmdType;           
+};
+
+// Used with MSG_CMD_WITH_ARG (5 bytes)
+struct ParamCmdPacket {
+    int32_t arg;               
+    uint8_t cmdType;           
+};
+
+// Used with MSG_SET_DATETIME (6 bytes)
+struct DateTimePacket {
+    uint8_t year;              // Offset from 2000
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+};
+
+// Used with MSG_LOG (Variable length up to MAX_LOG_STRING_LEN + 1)
+struct LogPacket {
+    uint8_t logLevel;                  
+    char message[MAX_LOG_STRING_LEN];  // Null terminated via vsnprintf
+};
+
+// Used with MSG_ACK (2 bytes)
 struct AckPacket {
-    uint8_t refSeq;            
+    uint8_t refSeq;            // Sequence number of the command being ACK'd
     uint8_t result;            // 0 = Success, 1 = Error, 2 = Busy
 };
 
@@ -222,6 +247,7 @@ public:
         crcError = false;
     }
 
+    // millis() tick to prevent deadlocks on dropped bytes
     inline FrameHeader* feed(uint8_t byte, uint32_t currentMillis) {
         if (state != STATE_WAIT_SYNC1 && (currentMillis - lastRxTime > RX_TIMEOUT_MS)) {
             reset();
