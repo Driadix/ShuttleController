@@ -350,8 +350,8 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   }
 
   FrameHeader* header = (FrameHeader*)logBuffer;
-  header->sync1 = PROTOCOL_SYNC_1_V2; // CHANGED
-  header->sync2 = PROTOCOL_SYNC_2_V2; // CHANGED
+  header->sync1 = PROTOCOL_SYNC_1_V2;
+  header->sync2 = PROTOCOL_SYNC_2_V2;
   header->length = 1 + msgLen + 1;    // Level byte + Msg bytes + Null terminator
   header->targetID = TARGET_ID_NONE;
 
@@ -575,14 +575,14 @@ void setup() {
   if (TOF_Is_Device_Present(3)) makeLog(LOG_INFO, "TOF pallete sensor reverse present...");
   else makeLog(LOG_ERROR, "TOF pallete sensor reverse failed!!!");
   
-  // Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
-  // Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  // Serial2.write(256);   // Нижний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  // Serial2.write(0x1C);  // Параметры скорости
-  // Serial2.write(0x10);  // Канал (частота), 0x00 - 410 МГц, шаг частоты - 2 МГц
-  // Serial2.write(0x46);  // Служебные опции
-  // delay(20);
-  // digitalWrite(LORA, LOW);
+  Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
+  Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
+  Serial2.write(256);   // Нижний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
+  Serial2.write(0x1C);  // Параметры скорости
+  Serial2.write(0x10);  // Канал (частота), 0x00 - 410 МГц, шаг частоты - 2 МГц
+  Serial2.write(0x46);  // Служебные опции
+  delay(20);
+  digitalWrite(LORA, LOW);
   
   makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
@@ -1166,7 +1166,14 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     port->write(txBuffer, totalLen + 2);
 }
 
+constexpr uint8_t NO_NEW_CMD = 0xFF;
+
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
+    if (header->targetID != TARGET_ID_NONE && 
+        header->targetID != TARGET_ID_BROADCAST && 
+        header->targetID != shuttleNum) {
+        return NO_NEW_CMD;
+    }
     if (header->msgID == MSG_REQ_HEARTBEAT) {
         sendTelemetryPacket(replyPort);
         return 0;
@@ -1264,17 +1271,17 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
         FrameHeader* header = parser.feed(port.read(), millis());
         if (header) {
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
-            if (res != 0) return res;
+            if (res != NO_NEW_CMD) return res;
         }
     }
-    return 0;
+    return NO_NEW_CMD;
 }
 
 // Запрос команд
 uint8_t get_Cmd() {
   // Poll Radio
   uint8_t newStatus = pollSerial(Serial1, parserDisplay);
-  if (newStatus != 0) {
+  if (newStatus != NO_NEW_CMD) {
       if (newStatus == CMD_FIRMWARE_UPDATE) {
           motor_Stop();
           jumpToBootloader();
@@ -1288,7 +1295,7 @@ uint8_t get_Cmd() {
 
   // Poll Display
   newStatus = pollSerial(Serial2, parserRadio);
-  if (newStatus != 0) {
+  if (newStatus != NO_NEW_CMD) {
       if (newStatus == CMD_FIRMWARE_UPDATE) {
           motor_Stop();
           jumpToBootloader();
@@ -1307,13 +1314,13 @@ uint8_t get_Cmd() {
 uint8_t get_Cmd_Manual() {
    // Poll Radio
    uint8_t newStatus = pollSerial(Serial1, parserDisplay);
-   if (newStatus != 0) return newStatus;
+   if (newStatus != NO_NEW_CMD) return newStatus;
 
    // Poll Display
    newStatus = pollSerial(Serial2, parserRadio);
-   if (newStatus != 0) return newStatus;
+   if (newStatus != NO_NEW_CMD) return newStatus;
 
-   return 0;
+   return NO_NEW_CMD;
 }
 
 // Выполнение команд с пульта ДУ
