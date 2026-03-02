@@ -140,6 +140,7 @@ struct BatteryData {
   float batteryVoltage;
 } batteryData;
 
+#pragma pack(push, 1)
 struct EEPROMData  // Структура данных параметров для сохранения а EEProm
 {
   uint8_t shuttleNum;
@@ -168,7 +169,12 @@ struct EEPROMData  // Структура данных параметров дл�
   uint8_t BotRightXR;
   uint8_t BotRightYR;
   int8_t chnlOffset;
-} eepromData;
+};
+#pragma pack(pop)
+
+EEPROMData eepromData;
+
+uint32_t lastValidRxTime = 0;
 
 struct ReportData {
   // Основные характеристики
@@ -1169,8 +1175,13 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
         header->targetID != shuttleNum) {
+        
+        LOG_RATE_LIMITED(LOG_WARN, 2000, "Packet Dropped. Expected ID: %d, Got: %d", shuttleNum, header->targetID);
         return NO_NEW_CMD;
     }
+
+    lastValidRxTime = millis();
+
     if (header->msgID == MSG_REQ_HEARTBEAT) {
         sendTelemetryPacket(replyPort);
         return 0;
@@ -4062,7 +4073,12 @@ void read_EEPROM_Data() {
     waitTime = eepromData.waitTime;
     mprOffset = eepromData.mprOffset;
     chnlOffset = eepromData.chnlOffset;
-  } else saveConfigsToFlash();
+  } else {
+    shuttleNum = 0; 
+    eepromData.shuttleNum = 0;
+    saveConfigsToFlash();
+    makeLog(LOG_WARN, "EEPROM reset. Shuttle enters Provisioning State (ID=0).");
+  }
   if (minBattCharge > 50) minBattCharge = 20;
   if (waitTime < 5000) waitTime = 5000;
   else if (waitTime > 30000) waitTime = 30000;
