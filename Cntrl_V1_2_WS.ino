@@ -644,31 +644,48 @@ void setup() {
   IWatchdog.begin(10000000);
 }
 
-// Основной цикл
+void SystemYield() {
+  uint32_t currentMillis = millis();
+  IWatchdog.reload();
 
-void loop() {
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
   static uint32_t timerStats = 0;
   static uint32_t timerUptime = 0;
 
-  if (millis() - timerTelemetry >= 300) {
-    timerTelemetry = millis();
+  if (currentMillis - timerTelemetry >= 300) {
+    timerTelemetry = currentMillis;
     sendTelemetryPacket(&Serial1);
   }
-  if (millis() - timerSensors >= 500) {
-    timerSensors = millis();
+  if (currentMillis - timerSensors >= 500) {
+    timerSensors = currentMillis;
     sendSensorPacket(&Serial1);
   }
-  if (millis() - timerStats >= 5000) {
-    timerStats = millis();
+  if (currentMillis - timerStats >= 5000) {
+    timerStats = currentMillis;
     sendStatsPacket(&Serial1);
   }
-  if (millis() - timerUptime >= 60000) {
-      timerUptime = millis();
+  if (currentMillis - timerUptime >= 60000) {
+      timerUptime = currentMillis;
       STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
   }
 
+  uint8_t newCmd = pollSerial(Serial1, parserDisplay);
+  if (newCmd == NO_NEW_CMD) newCmd = pollSerial(Serial2, parserRadio);
+
+  if (newCmd != NO_NEW_CMD) {
+      if (status == 0) {
+          status = newCmd;
+      } else if (newCmd == CMD_STOP || newCmd == CMD_STOP_MANUAL || newCmd == CMD_SYSTEM_RESET) {
+          status = newCmd;
+      }
+  }
+}
+
+// Основной цикл
+
+void loop() {
+  SystemYield();
   static int cntSns = millis();
   static int cntBattdata = cntSns;
   get_Distance();
@@ -711,7 +728,7 @@ void loop() {
       digitalWrite(GREEN_LED, !digitalRead(GREEN_LED));
       digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
       count = millis();
-      IWatchdog.reload();
+      SystemYield();
       while (Can1.read(CAN_RX_msg)) ;
       while (Serial1.available()) Serial1.read();
       reportCounter++;
@@ -747,7 +764,7 @@ void loop() {
       digitalToggle(BOARD_LED);
       reportCounter++;
       count = millis();
-      IWatchdog.reload();
+      SystemYield();
       if (reportCounter == 10) {
         update_Sensors();
         reportCounter = 0;
@@ -1699,7 +1716,7 @@ void blink_Work() {
     } else if (counter == 3 || counter == 7) {
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(WHITE_LED, LOW);
-      IWatchdog.reload();
+      SystemYield();
     } else if (counter == 4 && status != CMD_MANUAL_MODE) {
       if (lifterCurrent) {
         makeLog(LOG_DEBUG, "LCrnt = %d", lifterCurrent);
@@ -1810,7 +1827,7 @@ void blink_Error() {
   else if (errCounter == 9) {
     digitalWrite(GREEN_LED, LOW);
     errCounter++;
-    IWatchdog.reload();
+    SystemYield();
     motor_Stop();
     Can1.read(CAN_RX_msg);
   }
@@ -3780,7 +3797,7 @@ void calibrate_Encoder_R() {
       cnt = millis();
       i++;
     }
-    IWatchdog.reload();
+    SystemYield();
     blink_Work();
   }
   motor_Stop();
@@ -3851,7 +3868,7 @@ void calibrate_Encoder_F() {
       cnt = millis();
       i++;
     }
-    IWatchdog.reload();
+    SystemYield();
     blink_Work();
   }
   motor_Stop();
