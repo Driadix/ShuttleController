@@ -696,6 +696,7 @@ CoreOpMode currentMode = CoreOpMode::IDLE;
 
 void loop() {
   SystemYield();
+
   static int cntSns = millis();
   static int cntBattdata = cntSns;
   get_Distance();
@@ -708,31 +709,26 @@ void loop() {
 
   switch (currentMode) {
     case CoreOpMode::IDLE: {
-      uint8_t statusTmp = 0;
-      uint8_t inChannel = digitalRead(CHANNEL);
-      delay(5);
-      inChannel = digitalRead(CHANNEL) && inChannel;
-      delay(5);
-      inChannel = digitalRead(CHANNEL) && inChannel;
-      statusTmp = get_Cmd();
-
       if (status != 0 && status != CMD_STOP) {
-        if (status == CMD_MANUAL_MODE) {
-          currentMode = CoreOpMode::MANUAL;
-        } else {
-          currentMode = CoreOpMode::AUTO_EXEC;
-        }
-      }
-
-      if (statusTmp != status) {
-        makeLog(LOG_INFO, "Shuttle status CMD changed to: 0x%02X", statusTmp);
-        if (!inChannel && (statusTmp == CMD_SAVE_EEPROM || statusTmp == CMD_GET_CONFIG || statusTmp == CMD_RESET_ERROR)) {status = statusTmp; lastPalletePosition = 0;}
-        else if (!inChannel) {status = 0; lastPalletePosition = 0;}
-        else if (inChannel) status = statusTmp;
-        send_Cmd();
         
-        if (status == CMD_MANUAL_MODE) currentMode = CoreOpMode::MANUAL;
-        else if (status != 0 && status != CMD_STOP) currentMode = CoreOpMode::AUTO_EXEC;
+        uint8_t inChannel = digitalRead(CHANNEL);
+        delay(5); inChannel = digitalRead(CHANNEL) && inChannel;
+        delay(5); inChannel = digitalRead(CHANNEL) && inChannel;
+
+        if (!inChannel && (status != CMD_SAVE_EEPROM && status != CMD_GET_CONFIG && status != CMD_RESET_ERROR)) {
+            makeLog(LOG_WARN, "Command 0x%02X rejected: Shuttle not in channel", status);
+            status = 0;
+        } else {
+            makeLog(LOG_INFO, "Shuttle accepted CMD: 0x%02X", status);
+            lastPalletePosition = 0;
+            send_Cmd(); 
+
+            if (status == CMD_MANUAL_MODE) {
+                currentMode = CoreOpMode::MANUAL;
+            } else {
+                currentMode = CoreOpMode::AUTO_EXEC;
+            }
+        }
       }
       
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
@@ -756,7 +752,7 @@ void loop() {
         pultConnect = 0;
         status = 0;
       }
-      else if (millis() - countPult > 180000 && distance[1] > 150 && inChannel && currentPosition > 200) {
+      else if (millis() - countPult > 180000 && distance[1] > 150 && digitalRead(CHANNEL) && currentPosition > 200) {
         makeLog(LOG_WARN, "Disconnect time off, dist = %d", distance[1]);
         if (status != 0) status = 0;
         moove_Forward();
@@ -764,26 +760,26 @@ void loop() {
       detect_Pallete();
       break;
     }
+    
     case CoreOpMode::AUTO_EXEC: {
       run_Cmd();
+      
       if (status != CMD_STOP) {
         status = 0;
       }
       currentMode = CoreOpMode::IDLE;
       break;
     }
+    
     case CoreOpMode::MANUAL: {
-      uint8_t statusTmp = 0;
-      if (digitalRead(CHANNEL)) statusTmp = get_Cmd_Manual();
-
-      if (statusTmp == CMD_MOVE_RIGHT_MAN) { moove_Right(); countManual = millis(); }
-      else if (statusTmp == CMD_MOVE_LEFT_MAN) { moove_Left(); countManual = millis(); }
-      else if (statusTmp == CMD_LIFT_UP) { lifter_Up(); countManual = millis(); }
-      else if (statusTmp == CMD_LIFT_DOWN) { lifter_Down(); countManual = millis(); }
-      else if (statusTmp == CMD_LOAD) { status = CMD_LOAD; run_Cmd(); }
-      else if (statusTmp == CMD_UNLOAD) { status = CMD_UNLOAD; run_Cmd(); }
-      else if (statusTmp == CMD_LONG_LOAD) { status = CMD_LONG_LOAD; run_Cmd(); }
-      else if (statusTmp == CMD_LONG_UNLOAD) { status = CMD_LONG_UNLOAD; run_Cmd(); }
+      if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); countManual = millis(); }
+      else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); countManual = millis(); }
+      else if (status == CMD_LIFT_UP) { lifter_Up(); countManual = millis(); }
+      else if (status == CMD_LIFT_DOWN) { lifter_Down(); countManual = millis(); }
+      else if (status == CMD_LOAD) { run_Cmd(); }
+      else if (status == CMD_UNLOAD) { run_Cmd(); }
+      else if (status == CMD_LONG_LOAD) { run_Cmd(); }
+      else if (status == CMD_LONG_UNLOAD) { run_Cmd(); }
 
       if (millis() - countManual > 120000) status = CMD_STOP;
       if (millis() - count > 330) {
@@ -791,8 +787,7 @@ void loop() {
         digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
         count = millis();
         SystemYield();
-        while (Can1.read(CAN_RX_msg)) ;
-        while (Serial1.available()) Serial1.read();
+        while (Can1.read(CAN_RX_msg));
         reportCounter++;
         if (reportCounter == 3) { delay(5); makeLog(LOG_DEBUG, "manual mode..."); reportCounter = 0; }
       }
@@ -807,12 +802,14 @@ void loop() {
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
       uint8_t i = 0;
-      if ((status = get_Cmd()) == CMD_RESET_ERROR) {
+      
+      if (status == CMD_RESET_ERROR) {
         while (errorStatus[i]) {
           errorStatus[i] = 0;
           i++;
         }
         errorCode = 0;
+        status = 0;
       } else if (status == CMD_COUNT_PALLETS) {
         send_Cmd();
       }
