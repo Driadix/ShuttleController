@@ -212,9 +212,6 @@ struct ReportData {
 
 
 AS5600 as5600;  // Магнитный энкодер на свободном колесе
-const String shuttleStatus[28] = { "Stand_By", "Moove_Forward", "Moove_Back", "Lift_Up", "Lift_Down", "Moove_Stop", "Load_Pallete", "Unload_Pallete", "Moove_DistanceR", "Moove_DistanceF", "Calibrate_Sensors",
-                                   "Demo_Mode", "Pallete_Counting", "Save_EEProm", "Pallete_Compacting_F", "Pallete_Compacting_R", "Get_Parametrs", "Pallete_Sensor_Test", "TOF_Sensor_Test", "Error_Request",
-                                   "Shuttle_Evacuate", "Long_Load", "Long_Unload", "Long_Quantity_Unload", "Error_Reset", "Manual_Mode", "Log_Mode", "Back_To_Start" };                                                                                              // Расшифровка командных статусов
 const String shuttleNums[32] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8", "I9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };                                   // Номера шаттлов
 const String shuttleErrors[16] = { "No_Error", "Channel_F_Error", "Channel_R_Error", "Channel_DF_Error", "Channel_DR_Error", "Pallete_F_Error", "Pallete_R_Error", "Pallete_DF_Error", "Pallete_DR_Error", "Lifter_Error", "Moove_Fault", "Low_Battery", "Crash" };  // Статусы ошибок
 const String shuttleWarnings[16] = { "No_Warning", "Out_Of_Channel", "Battery charge < 20%", "Pallete_Not_Found", "Pallete_Damaged" };                                                                                                                               // Статусы ошибок
@@ -733,7 +730,7 @@ void loop() {
     inChannel = digitalRead(CHANNEL) && inChannel;
     statusTmp = get_Cmd();
     if (statusTmp != status) {
-      makeLog(LOG_INFO, "Shuttle status CMD changed = %s (%d)", shuttleStatus[statusTmp].c_str(), statusTmp);
+      makeLog(LOG_INFO, "Shuttle status CMD changed to: 0x%02X", statusTmp);
       if (!inChannel && (statusTmp == CMD_SAVE_EEPROM || statusTmp == CMD_GET_CONFIG || statusTmp == CMD_RESET_ERROR)) {status = statusTmp; lastPalletePosition = 0;}
       else if (!inChannel) {status = 0; lastPalletePosition = 0;}
       else if (inChannel) status = statusTmp;
@@ -741,11 +738,6 @@ void loop() {
       run_Cmd();
     }
     if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
-
-    if (status == CMD_GET_CONFIG && millis() - count2 > timingBudget + 10) {
-      send_Cmd();
-      count2 = millis();
-    }
 
     Can1.read(CAN_RX_msg);
 
@@ -761,15 +753,6 @@ void loop() {
         reportCounter = 0;
       }
       send_Cmd();
-            
-      if (status == CMD_GET_CONFIG || status == CMD_SAVE_EEPROM) status = 0;
-      uint8_t oldStatus = status;
-      status = CMD_GET_CONFIG;
-      send_Cmd();
-      status = oldStatus;
-      if (!inChannel) {Serial2.print(shuttleNums[shuttleNum] + "wc001!"); lastPalletePosition = 0;}
-      else if (batteryCharge < 20) Serial2.print(shuttleNums[shuttleNum] + "wc002!");
-      else Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     }
 
     if (millis() - countPult > 100000 && pultConnect) {
@@ -1180,17 +1163,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
     }
 
-    lastValidRxTime = millis();
+    lastValidRxTime = millis(); 
 
     if (header->msgID == MSG_REQ_HEARTBEAT) {
         sendTelemetryPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_REQ_SENSORS) {
         sendSensorPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_REQ_STATS) {
         sendStatsPacket(replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CMD_SIMPLE) {
         SimpleCmdPacket* cmd = (SimpleCmdPacket*)payload;
         sendAck(header->seq, 0, replyPort);
@@ -1213,7 +1196,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         rtc.setTime(dt->hour, dt->minute, dt->second);
         rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
         switch (cfg->paramID) {
@@ -1233,7 +1216,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 break;
         }
         sendAck(header->seq, 0, replyPort);
-        return 0;
+        return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_GET) {
         ConfigPacket* req = (ConfigPacket*)payload;
         ConfigPacket rep;
@@ -1269,9 +1252,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         replyPort->write(txBuffer, totalLen + 2);
 
-        return 0;
+        return NO_NEW_CMD;
     }
-    return 0;
+    return NO_NEW_CMD;
 }
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
@@ -1404,6 +1387,7 @@ void run_Cmd() {
     send_Cmd();
   } else if (status == CMD_SAVE_EEPROM) {
     saveEEPROMData(eepromData);
+    status = CMD_STOP;
   } else if (status == CMD_COMPACT_F) {
     send_Cmd();
     pallete_Compacting_F();
@@ -1720,11 +1704,6 @@ void blink_Work() {
       if (lifterCurrent) {
         makeLog(LOG_DEBUG, "LCrnt = %d", lifterCurrent);
       }
-    } else if (counter == 8 && status != CMD_MANUAL_MODE) {
-      uint8_t oldStatus = status;
-      status = CMD_GET_CONFIG;
-      send_Cmd();
-      status = oldStatus;
     }
     else if ((counter == 11 || counter == 19) && status != CMD_MANUAL_MODE) {
       send_Cmd();
@@ -1856,8 +1835,6 @@ void blink_Error() {
       debuger = 0;    
     }
     
-    uint8_t oldStatus = status;
-    status = CMD_GET_CONFIG;
     send_Cmd();
     errCounter = 0;
   }
@@ -2657,10 +2634,8 @@ void unload_Pallete() {
         motor_Stop();
         makeLog(LOG_ERROR, "Pallete error in BB...");
         blink_Warning();
-        Serial2.print(shuttleNums[shuttleNum] + "wc004!");
         moove_Forward();
         status = CMD_STOP;
-        Serial2.print(shuttleNums[shuttleNum] + "wc000!");
         return;
       }
       motor_Stop();
@@ -2674,9 +2649,7 @@ void unload_Pallete() {
       if ((millis() - cnt > 2000000 / maxSpeed || distance[0] < 80)) {
         makeLog(LOG_ERROR, "Pallete error...");
         motor_Stop();
-        Serial2.print(shuttleNums[shuttleNum] + "wc003!");
         blink_Warning();
-        Serial2.print(shuttleNums[shuttleNum] + "wc000!");
         if (fifoLifo) fifoLifo_Inverse();
         return;
       }
@@ -2694,10 +2667,8 @@ void unload_Pallete() {
   get_Distance();
   if (distance[3] < 900) {  // Проверка что поддон есть куда везти
     lifter_Down();
-    Serial2.print(shuttleNums[shuttleNum] + "wc005!");
     blink_Warning();
     moove_Forward();
-    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     status = CMD_STOP;
     return;
   }
@@ -2838,9 +2809,7 @@ void load_Pallete() {
   startDiff = 0;
   lifter_Down();
   if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) { // Проверка что канал не забит
-    Serial2.print(shuttleNums[shuttleNum] + "wc005!");
     blink_Warning();
-    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     status = CMD_STOP;
     return;
   }
@@ -2920,10 +2889,8 @@ void load_Pallete() {
           motor_Stop();
           makeLog(LOG_ERROR, "Pallete error in BB... PLenght = %d", palleteLenght);
           blink_Warning();
-          Serial2.print(shuttleNums[shuttleNum] + "wc004!");
           moove_Forward();
           status = CMD_STOP;
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
           return;
         }
       }
@@ -2942,9 +2909,7 @@ void load_Pallete() {
         if ((millis() - cnt > 2000000 / maxSpeed || distance[1] < 80)) {
           makeLog(LOG_ERROR, "Pallete error...");
           motor_Stop();
-          Serial2.print(shuttleNums[shuttleNum] + "wc003!");
           blink_Warning();
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
           return;
         }
         count = millis();
@@ -2952,9 +2917,7 @@ void load_Pallete() {
     }
   } else if ((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 + chnlOffset && distance[2] <= interPalleteDistance + 600) {
     motor_Stop();
-    Serial2.print(shuttleNums[shuttleNum] + "wc005!");
     blink_Warning();
-    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     status = CMD_STOP;
     return;
   } else if ((detectPalleteR1 || detectPalleteR2) && !(detectPalleteF1 || detectPalleteF2)) {
@@ -2973,9 +2936,7 @@ void load_Pallete() {
     get_Distance();
     if (distance[3] < 500 && distance[3] < distance[1]) {
       motor_Stop();
-      Serial2.print(shuttleNums[shuttleNum] + "wc005!");
       blink_Warning();
-      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
       status = CMD_STOP;
       return;
     }
@@ -3057,9 +3018,7 @@ void single_Load() {
   detect_Pallete();
   if ((detectPalleteF1 && detectPalleteF2 && shuttleLength != 800) || (detectPalleteF1 && detectPalleteF2 && detectPalleteR1 && detectPalleteR2)) load_Pallete();
   else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
-    Serial2.print(shuttleNums[shuttleNum] + "wc004!");
     blink_Warning();
-    Serial2.print(shuttleNums[shuttleNum] + "wc000!");
   }
   else {
     motor_Start_Reverse();
@@ -3084,13 +3043,9 @@ void single_Load() {
       diffPallete = 10;
       load_Pallete();
     } else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
-      Serial2.print(shuttleNums[shuttleNum] + "wc004!");
       blink_Warning();
-      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
     } else {
-      Serial2.print(shuttleNums[shuttleNum] + "wc003!");
       blink_Warning();
-      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
       makeLog(LOG_ERROR, "Single load fail...");
     }
   }
@@ -3304,7 +3259,6 @@ void long_Load() {
     }
     motor_Stop();
     if (!(detectPalleteF1 && detectPalleteF2)) {
-      Serial2.print(shuttleNums[shuttleNum] + "wc003!");
       blink_Warning();
       uint8_t wait = 1;
       moove_Distance_R(shuttleLength + 100, 60, 30);
@@ -3313,14 +3267,12 @@ void long_Load() {
       while (wait) {
         if (get_Cmd() == CMD_STOP || errorStatus[0]) {
           status = CMD_STOP;
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
           return;
         }
         blink_Work();
         get_Distance();
         detect_Pallete();
         if ((detectPalleteF1 && detectPalleteF2) || distance[3] < 1000) {
-          Serial2.print(shuttleNums[shuttleNum] + "wc000!");
           count = millis();
           while (millis() - count < 10000) {
             if (get_Cmd() == CMD_STOP || errorStatus[0]) {
@@ -3340,9 +3292,7 @@ void long_Load() {
     status = CMD_LONG_LOAD;
     load_Pallete();
     if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) {
-      Serial2.print(shuttleNums[shuttleNum] + "wc005!");
       blink_Warning();
-      Serial2.print(shuttleNums[shuttleNum] + "wc000!");
       status = 0;
       return;
     }
@@ -3530,18 +3480,19 @@ void moove_Right() {
   motor_Start_Reverse();
   int cnt = millis();
   get_Distance();
-  pingCount = millis();
+  
+  lastValidRxTime = millis();  
   motor_Speed(manualCount);
-  while (moove) {  // Едем пока держат кнопку
-    uint8_t stTmp = 0;
-    if (Serial2.available()) {
-      stTmp = get_Cmd_Manual();
-      if (stTmp == CMD_STOP || errorStatus[0] || stTmp == 55) {  //Проверка на стоп и ошибки
-        motor_Stop();
-        makeLog(LOG_INFO, "Manual stop...");
-        return;
-      } else if (stTmp == 100) pingCount = millis();
+
+  while (moove) {  // Едем пока держат кнопку 
+    uint8_t stTmp = get_Cmd_Manual();
+      
+    if (stTmp == CMD_STOP || stTmp == CMD_STOP_MANUAL || errorStatus[0]) { 
+      motor_Stop(); 
+      makeLog(LOG_INFO, "Manual stop requested."); 
+      return;
     }
+
     blink_Work();
     get_Distance();
     if (millis() - cnt > 50) {
@@ -3561,10 +3512,11 @@ void moove_Right() {
       set_Position();
       while (Serial1.available()) Serial1.read();
     }
-    if (millis() - pingCount > 500) {
+ 
+    if (millis() - lastValidRxTime > 500) {
       motor_Stop();
       moove = 0;
-      makeLog(LOG_INFO, "No ping, stop...");
+      makeLog(LOG_WARN, "Radio link timeout. Halting."); 
       return;
     }
   }
@@ -3573,7 +3525,7 @@ void moove_Right() {
   return;
 }
 
-// Движение назад в ручном режиме
+// Движение вперед в ручном режиме
 void moove_Left() {
   makeLog(LOG_INFO, "Manual moove left...");
   uint8_t manualCount = 6;
@@ -3581,17 +3533,15 @@ void moove_Left() {
   motor_Start_Forward();
   int cnt = millis();
   get_Distance();
-  pingCount = millis();
+  lastValidRxTime = millis();
   motor_Speed(manualCount);
+
   while (moove) {  // Едем пока держат кнопку
-    uint8_t stTmp = 0;
-    if (Serial2.available()) {
-      stTmp = get_Cmd_Manual();
-      if (stTmp == CMD_STOP || errorStatus[0] || stTmp == 55) {  // Проверка на стоп и ошибки
-        motor_Stop();
-        makeLog(LOG_INFO, "Manual stop...");
-        return;
-      } else if (stTmp == 100) pingCount = millis();
+    uint8_t stTmp = get_Cmd_Manual();
+    if (stTmp == CMD_STOP || stTmp == CMD_STOP_MANUAL || errorStatus[0]) { 
+      motor_Stop(); 
+      makeLog(LOG_INFO, "Manual stop requested."); 
+      return; 
     }
     blink_Work();
     get_Distance();
@@ -3611,11 +3561,11 @@ void moove_Left() {
       }
       set_Position();
       while (Serial1.available()) Serial1.read();
-    }
-    if (millis() - pingCount > 500) {
+    } 
+    if (millis() - lastValidRxTime > 500) {
       motor_Stop();
       moove = 0;
-      makeLog(LOG_INFO, "No ping, stop...");
+      makeLog(LOG_WARN, "Radio link timeout. Halting.");
       return;
     }
   }
@@ -4151,7 +4101,6 @@ void read_BatteryCharge() {
   }
   while (Serial3.available()) Serial3.read();
   pinMode(RS485, INPUT_PULLDOWN);
-  if (batteryCharge < 20) Serial2.print(shuttleNums[shuttleNum] + "wc002!");
   if (!errorStatus[0] && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
         makeLog(LOG_ERROR, "Низкий уровень заряда батареи! Выполнение аварийного режима.");
         lifter_Down();
