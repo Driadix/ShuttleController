@@ -578,7 +578,7 @@ void setup() {
   
   digitalWrite(LORA, HIGH);
   delay(150);
-  uint8_t loraConfig[] = { 0xC0, 0x00, 0x00, 0x1C, 0x10, 0x46 }; 
+  uint8_t loraConfig[] = { 0xC0, 0x00, 0x00, 0x1C, 0x10, 0x47 };
   Serial2.write(loraConfig, sizeof(loraConfig));
   delay(100);
   while(Serial2.available()) Serial2.read();
