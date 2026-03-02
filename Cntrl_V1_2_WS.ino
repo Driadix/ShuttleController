@@ -98,6 +98,8 @@ struct ConfigPageHeader {
 #define VL53L0X_REG_IDENTIFICATION_MODEL_ID         0xC0
 #define VL53L0X_EXPECTED_MODEL_ID                   0xEEAA // Ожидаемый ID для VL53L0X
 
+constexpr uint8_t NO_NEW_CMD = 0xFF;
+
 #pragma endregion
 
 #pragma region Переменные...
@@ -332,6 +334,13 @@ uint16_t data[4][5] = {
 };
 
 #pragma endregion
+
+static inline bool isOverrideCommand(uint8_t cmd) {
+    return (cmd == CMD_STOP || 
+            cmd == CMD_STOP_MANUAL || 
+            cmd == CMD_SYSTEM_RESET || 
+            cmd == CMD_RESET_ERROR);
+    }
 
 void localLog(LogLevel level, const char* msg) {
   char timeStr[16];
@@ -674,9 +683,7 @@ void SystemYield() {
   if (newCmd == NO_NEW_CMD) newCmd = pollSerial(Serial2, parserRadio);
 
   if (newCmd != NO_NEW_CMD) {
-      if (status == 0) {
-          status = newCmd;
-      } else if (newCmd == CMD_STOP || newCmd == CMD_STOP_MANUAL || newCmd == CMD_SYSTEM_RESET) {
+      if (status == CMD_STOP || isOverrideCommand(newCmd)) {
           status = newCmd;
       }
   }
@@ -1169,8 +1176,6 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     port->write(txBuffer, totalLen + 2);
 }
 
-constexpr uint8_t NO_NEW_CMD = 0xFF;
-
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
@@ -1193,20 +1198,30 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
     } else if (header->msgID == MSG_CMD_SIMPLE) {
         SimpleCmdPacket* cmd = (SimpleCmdPacket*)payload;
-        sendAck(header->seq, 0, replyPort);
-        return cmd->cmdType;
+        if (status == CMD_STOP || isOverrideCommand(cmd->cmdType)) {
+            sendAck(header->seq, 0, replyPort); // 0 = Success
+            return cmd->cmdType;
+        } else {
+            sendAck(header->seq, 2, replyPort); // 2 = Busy
+            return NO_NEW_CMD;
+        }
 
     } else if (header->msgID == MSG_CMD_WITH_ARG) {
         ParamCmdPacket* cmd = (ParamCmdPacket*)payload;
-        sendAck(header->seq, 0, replyPort);
 
-        if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
-            mooveDistance = cmd->arg;
-        } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
-            UPQuant = (uint8_t)cmd->arg;
+        if (status == CMD_STOP || isOverrideCommand(cmd->cmdType)) {
+            sendAck(header->seq, 0, replyPort); // 0 = Success
+            
+            if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
+                mooveDistance = cmd->arg;
+            } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
+                UPQuant = (uint8_t)cmd->arg;
+            }
+            return cmd->cmdType;
+        } else {
+            sendAck(header->seq, 2, replyPort); // 2 = Busy
+            return NO_NEW_CMD;
         }
-        return cmd->cmdType;
-
     } else if (header->msgID == MSG_SET_DATETIME) {
         DateTimePacket* dt = (DateTimePacket*)payload;
         sendAck(header->seq, 0, replyPort);
