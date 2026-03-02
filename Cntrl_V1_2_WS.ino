@@ -530,6 +530,7 @@ void setup() {
   // digitalWrite(LORA, HIGH);
 
   Serial.begin(115200);               // USBшный UART порт
+  delay(2000);
   Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
   Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, используется для радиомодуля
   Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
@@ -575,14 +576,14 @@ void setup() {
   if (TOF_Is_Device_Present(3)) makeLog(LOG_INFO, "TOF pallete sensor reverse present...");
   else makeLog(LOG_ERROR, "TOF pallete sensor reverse failed!!!");
   
-  Serial2.write(0xC0);  // C0 - сохранить настройки, C2 - сбросить после отключения от питания
-  Serial2.write(256);   // Верхний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  Serial2.write(256);   // Нижний байт адреса. Если оба байта 0xFF - передача и прием по всем адресам на канале
-  Serial2.write(0x1C);  // Параметры скорости
-  Serial2.write(0x10);  // Канал (частота), 0x00 - 410 МГц, шаг частоты - 2 МГц
-  Serial2.write(0x46);  // Служебные опции
-  delay(20);
+  digitalWrite(LORA, HIGH);
+  delay(150);
+  uint8_t loraConfig[] = { 0xC0, 0x00, 0x00, 0x1C, 0x10, 0x46 }; 
+  Serial2.write(loraConfig, sizeof(loraConfig));
+  delay(100);
+  while(Serial2.available()) Serial2.read();
   digitalWrite(LORA, LOW);
+  delay(150);
   
   makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
@@ -1312,11 +1313,11 @@ uint8_t get_Cmd() {
 
 // Запрос команд (ручной режим)
 uint8_t get_Cmd_Manual() {
-   // Poll Radio
+   // Poll Display
    uint8_t newStatus = pollSerial(Serial1, parserDisplay);
    if (newStatus != NO_NEW_CMD) return newStatus;
 
-   // Poll Display
+   // Poll Remote
    newStatus = pollSerial(Serial2, parserRadio);
    if (newStatus != NO_NEW_CMD) return newStatus;
 
@@ -1842,6 +1843,7 @@ void blink_Error() {
       makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
       
       sendTelemetryPacket(&Serial1);
+      sendTelemetryPacket(&Serial2);
     }
     else if (debuger == 10) {
       debuger = 0;    
