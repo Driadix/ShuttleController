@@ -1306,7 +1306,11 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
         ProtocolUtils::appendCRC(txBuffer, totalLen);
 
-        replyPort->write(txBuffer, totalLen + 2);
+        if (replyPort->availableForWrite() >= totalLen + 2) {
+          replyPort->write(txBuffer, totalLen + 2);
+        } else {
+          LOG_RATE_LIMITED(LOG_WARN, 1000, "Dropped Config Reply: TX Buffer Full");
+        }
 
         return NO_NEW_CMD;
     }
