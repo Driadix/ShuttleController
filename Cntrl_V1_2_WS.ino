@@ -663,16 +663,22 @@ void SystemYield() {
   static uint32_t timerUptime = 0;
 
   if (currentMillis - timerTelemetry >= 300) {
-    timerTelemetry = currentMillis;
-    sendTelemetryPacket(&Serial1);
+    if (Serial1.availableForWrite() >= sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2) {
+      timerTelemetry = currentMillis;
+      sendTelemetryPacket(&Serial1);
+    }
   }
   if (currentMillis - timerSensors >= 500) {
-    timerSensors = currentMillis;
-    sendSensorPacket(&Serial1);
+    if (Serial1.availableForWrite() >= sizeof(SensorPacket) + sizeof(FrameHeader) + 2) {
+      timerSensors = currentMillis;
+      sendSensorPacket(&Serial1);
+    }
   }
   if (currentMillis - timerStats >= 5000) {
-    timerStats = currentMillis;
-    sendStatsPacket(&Serial1);
+    if (Serial1.availableForWrite() >= sizeof(StatsPacket) + sizeof(FrameHeader) + 2) {
+      timerStats = currentMillis;
+      sendStatsPacket(&Serial1);
+    }
   }
   if (currentMillis - timerUptime >= 60000) {
       timerUptime = currentMillis;
@@ -1308,11 +1314,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 }
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
-    while (port.available()) {
-        FrameHeader* header = parser.feed(port.read(), millis());
-        if (header) {
+    uint32_t now = millis();
+    while (port.available() > 0) {
+        FrameHeader* header = parser.feed(port.read(), now);
+        if (header != nullptr) {
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
-            if (res != NO_NEW_CMD) return res;
+            return res;
         }
     }
     return NO_NEW_CMD;

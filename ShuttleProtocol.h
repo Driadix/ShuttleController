@@ -268,6 +268,8 @@ public:
                     rxBuffer[1] = byte;
                     rxIndex = 2;
                     state = STATE_READ_HEADER;
+                } else if (byte == PROTOCOL_SYNC_1_V2) {
+                    state = STATE_WAIT_SYNC2;
                 } else {
                     state = STATE_WAIT_SYNC1;
                 }
