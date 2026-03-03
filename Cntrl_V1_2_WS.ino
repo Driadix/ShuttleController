@@ -663,7 +663,7 @@ void setup() {
   IWatchdog.begin(10000000);
 }
 
-void SystemYield() {
+void IO_Update() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
   
@@ -767,7 +767,7 @@ enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
 CoreOpMode currentMode = CoreOpMode::IDLE;
 
 void loop() {
-  SystemYield();
+  IO_Update();
 
   static int cntSns = millis();
   static int cntBattdata = cntSns;
@@ -813,7 +813,6 @@ void loop() {
         digitalToggle(BOARD_LED);
         reportCounter++;
         count = millis();
-        SystemYield();
         if (reportCounter == 10) {
           update_Sensors();
           reportCounter = 0;
@@ -859,7 +858,6 @@ void loop() {
         digitalWrite(GREEN_LED, !digitalRead(GREEN_LED));
         digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
         count = millis();
-        SystemYield();
         while (Can1.read(CAN_RX_msg));
         reportCounter++;
         if (reportCounter == 3) { delay(5); makeLog(LOG_DEBUG, "manual mode..."); reportCounter = 0; }
@@ -924,7 +922,7 @@ void motor_Speed(int spd) {
         if (i > 2 && i <= 40 && lifterUp) accel = 80 - i * 15 / 10;
         else accel = 35;
         while (millis() - count < accel) {
-          SystemYield();
+          IO_Update();
           blink_Work();
           get_Distance();
           if (shouldAbortLoop()) {
@@ -958,7 +956,7 @@ void motor_Speed(int spd) {
         count = millis();
         if (lifterUp) accel = 20 + i * 30 / steps;
         while (millis() - count < accel) {
-          SystemYield();
+          IO_Update();
           get_Distance();
           if (shouldAbortLoop()) {
             status = CMD_STOP;
@@ -1851,7 +1849,7 @@ void blink_Work() {
     } else if (counter == 3 || counter == 7) {
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(WHITE_LED, LOW);
-      SystemYield();
+      IO_Update();
     } else if (counter == 4 && status != CMD_MANUAL_MODE) {
       if (lifterCurrent) {
         makeLog(LOG_DEBUG, "LCrnt = %d", lifterCurrent);
@@ -1894,7 +1892,7 @@ void blink_Error() {
   else if (errCounter == 9) {
     digitalWrite(GREEN_LED, LOW);
     errCounter++;
-    SystemYield();
+    IO_Update();
     motor_Stop();
     Can1.read(CAN_RX_msg);
   }
@@ -1969,7 +1967,7 @@ void stop_Before_Pallete_F() {
     get_Distance();
     while (i < 4) {  // Фиксируем несколько измерений расстояния  до паллета
       while (millis() - count < 100) {
-        SystemYield();
+        IO_Update();
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
@@ -2040,7 +2038,7 @@ void moove_Before_Pallete_F() {
   oldPalleteDistanse = distance[3];
   count = millis();
   while (findPallete) {                      // Двигаемся до обнаружения поддона или конца канала
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
       motor_Stop();
       status = CMD_STOP;
@@ -2121,7 +2119,7 @@ void stop_Before_Pallete_R() {
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       while (millis() - count < 50) {
-        SystemYield();
+        IO_Update();
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
@@ -2140,9 +2138,9 @@ void stop_Before_Pallete_R() {
     uint8_t i = 1;
     uint8_t j = 1;
     while (i < 4) {
-      SystemYield();
+      IO_Update();
       while (millis() - count < 100) {
-        SystemYield();
+        IO_Update();
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
@@ -2213,7 +2211,7 @@ void moove_Before_Pallete_R() {
   motor_Start_Reverse();
   count = millis();
   while (findPallete) {
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
@@ -2317,7 +2315,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   int cnt = millis();
   count = millis();
   while (moove) {  // Двигаемся до конца заданного расстояния
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
       status = CMD_STOP;
       motor_Stop();
@@ -2442,7 +2440,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
   int cnt = millis();
   count = millis();
   while (moove) {
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
@@ -2549,7 +2547,7 @@ void moove_Forward() {
   uint8_t moove = 1;
   count = millis();
   while (moove) {
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
@@ -2607,7 +2605,7 @@ void moove_Reverse() {
   uint8_t maxSpd = 0;
   count = millis();
   while (moove) {
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
@@ -2677,7 +2675,7 @@ void unload_Pallete() {
   else motor_Speed(28);
   int cnt = millis();
   while (moove) {                                           // Едем до определения поддона
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {  // Проверка на ошибки и стоп
       motor_Stop();
       status = CMD_STOP;
@@ -2707,7 +2705,7 @@ void unload_Pallete() {
       for (uint8_t i = 0; i < maxbb; i++) {  // Задержка для доезда под доску
         count = millis();
         while (millis() - count < 100) {
-          SystemYield();
+          IO_Update();
           blink_Work();
           if (shouldAbortLoop()) {
             status = CMD_STOP;
@@ -2782,7 +2780,7 @@ void unload_Pallete() {
     moove = 1;
     motor_Start_Reverse();
     while (moove) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -2827,7 +2825,7 @@ void unload_Pallete() {
     motor_Stop();
     if (distance[1] > 150) {
       while (distance[3] < 800) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -2838,7 +2836,7 @@ void unload_Pallete() {
         get_Distance();
       }
       while (millis() - count < waitTime) {
-        SystemYield();
+        IO_Update();
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
@@ -2851,7 +2849,7 @@ void unload_Pallete() {
       motor_Start_Forward();
       motor_Speed(20);
       while (distance[1] > 90 + chnlOffset) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -2937,7 +2935,7 @@ void load_Pallete() {
     uint8_t free = 0;
     int cnt = millis();
     while (moove) {  // Едем до определения поддона
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
         motor_Stop();
         status = CMD_STOP;
@@ -2967,7 +2965,7 @@ void load_Pallete() {
         for (uint8_t i = 0; i < maxbb; i++) {  // Задержка для доезда под доску
           count = millis();
           while (millis() - count < 100) {
-            SystemYield();
+            IO_Update();
             blink_Work();
             if (shouldAbortLoop()) {
               status = CMD_STOP;
@@ -3025,7 +3023,7 @@ void load_Pallete() {
   } else if ((detectPalleteR1 || detectPalleteR2) && !(detectPalleteF1 || detectPalleteF2)) {
     uint8_t mv = 1;
     while (mv) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         status = CMD_STOP;
         motor_Stop();
@@ -3061,7 +3059,7 @@ void load_Pallete() {
     motor_Start_Forward();
     moove = 1;
     while (moove) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3128,7 +3126,7 @@ void single_Load() {
     motor_Start_Reverse();
     motor_Speed(10);
     while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3191,7 +3189,7 @@ void pallete_Counting_F() {
   int boardPosition = 0;
   uint8_t moove = 1;
   while (moove) {
-    SystemYield();
+    IO_Update();
     //Двигаемся и считаем паллеты
     if (shouldAbortLoop()) {
       motor_Stop();
@@ -3217,7 +3215,7 @@ void pallete_Counting_F() {
       }
 
       while (moove && (detectPalleteR1 || detectPalleteR2)) {
-        SystemYield();
+        IO_Update();
         blink_Work();
         if (shouldAbortLoop()) {
           status = CMD_STOP;
@@ -3272,7 +3270,7 @@ void pallete_Compacting_F() {
   status = CMD_COMPACT_F;
   detect_Pallete();
   while (distance[3] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] > 100 + chnlOffset) {
-    SystemYield();
+    IO_Update();
     moove_Distance_F(100, 25, 25);
     if (shouldAbortLoop()) {
       motor_Stop();
@@ -3285,7 +3283,7 @@ void pallete_Compacting_F() {
     else motor_Speed(oldSpeed);
   }
   while (status != CMD_STOP) {
-    SystemYield();
+    IO_Update();
     blink_Work();
     load_Pallete();
     STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
@@ -3309,7 +3307,7 @@ void pallete_Compacting_R() {
   status = CMD_COMPACT_R;
   detect_Pallete();
   while (distance[2] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[0] > 100 + chnlOffset) {
-    SystemYield();
+    IO_Update();
     moove_Distance_R(100, 25, 25);
     if (shouldAbortLoop()) {
       motor_Stop();
@@ -3323,7 +3321,7 @@ void pallete_Compacting_R() {
   }
   status = CMD_COMPACT_R;
   while (status != CMD_STOP) {
-    SystemYield();
+    IO_Update();
     blink_Work();
     unload_Pallete();
     STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
@@ -3354,7 +3352,7 @@ void long_Load() {
     motor_Start_Reverse();
     motor_Speed(10);
     while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3377,7 +3375,7 @@ void long_Load() {
       motor_Stop();
       count = millis();
       while (wait) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           status = CMD_STOP;
           return;
@@ -3388,7 +3386,7 @@ void long_Load() {
         if ((detectPalleteF1 && detectPalleteF2) || distance[3] < 1000) {
           count = millis();
           while (millis() - count < 10000) {
-            SystemYield();
+            IO_Update();
             if (shouldAbortLoop()) {
               status = CMD_STOP;
               get_Distance();
@@ -3421,7 +3419,7 @@ void long_Load() {
     else status = CMD_LONG_LOAD;
     count = millis();
     while (wait) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         status = CMD_STOP;
         return;
@@ -3432,7 +3430,7 @@ void long_Load() {
       if ((detectPalleteF1 && detectPalleteF2) || distance[3] < 1000) {
         count = millis();
         while (millis() - count < 10000) {
-          SystemYield();
+          IO_Update();
           if (shouldAbortLoop()) {
             status = CMD_STOP;
             return;
@@ -3473,7 +3471,7 @@ void long_Unload() {
     }
     count = millis();
     while (distance[3] < 900 && distance[1] > 700) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3487,7 +3485,7 @@ void long_Unload() {
     if (distance[1] > 700) {
       count = millis();
       while (distance[1] > 90) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -3548,7 +3546,7 @@ void long_Unload(uint8_t num) {
     send_Cmd();
     count = millis();
     while (distance[3] < 900 && distance[1] > 700) {
-      SystemYield();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3561,7 +3559,7 @@ void long_Unload(uint8_t num) {
     }
     if (distance[1] > 700) {
       while (distance[1] > 90) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -3605,7 +3603,7 @@ void moove_Right() {
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку 
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
@@ -3655,7 +3653,7 @@ void moove_Left() {
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
@@ -3702,7 +3700,7 @@ void demo_Mode() {
   detect_Pallete();
   uint8_t moove = 0;
   while (distance[3] < 700 && distance[1] > 100 + chnlOffset) {
-    SystemYield();
+    IO_Update();
     moove_Distance_F(100, 25, 25);
     if (shouldAbortLoop()) {
       motor_Stop();
@@ -3714,17 +3712,17 @@ void demo_Mode() {
     moove = 1;
   }
   while (1) {
-    SystemYield();
+    IO_Update();
     if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
     }
     while (status != CMD_STOP) {
-      SystemYield();
+      IO_Update();
       count = millis();
       while (millis() - count < 1000 && !moove) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -3757,8 +3755,8 @@ void demo_Mode() {
     }
     count = millis();
     while (millis() - count < 2000) {
-      SystemYield();
-      SystemYield();
+      IO_Update();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3770,10 +3768,10 @@ void demo_Mode() {
     update_Sensors();
     if (shouldAbortLoop()) return;
     while (status != CMD_STOP) {
-      SystemYield();
+      IO_Update();
       count = millis();
       while (millis() - count < 1000) {
-        SystemYield();
+        IO_Update();
         if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
@@ -3809,8 +3807,8 @@ void demo_Mode() {
     }
     count = millis();
     while (millis() - count < 2000) {
-      SystemYield();
-      SystemYield();
+      IO_Update();
+      IO_Update();
       if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
@@ -3907,7 +3905,7 @@ void calibrate_Encoder_R() {
       cnt = millis();
       i++;
     }
-    SystemYield();
+    IO_Update();
     blink_Work();
   }
   motor_Stop();
@@ -3978,7 +3976,7 @@ void calibrate_Encoder_F() {
       cnt = millis();
       i++;
     }
-    SystemYield();
+    IO_Update();
     blink_Work();
   }
   motor_Stop();
