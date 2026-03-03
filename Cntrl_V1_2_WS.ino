@@ -342,6 +342,16 @@ static inline bool isOverrideCommand(uint8_t cmd) {
             cmd == CMD_RESET_ERROR);
 }
 
+// Evaluates if the shuttle is currently doing nothing
+static inline bool isShuttleIdle() {
+    return (status == 0 || status == CMD_STOP);
+}
+
+// Evaluates if a physical loop must immediately terminate
+static inline bool shouldAbortLoop() {
+    return (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0] != 0);
+}
+
 void localLog(LogLevel level, const char* msg) {
   char timeStr[16];
   uint8_t hour, minute, second;
@@ -689,7 +699,7 @@ void SystemYield() {
   if (newCmd == NO_NEW_CMD) newCmd = pollSerial(Serial2, parserRadio);
 
   if (newCmd != NO_NEW_CMD) {
-      if (status == CMD_STOP || isOverrideCommand(newCmd)) {
+      if (isShuttleIdle() || isOverrideCommand(newCmd)) {
           status = newCmd;
           if (status == CMD_FIRMWARE_UPDATE) {
               motor_Stop();
@@ -815,22 +825,15 @@ void loop() {
       motor_Force_Stop();
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
-      uint8_t i = 0;
       
       if (status == CMD_RESET_ERROR) {
-        while (errorStatus[i]) {
-          errorStatus[i] = 0;
-          i++;
-        }
+        for(uint8_t i = 0; i < sizeof(errorStatus); i++) errorStatus[i] = 0;
         errorCode = 0;
         status = 0;
-      } else if (status == CMD_COUNT_PALLETS) {
-        send_Cmd();
+        digitalWrite(RED_LED, LOW);
+        currentMode = CoreOpMode::IDLE;
       }
-      if (!errorStatus[0]) {
-          digitalWrite(RED_LED, LOW);
-          currentMode = CoreOpMode::IDLE;
-      }
+
       detect_Pallete();
       break;
     }
@@ -874,7 +877,7 @@ void motor_Speed(int spd) {
           SystemYield();
           blink_Work();
           get_Distance();
-          if (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0]) {
+          if (shouldAbortLoop()) {
             status = CMD_STOP;
             motor_Stop();
             return;
@@ -907,7 +910,7 @@ void motor_Speed(int spd) {
         while (millis() - count < accel) {
           SystemYield();
           get_Distance();
-          if (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0]) {
+          if (shouldAbortLoop()) {
             status = CMD_STOP;
             motor_Stop();
             return;
@@ -1050,7 +1053,7 @@ void lifter_Up() {
     Can1.write(CAN_TX_msg);
     while (millis() - cnt < 30) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         status = CMD_STOP;
         return;
       }
@@ -1063,7 +1066,7 @@ void lifter_Up() {
   if (digitalRead(DL_UP)) Can1.write(CAN_TX_msg);
   while (digitalRead(DL_UP)) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       status = CMD_STOP;
       return;
     }
@@ -1119,7 +1122,7 @@ void lifter_Down() {
     Can1.write(CAN_TX_msg);
     while (millis() - cnt < 30) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         status = CMD_STOP;
         return;
       }
@@ -1132,7 +1135,7 @@ void lifter_Down() {
   if (digitalRead(DL_DOWN)) Can1.write(CAN_TX_msg);
   while (digitalRead(DL_DOWN)) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       status = CMD_STOP;
       return;
     }
@@ -1220,30 +1223,36 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     } else if (header->msgID == MSG_REQ_STATS) {
         sendStatsPacket(replyPort);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_CMD_SIMPLE) {
-        SimpleCmdPacket* cmd = (SimpleCmdPacket*)payload;
-        if (status == CMD_STOP || isOverrideCommand(cmd->cmdType)) {
-            sendAck(header->seq, 0, replyPort); // 0 = Success
-        return cmd->cmdType;
-        } else {
-            sendAck(header->seq, 2, replyPort); // 2 = Busy
+    } else if (header->msgID == MSG_CMD_SIMPLE || header->msgID == MSG_CMD_WITH_ARG) {
+        uint8_t reqCmd = (header->msgID == MSG_CMD_SIMPLE) ?
+                         ((SimpleCmdPacket*)payload)->cmdType : ((ParamCmdPacket*)payload)->cmdType;
+
+        bool inChannel = digitalRead(CHANNEL);
+
+        // 1. Force reject if in Error mode (unless it's an override like Reset)
+        if (errorStatus[0] != 0 && !isOverrideCommand(reqCmd)) {
+            sendAck(header->seq, 2, replyPort); // ACK 2 = Busy / Error
             return NO_NEW_CMD;
         }
 
-    } else if (header->msgID == MSG_CMD_WITH_ARG) {
-        ParamCmdPacket* cmd = (ParamCmdPacket*)payload;
-
-        if (status == CMD_STOP || isOverrideCommand(cmd->cmdType)) {
-            sendAck(header->seq, 0, replyPort); // 0 = Success
-
-        if (cmd->cmdType == CMD_MOVE_DIST_R || cmd->cmdType == CMD_MOVE_DIST_F) {
-            mooveDistance = cmd->arg;
-        } else if (cmd->cmdType == CMD_LONG_UNLOAD_QTY) {
-            UPQuant = (uint8_t)cmd->arg;
+        // 2. Force reject movement commands if not in channel (Prevents the IDLE ACK Lie)
+        if (!inChannel && reqCmd != CMD_SAVE_EEPROM && reqCmd != CMD_GET_CONFIG && reqCmd != CMD_RESET_ERROR) {
+            sendAck(header->seq, 3, replyPort); // ACK 3 = Invalid Environment (or use 2)
+            return NO_NEW_CMD;
         }
-        return cmd->cmdType;
+
+        // 3. Normal preemption check
+        if (isShuttleIdle() || isOverrideCommand(reqCmd)) {
+            sendAck(header->seq, 0, replyPort); // ACK 0 = Success
+
+            if (header->msgID == MSG_CMD_WITH_ARG) {
+                ParamCmdPacket* cmdArgs = (ParamCmdPacket*)payload;
+                if (reqCmd == CMD_MOVE_DIST_R || reqCmd == CMD_MOVE_DIST_F) mooveDistance = cmdArgs->arg;
+                else if (reqCmd == CMD_LONG_UNLOAD_QTY) UPQuant = (uint8_t)cmdArgs->arg;
+            }
+            return reqCmd;
         } else {
-            sendAck(header->seq, 2, replyPort); // 2 = Busy
+            sendAck(header->seq, 2, replyPort); // ACK 2 = Busy
             return NO_NEW_CMD;
         }
     } else if (header->msgID == MSG_SET_DATETIME) {
@@ -1742,7 +1751,7 @@ void blink_Warning() {
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
@@ -1755,7 +1764,7 @@ void blink_Warning() {
   digitalWrite(BOARD_LED, LOW);
   count = millis();
   while (millis() - count < 100)
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
@@ -1768,7 +1777,7 @@ void blink_Warning() {
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
@@ -1781,7 +1790,7 @@ void blink_Warning() {
   digitalWrite(BOARD_LED, LOW);
   count = millis();
   while (millis() - count < 100)
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
@@ -1794,7 +1803,7 @@ void blink_Warning() {
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
   while (millis() - count < 100)
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
       digitalWrite(ZOOMER, LOW);
@@ -1872,7 +1881,7 @@ void blink_Error() {
 void stop_Before_Pallete_F() {
   makeLog(LOG_DEBUG, "Start stopping before pallete F... at %d", distance[3]);
   moove_Before_Pallete_F();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   if (oldSpeed == 0 && distance[1] > 250) motor_Speed(20);
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
@@ -1886,7 +1895,7 @@ void stop_Before_Pallete_F() {
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       blink_Work();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         status = CMD_STOP;
         motor_Stop();
         return;
@@ -1907,7 +1916,7 @@ void stop_Before_Pallete_F() {
         SystemYield();
         blink_Work();
         get_Distance();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           status = CMD_STOP;
           motor_Stop();
           return;
@@ -1976,7 +1985,7 @@ void moove_Before_Pallete_F() {
   count = millis();
   while (findPallete) {                      // Двигаемся до обнаружения поддона или конца канала
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {  // Проверка на стоп и ошибки
+    if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -2027,7 +2036,7 @@ void moove_Before_Pallete_F() {
       } else if (oldSpeed) {
         motor_Speed(oldSpeed);
       } else motor_Speed(5);
-      if (status == CMD_STOP || errorStatus[0]) return;
+      if (shouldAbortLoop()) return;
       count = millis();
     }
   }
@@ -2042,7 +2051,7 @@ void moove_Before_Pallete_F() {
 void stop_Before_Pallete_R() {
   makeLog(LOG_DEBUG, "Start stopping before pallete R... at %d", distance[2]);
   moove_Before_Pallete_R();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   if (oldSpeed == 0 && distance[0] > 250) motor_Speed(20);
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
@@ -2059,7 +2068,7 @@ void stop_Before_Pallete_R() {
         SystemYield();
         blink_Work();
         get_Distance();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           status = CMD_STOP;
           motor_Stop();
           return;
@@ -2080,7 +2089,7 @@ void stop_Before_Pallete_R() {
         SystemYield();
         blink_Work();
         get_Distance();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           status = CMD_STOP;
           motor_Stop();
           return;
@@ -2149,7 +2158,7 @@ void moove_Before_Pallete_R() {
   count = millis();
   while (findPallete) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -2209,7 +2218,7 @@ void moove_Before_Pallete_R() {
       else if (distance[0] <= 90 + chnlOffset) {
         findPallete = 0;
       } else motor_Speed(oldSpeed);
-      if (status == CMD_STOP || errorStatus[0]) return;
+      if (shouldAbortLoop()) return;
       count = millis();
     }
   }
@@ -2253,7 +2262,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   count = millis();
   while (moove) {  // Двигаемся до конца заданного расстояния
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {  // Проверка на стоп и ошибки
+    if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
       status = CMD_STOP;
       motor_Stop();
       return;
@@ -2378,7 +2387,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
   count = millis();
   while (moove) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
       return;
@@ -2485,7 +2494,7 @@ void moove_Forward() {
   count = millis();
   while (moove) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
       return;
@@ -2519,7 +2528,7 @@ void moove_Forward() {
         }
       }
       motor_Speed(speed);
-      if (status == CMD_STOP || errorStatus[0]) return;
+      if (shouldAbortLoop()) return;
       count = millis();
     }
   }
@@ -2543,7 +2552,7 @@ void moove_Reverse() {
   count = millis();
   while (moove) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       status = CMD_STOP;
       motor_Stop();
       return;
@@ -2576,7 +2585,7 @@ void moove_Reverse() {
         makeLog(LOG_INFO, "End of channel, stop moove reverse...");
       }
       motor_Speed(speed);
-      if (status == CMD_STOP || errorStatus[0]) return;
+      if (shouldAbortLoop()) return;
       count = millis();
     }
   }
@@ -2601,7 +2610,7 @@ void unload_Pallete() {
     moove_Before_Pallete_R();
     frontBoard = 0;
   }
-  if (status == CMD_STOP || errorStatus[0]) {  // Проверка на ошибки и стоп
+  if (shouldAbortLoop()) {  // Проверка на ошибки и стоп
     oldSpeed = 0;
     if (fifoLifo) fifoLifo_Inverse();
     return;
@@ -2613,7 +2622,7 @@ void unload_Pallete() {
   int cnt = millis();
   while (moove) {                                           // Едем до определения поддона
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {  // Проверка на ошибки и стоп
+    if (shouldAbortLoop()) {  // Проверка на ошибки и стоп
       motor_Stop();
       status = CMD_STOP;
       if (fifoLifo) fifoLifo_Inverse();
@@ -2644,7 +2653,7 @@ void unload_Pallete() {
         while (millis() - count < 100) {
           SystemYield();
           blink_Work();
-          if (status == CMD_STOP || errorStatus[0]) {
+          if (shouldAbortLoop()) {
             status = CMD_STOP;
             motor_Stop();
             return;
@@ -2690,7 +2699,7 @@ void unload_Pallete() {
 
   set_Position();
   makeLog(LOG_DEBUG, "Pallete lenght = %d", palleteLenght);
-  if (status == CMD_STOP || errorStatus[0]) {
+  if (shouldAbortLoop()) {
     if (fifoLifo) fifoLifo_Inverse();
     return;
   }
@@ -2718,7 +2727,7 @@ void unload_Pallete() {
     motor_Start_Reverse();
     while (moove) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         if (fifoLifo) fifoLifo_Inverse();
@@ -2763,7 +2772,7 @@ void unload_Pallete() {
     if (distance[1] > 150) {
       while (distance[3] < 800) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           if (fifoLifo) fifoLifo_Inverse();
@@ -2776,7 +2785,7 @@ void unload_Pallete() {
         SystemYield();
         blink_Work();
         get_Distance();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           if (fifoLifo) fifoLifo_Inverse();
@@ -2787,7 +2796,7 @@ void unload_Pallete() {
       motor_Speed(20);
       while (distance[1] > 90 + chnlOffset) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           if (fifoLifo) fifoLifo_Inverse();
@@ -2817,7 +2826,7 @@ void unload_Pallete() {
   } else {
     stop_Before_Pallete_F();
   }
-  if (status == CMD_STOP || errorStatus[0]) {  // Проверка на стоп и ошибки
+  if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
     if (fifoLifo) fifoLifo_Inverse();
     return;
   }
@@ -2857,7 +2866,7 @@ void load_Pallete() {
     if (distance[3] > 750) {  // Если есть куда ехать назад (канал свободен назад), едем к паллету
       moove_Before_Pallete_F();
     }
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       oldSpeed = 0;
       return;
     }
@@ -2873,7 +2882,7 @@ void load_Pallete() {
     int cnt = millis();
     while (moove) {  // Едем до определения поддона
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {  // Проверка на стоп и ошибки
+      if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -2904,7 +2913,7 @@ void load_Pallete() {
           while (millis() - count < 100) {
             SystemYield();
             blink_Work();
-            if (status == CMD_STOP || errorStatus[0]) {
+            if (shouldAbortLoop()) {
               status = CMD_STOP;
               motor_Stop();
               return;
@@ -2961,7 +2970,7 @@ void load_Pallete() {
     uint8_t mv = 1;
     while (mv) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         status = CMD_STOP;
         motor_Stop();
         return;
@@ -2981,7 +2990,7 @@ void load_Pallete() {
     frontBoard = 0;
   } else if (detectPalleteF1 && detectPalleteF2) frontBoard = 0;
   set_Position();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   //Поднимаем паллет
   lifter_Up();
   //Перехват если требуется
@@ -2997,7 +3006,7 @@ void load_Pallete() {
     moove = 1;
     while (moove) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0] || status == CMD_STOP) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -3036,7 +3045,7 @@ void load_Pallete() {
   }
   //Везем на выгрузку
   stop_Before_Pallete_R();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   //Опускаем паллет
   if (!longWork && lifterUp) {
     lifter_Down();
@@ -3052,7 +3061,7 @@ void load_Pallete() {
 // Единичная загрузка
 void single_Load() {
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   get_Distance();
   detect_Pallete();
   if ((detectPalleteF1 && detectPalleteF2 && shuttleLength != 800) || (detectPalleteF1 && detectPalleteF2 && detectPalleteR1 && detectPalleteR2)) load_Pallete();
@@ -3064,7 +3073,7 @@ void single_Load() {
     motor_Speed(10);
     while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -3102,13 +3111,13 @@ void pallete_Counting_F() {
   detect_Pallete();
   uint8_t palleteOnStart = 0;
   if ((detectPalleteF1 && detectPalleteF2) || (detectPalleteR1 && detectPalleteR2)) palleteOnStart++;
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   //Теперь к первому паллету в загрузке
   get_Distance();
   detect_Pallete();
   if (distance[2] > 1000 && !(detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2)) {
     moove_Before_Pallete_R();
-    if (status == CMD_STOP || errorStatus[0]) return;
+    if (shouldAbortLoop()) return;
     if (distance[0] < 150 + chnlOffset) {
       motor_Stop();
       return;
@@ -3128,7 +3137,7 @@ void pallete_Counting_F() {
   while (moove) {
     SystemYield();
     //Двигаемся и считаем паллеты
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3154,7 +3163,7 @@ void pallete_Counting_F() {
       while (moove && (detectPalleteR1 || detectPalleteR2)) {
         SystemYield();
         blink_Work();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           status = CMD_STOP;
           motor_Stop();
           return;
@@ -3202,14 +3211,14 @@ void pallete_Compacting_F() {
   makeLog(LOG_INFO, "Start compacting pallete forward...");
   if (!digitalRead(DL_DOWN)) lifter_Down();
   moove_Reverse();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   get_Distance();
   status = CMD_COMPACT_F;
   detect_Pallete();
   while (distance[3] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] > 100 + chnlOffset) {
     SystemYield();
     moove_Distance_F(100, 25, 25);
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3225,7 +3234,7 @@ void pallete_Compacting_F() {
     load_Pallete();
     STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
     if (distance[1] < 150 && !lifterUp) return;
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3239,14 +3248,14 @@ void pallete_Compacting_F() {
 void pallete_Compacting_R() {
   makeLog(LOG_INFO, "Start compacting pallete reverse...");
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   get_Distance();
   status = CMD_COMPACT_R;
   detect_Pallete();
   while (distance[2] < 700 && (detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[0] > 100 + chnlOffset) {
     SystemYield();
     moove_Distance_R(100, 25, 25);
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3263,7 +3272,7 @@ void pallete_Compacting_R() {
     unload_Pallete();
     STATS_ATOMIC_UPDATE(sramStats->payload.compactCounter++);
     if (distance[0] < 150 && !lifterUp) return;
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3280,7 +3289,7 @@ void long_Load() {
   makeLog(LOG_INFO, "Starting continuos load...");
   status = CMD_LONG_LOAD;
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   status = CMD_LONG_LOAD;
   lifter_Down();
   get_Distance();
@@ -3290,7 +3299,7 @@ void long_Load() {
     motor_Speed(10);
     while (!(detectPalleteF1 && detectPalleteF2) && distance[1] < 400 + chnlOffset) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -3313,7 +3322,7 @@ void long_Load() {
       count = millis();
       while (wait) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           status = CMD_STOP;
           return;
         }
@@ -3324,7 +3333,7 @@ void long_Load() {
           count = millis();
           while (millis() - count < 10000) {
             SystemYield();
-            if (status == CMD_STOP || errorStatus[0]) {
+            if (shouldAbortLoop()) {
               status = CMD_STOP;
               get_Distance();
               return;
@@ -3352,12 +3361,12 @@ void long_Load() {
       moove_Distance_R(shuttleLength + 300, 60, 30);
       motor_Stop();
       wait = 1;
-    } else if (status == CMD_STOP || errorStatus[0]) return;
+    } else if (shouldAbortLoop()) return;
     else status = CMD_LONG_LOAD;
     count = millis();
     while (wait) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         status = CMD_STOP;
         return;
       }
@@ -3368,7 +3377,7 @@ void long_Load() {
         count = millis();
         while (millis() - count < 10000) {
           SystemYield();
-          if (status == CMD_STOP || errorStatus[0]) {
+          if (shouldAbortLoop()) {
             status = CMD_STOP;
             return;
           }
@@ -3387,7 +3396,7 @@ void long_Unload() {
   makeLog(LOG_INFO, "Starting continuos unload...");
   if (fifoLifo) fifoLifo_Inverse();
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) {
+  if (shouldAbortLoop()) {
     if (fifoLifo) fifoLifo_Inverse();
     interPalleteDistance = oldInterPalleteDistance;
     return;
@@ -3401,7 +3410,7 @@ void long_Unload() {
       detect = 0;
       status = CMD_LONG_UNLOAD;
       break;
-    } else if (status == CMD_STOP || errorStatus[0]) {
+    } else if (shouldAbortLoop()) {
       if (fifoLifo) fifoLifo_Inverse();
       interPalleteDistance = oldInterPalleteDistance;
       return;
@@ -3409,7 +3418,7 @@ void long_Unload() {
     count = millis();
     while (distance[3] < 900 && distance[1] > 700) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         interPalleteDistance = oldInterPalleteDistance;
@@ -3423,7 +3432,7 @@ void long_Unload() {
       count = millis();
       while (distance[1] > 90) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           interPalleteDistance = oldInterPalleteDistance;
@@ -3456,7 +3465,7 @@ void long_Unload(uint8_t num) {
   makeLog(LOG_INFO, "Starting continuos unload...");
   if (fifoLifo) fifoLifo_Inverse();
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) {
+  if (shouldAbortLoop()) {
     if (fifoLifo) fifoLifo_Inverse();
     interPalleteDistance = oldInterPalleteDistance;
     return;
@@ -3474,7 +3483,7 @@ void long_Unload(uint8_t num) {
       detect = 0;
       status = CMD_LONG_UNLOAD_QTY;
       break;
-    } else if (status == CMD_STOP || errorStatus[0]) {
+    } else if (shouldAbortLoop()) {
       if (fifoLifo) fifoLifo_Inverse();
       interPalleteDistance = oldInterPalleteDistance;
       return;
@@ -3484,7 +3493,7 @@ void long_Unload(uint8_t num) {
     count = millis();
     while (distance[3] < 900 && distance[1] > 700) {
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         interPalleteDistance = oldInterPalleteDistance;
@@ -3497,7 +3506,7 @@ void long_Unload(uint8_t num) {
     if (distance[1] > 700) {
       while (distance[1] > 90) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           interPalleteDistance = oldInterPalleteDistance;
@@ -3541,7 +3550,7 @@ void moove_Right() {
 
   while (moove) {  // Едем пока держат кнопку 
     SystemYield();
-    if (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0]) { 
+    if (shouldAbortLoop()) {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
       return;
@@ -3591,7 +3600,7 @@ void moove_Left() {
 
   while (moove) {  // Едем пока держат кнопку
     SystemYield();
-    if (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0]) { 
+    if (shouldAbortLoop()) {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
       return; 
@@ -3632,14 +3641,14 @@ void demo_Mode() {
   lifter_Down();
   moove_Reverse();
   lastPalletePosition = 0;
-  if (status == CMD_STOP || errorStatus[0]) return;
+  if (shouldAbortLoop()) return;
   get_Distance();
   detect_Pallete();
   uint8_t moove = 0;
   while (distance[3] < 700 && distance[1] > 100 + chnlOffset) {
     SystemYield();
     moove_Distance_F(100, 25, 25);
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       return;
     }
@@ -3650,7 +3659,7 @@ void demo_Mode() {
   }
   while (1) {
     SystemYield();
-    if (status == CMD_STOP || errorStatus[0]) {
+    if (shouldAbortLoop()) {
       motor_Stop();
       status = CMD_STOP;
       return;
@@ -3660,7 +3669,7 @@ void demo_Mode() {
       count = millis();
       while (millis() - count < 1000 && !moove) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           return;
@@ -3694,7 +3703,7 @@ void demo_Mode() {
     while (millis() - count < 2000) {
       SystemYield();
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -3703,13 +3712,13 @@ void demo_Mode() {
       get_Distance();
     }
     update_Sensors();
-    if (status == CMD_STOP || errorStatus[0]) return;
+    if (shouldAbortLoop()) return;
     while (status != CMD_STOP) {
       SystemYield();
       count = millis();
       while (millis() - count < 1000) {
         SystemYield();
-        if (status == CMD_STOP || errorStatus[0]) {
+        if (shouldAbortLoop()) {
           motor_Stop();
           status = CMD_STOP;
           return;
@@ -3746,7 +3755,7 @@ void demo_Mode() {
     while (millis() - count < 2000) {
       SystemYield();
       SystemYield();
-      if (status == CMD_STOP || errorStatus[0]) {
+      if (shouldAbortLoop()) {
         motor_Stop();
         status = CMD_STOP;
         return;
@@ -3755,7 +3764,7 @@ void demo_Mode() {
       get_Distance();
     }
     update_Sensors();
-    if (status == CMD_STOP || errorStatus[0]) return;
+    if (shouldAbortLoop()) return;
   }
 }
 
@@ -3804,7 +3813,7 @@ void calibrate_Encoder_R() {
 
   //Двигаемся к концу канала
   moove_Forward();
-  if (status == CMD_STOP || errorStatus[0]) {
+  if (shouldAbortLoop()) {
     if (inverse) {
     }
     return;
@@ -3877,7 +3886,7 @@ void calibrate_Encoder_F() {
 
   // Двигаемся к концу канала
   moove_Distance_R(2000);
-  if (status == CMD_STOP || errorStatus[0]) {
+  if (shouldAbortLoop()) {
     return;
   }
   // Выставляем 0 на энкодере
