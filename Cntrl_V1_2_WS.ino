@@ -1077,134 +1077,208 @@ void motor_Force_Stop() {
 }
 #pragma endregion
 
+class LifterManager {
+public:
+    enum class LifterState { IDLE, RAMP_UP, LIFTING, RAMP_DOWN, LOWERING, ERROR_TIMEOUT };
+    enum class LifterStatus { BUSY, DONE, ERR };
+
+    LifterState currentState = LifterState::IDLE;
+    uint32_t stateStartTime = 0;
+    uint32_t lastRampTime = 0;
+    uint8_t rampStep = 5;
+
+    int currentSum = 0;
+    int currentSamples = 0;
+    int maxCurrent = 0;
+
+    void cmdUp() {
+        if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
+            makeLog(LOG_DEBUG, "Lifter is up... status = %d", status);
+            return;
+        }
+        makeLog(LOG_INFO, "Moove lifter up...");
+        currentState = LifterState::RAMP_UP;
+        stateStartTime = millis();
+        lastRampTime = millis();
+        rampStep = 5;
+        currentSum = 0;
+        currentSamples = 0;
+        maxCurrent = 0;
+    }
+
+    void cmdDown() {
+        if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
+            makeLog(LOG_DEBUG, "Lifter is down... status = %d", status);
+            return;
+        }
+        makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
+        currentState = LifterState::RAMP_DOWN;
+        stateStartTime = millis();
+        lastRampTime = millis();
+        rampStep = 5;
+    }
+
+    LifterStatus tick() {
+        cracked_int_t hexSpeed;
+        switch (currentState) {
+            case LifterState::IDLE:
+                return LifterStatus::DONE;
+
+            case LifterState::RAMP_UP:
+                if (millis() - lastRampTime >= 30) {
+                    hexSpeed.vint = -rampStep * 1000;
+                    CAN_TX_msg.id = (101);
+                    CAN_TX_msg.len = 4;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    rampStep += 5;
+                    lastRampTime = millis();
+                    if (rampStep >= 50) {
+                        currentState = LifterState::LIFTING;
+                        hexSpeed.vint = -50000;
+                        for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                        if (digitalRead(DL_UP)) Can1.write(CAN_TX_msg);
+                    }
+                }
+                return LifterStatus::BUSY;
+
+            case LifterState::LIFTING:
+                if (millis() - stateStartTime > (uint32_t)lifterDelay) {
+                    lifter_Stop();
+                    add_Error(9);
+                    makeLog(LOG_ERROR, "Lifter timeout!");
+                    status = CMD_STOP;
+                    currentState = LifterState::ERROR_TIMEOUT;
+                    return LifterStatus::ERR;
+                }
+                if (!digitalRead(DL_UP)) {
+                    CAN_TX_msg.id = (101);
+                    CAN_TX_msg.len = 4;
+                    hexSpeed.vint = -50000;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    if (digitalRead(DL_DOWN)) lifterUp = 1;
+                    lifter_Stop();
+                    int summCurrent = 0;
+                    if (currentSamples > 0) summCurrent = currentSum / currentSamples;
+                    if (maxCurrent > 500) {
+                        STATS_ATOMIC_UPDATE(sramStats->payload.lifterOverloadCount++);
+                        lifterCurrent = 250;
+                    } else {
+                        lifterCurrent = maxCurrent;
+                    }
+                    makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
+                    STATS_ATOMIC_UPDATE(sramStats->payload.liftUpCounter++);
+                    currentState = LifterState::IDLE;
+                    return LifterStatus::DONE;
+                }
+
+                blink_Work();
+                get_Distance();
+                while (Can1.read(CAN_RX_msg)) {
+                    if (!CAN_RX_msg.flags.remote && CAN_RX_msg.id == 2405) {
+                        int current = CAN_RX_msg.buf[4] * 256 + CAN_RX_msg.buf[5];
+                        if (maxCurrent < current && currentSamples > 3) maxCurrent = current;
+                        currentSamples++;
+                        if (currentSamples > 3) currentSum += current;
+                    }
+                }
+                // Periodic resend just like the original code
+                static uint32_t lastCanSendUp = 0;
+                if (millis() - lastCanSendUp > 10) {
+                    CAN_TX_msg.id = (101);
+                    CAN_TX_msg.len = 4;
+                    hexSpeed.vint = -50000;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    lastCanSendUp = millis();
+                }
+                return LifterStatus::BUSY;
+
+            case LifterState::RAMP_DOWN:
+                if (millis() - lastRampTime >= 30) {
+                    hexSpeed.vint = rampStep * 1000;
+                    CAN_TX_msg.id = (101);
+                    CAN_TX_msg.len = 4;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    rampStep += 5;
+                    lastRampTime = millis();
+                    if (rampStep >= 50) {
+                        currentState = LifterState::LOWERING;
+                        hexSpeed.vint = 50000;
+                        for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                        if (digitalRead(DL_DOWN)) Can1.write(CAN_TX_msg);
+                    }
+                }
+                return LifterStatus::BUSY;
+
+            case LifterState::LOWERING:
+                if (millis() - stateStartTime > (uint32_t)lifterDelay) {
+                    lifter_Stop();
+                    add_Error(9);
+                    makeLog(LOG_ERROR, "Lifter timeout!");
+                    status = CMD_STOP;
+                    currentState = LifterState::ERROR_TIMEOUT;
+                    return LifterStatus::ERR;
+                }
+                if (!digitalRead(DL_DOWN)) {
+                    if (!digitalRead(DL_DOWN)) lifterUp = 0;
+                    lifter_Stop();
+                    load = 0;
+                    lifterCurrent = 0;
+                    STATS_ATOMIC_UPDATE(sramStats->payload.liftDownCounter++);
+                    currentState = LifterState::IDLE;
+                    return LifterStatus::DONE;
+                }
+
+                blink_Work();
+                get_Distance();
+
+                static uint32_t lastCanSendDown = 0;
+                if (millis() - lastCanSendDown > 10) {
+                    CAN_TX_msg.id = (101);
+                    CAN_TX_msg.len = 4;
+                    hexSpeed.vint = 50000;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    lastCanSendDown = millis();
+                }
+                return LifterStatus::BUSY;
+
+            case LifterState::ERROR_TIMEOUT:
+                return LifterStatus::ERR;
+        }
+        return LifterStatus::ERR;
+    }
+};
+
+LifterManager lifterManager;
+
 #pragma region Функции управления лифтером
 
 // Подъем платформы
 void lifter_Up() {
-  if (!digitalRead(DL_UP) && digitalRead(DL_DOWN)) {
-    makeLog(LOG_DEBUG, "Lifter is up... status = %d", status);
-    return;
-  }
-  makeLog(LOG_INFO, "Moove lifter up...");
-  int k = 0;
-  int summCurrent = 0;
-  int current = 0;
-  cracked_int_t hexSpeed;
-  int cnt2 = millis();
-  int cnt = millis();
-  CAN_TX_msg.id = (101);
-  CAN_TX_msg.len = 4;
-  for (uint8_t j = 5; j < 50; j += 5) {
-    hexSpeed.vint = -j;
-    hexSpeed.vint *= 1000;
-    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-    Can1.write(CAN_TX_msg);
-    while (millis() - cnt < 30) {
-      IO_Update();
-      if (shouldAbortLoop()) {
-        status = CMD_STOP;
-        return;
-      }
-    }
-    cnt = millis();
-  }
-  cnt = millis();
-  hexSpeed.vint = -50000;
-  for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-  if (digitalRead(DL_UP)) Can1.write(CAN_TX_msg);
-  while (digitalRead(DL_UP)) {
-    IO_Update();
+  lifterManager.cmdUp();
+  while (lifterManager.tick() == LifterManager::LifterStatus::BUSY) {
+    SystemYield();
     if (shouldAbortLoop()) {
       status = CMD_STOP;
       return;
     }
-    if (millis() - cnt > lifterDelay) {
-      lifter_Stop();
-      add_Error(9);
-      makeLog(LOG_ERROR, "Lifter timeout!");
-      status = CMD_STOP;
-      break;
-    }
-    delay(10);
-    Can1.write(CAN_TX_msg);
-    blink_Work();
-    get_Distance();
-
-    while (Can1.read(CAN_RX_msg)) {
-      if (!CAN_RX_msg.flags.remote && CAN_RX_msg.id == 2405) {
-        current = CAN_RX_msg.buf[4] * 256 + CAN_RX_msg.buf[5];
-        if (lifterCurrent < current && k > 3) lifterCurrent = current;
-        k++;
-        if (k > 3) summCurrent += current;
-        cnt2 = millis();
-      }
-    }
   }
-  Can1.write(CAN_TX_msg);
-  if (digitalRead(DL_DOWN)) lifterUp = 1;
-  lifter_Stop();
-  summCurrent /= k;
-  if (lifterCurrent > 500) {
-      STATS_ATOMIC_UPDATE(sramStats->payload.lifterOverloadCount++);
-      lifterCurrent = 250;
-  }
-  makeLog(LOG_DEBUG, "Summ = %d", summCurrent);
-  STATS_ATOMIC_UPDATE(sramStats->payload.liftUpCounter++);
 }
 
 // Опускание платформы
 void lifter_Down() {
-  if (!digitalRead(DL_DOWN) && digitalRead(DL_UP)) {
-    makeLog(LOG_DEBUG, "Lifter is down... status = %d", status);
-    return;
-  }
-  makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
-  int cnt = millis();
-  cracked_int_t hexSpeed;
-  CAN_TX_msg.id = (101);
-  CAN_TX_msg.len = 4;
-  for (uint8_t j = 5; j < 50; j += 5) {
-    hexSpeed.vint = j;
-    hexSpeed.vint *= 1000;
-    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-    Can1.write(CAN_TX_msg);
-    while (millis() - cnt < 30) {
-      IO_Update();
-      if (shouldAbortLoop()) {
-        status = CMD_STOP;
-        return;
-      }
-    }
-    cnt = millis();
-  }
-  cnt = millis();
-  hexSpeed.vint = 50000;
-  for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-  if (digitalRead(DL_DOWN)) Can1.write(CAN_TX_msg);
-  while (digitalRead(DL_DOWN)) {
-    IO_Update();
+  lifterManager.cmdDown();
+  while (lifterManager.tick() == LifterManager::LifterStatus::BUSY) {
+    SystemYield();
     if (shouldAbortLoop()) {
       status = CMD_STOP;
       return;
     }
-    if (millis() - cnt > lifterDelay) {
-      lifter_Stop();
-      add_Error(9);
-      makeLog(LOG_ERROR, "Lifter timeout!");
-      status = CMD_STOP;
-      break;
-    }
-    delay(10);
-    Can1.write(CAN_TX_msg);
-    blink_Work();
-    get_Distance();
   }
-  
-  if (!digitalRead(DL_DOWN)) lifterUp = 0;
-  lifter_Stop();
-  load = 0;
-  lifterCurrent = 0;
-  STATS_ATOMIC_UPDATE(sramStats->payload.liftDownCounter++);
 }
 
 // Остановка платформы
