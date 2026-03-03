@@ -1004,59 +1004,146 @@ void motor_Start_Reverse() {
   motorReverse = 1;
 }
 
+class MotorBrake {
+public:
+    enum State { IDLE, BRAKING_STEPS, FINAL_WAIT, DONE };
+    enum Status { BUSY, DONE_STATUS };
+
+    State currentState = IDLE;
+    uint8_t currentStep = 0;
+    uint8_t maxSteps = 0;
+    uint32_t lastStepTime = 0;
+    uint32_t currentDelayNeeded = 0;
+    uint16_t startOldSpeed = 0;
+
+    uint8_t finalWaitStep = 0;
+    uint8_t maxFinalWaitSteps = 0;
+
+    void startBrake() {
+        startOldSpeed = oldSpeed;
+        Can1.read(CAN_RX_msg);
+        makeLog(LOG_INFO, "Motor stop, speed = %d", startOldSpeed);
+
+        if (startOldSpeed > 1) {
+            maxSteps = startOldSpeed / 2;
+            currentStep = maxSteps;
+            currentState = BRAKING_STEPS;
+            lastStepTime = millis();
+            currentDelayNeeded = 0;
+        } else {
+            currentState = FINAL_WAIT;
+            prepareFinalWait();
+        }
+    }
+
+    void prepareFinalWait() {
+        set_Position();
+        cracked_int_t hexSpeed;
+        hexSpeed.vint = 0;
+        CAN_TX_msg.id = (100);
+        CAN_TX_msg.len = 4;
+        for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+        Can1.write(CAN_TX_msg);
+        while (Can1.read(CAN_RX_msg))
+            ;
+
+        if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) {
+            maxFinalWaitSteps = 10;
+        } else {
+            maxFinalWaitSteps = 1;
+        }
+        finalWaitStep = 0;
+        count = millis();
+    }
+
+    Status tick() {
+        if (currentState == IDLE || currentState == DONE) {
+            return DONE_STATUS;
+        }
+
+        if (currentState == BRAKING_STEPS) {
+            if (millis() - lastStepTime >= currentDelayNeeded) {
+                if (currentStep == 0) {
+                    currentState = FINAL_WAIT;
+                    prepareFinalWait();
+                    return BUSY;
+                }
+
+                blink_Work();
+                get_Distance();
+
+                cracked_int_t hexSpeed;
+                hexSpeed.vint = minSpeed + startOldSpeed * maxSpeed * currentStep / (maxSteps * 100);
+                hexSpeed.vint *= 1000;
+                if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
+
+                CAN_TX_msg.id = (100);
+                CAN_TX_msg.len = 4;
+                for (uint8_t j = 0; j < 4; j++) { CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j]; }
+                Can1.write(CAN_TX_msg);
+                while (Can1.read(CAN_RX_msg))
+                    ;
+
+                if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) {
+                    currentDelayNeeded = 10;
+                } else if (maxSteps > 10) {
+                    currentDelayNeeded = 10 + currentStep * 20 / maxSteps;
+                } else {
+                    currentDelayNeeded = 50;
+                }
+
+                lastStepTime = millis();
+                currentStep--;
+            }
+            return BUSY;
+        }
+
+        if (currentState == FINAL_WAIT) {
+            if (finalWaitStep < maxFinalWaitSteps) {
+                if (millis() - count < 100) {
+                    blink_Work();
+                } else {
+                    cracked_int_t hexSpeed;
+                    hexSpeed.vint = 0;
+                    CAN_TX_msg.id = (100);
+                    CAN_TX_msg.len = 4;
+                    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+                    Can1.write(CAN_TX_msg);
+                    while (Can1.read(CAN_RX_msg))
+                        ;
+                    finalWaitStep++;
+                    if (finalWaitStep < maxFinalWaitSteps) {
+                        count = millis();
+                    } else {
+                        currentState = DONE;
+                        return DONE_STATUS;
+                    }
+                }
+            } else {
+                currentState = DONE;
+                return DONE_STATUS;
+            }
+            return BUSY;
+        }
+
+        return BUSY;
+    }
+};
+
+MotorBrake motorBrake;
+
 // Остановка движения
 void motor_Stop() {
-  if (motorReverse == 2) return;
-  Can1.read(CAN_RX_msg);
-  makeLog(LOG_INFO, "Motor stop, speed = %d", oldSpeed);
-  CAN_TX_msg.id = (100);
-  CAN_TX_msg.len = 4;
-  cracked_int_t hexSpeed;
-  if (oldSpeed > 1) {
-    uint8_t maxi = (uint8_t)oldSpeed / 2;
-    for (uint8_t i = maxi; i > 0; i--) {
-      blink_Work();
-      get_Distance();
-      hexSpeed.vint = minSpeed + oldSpeed * maxSpeed * i / (maxi * 100);
-      hexSpeed.vint *= 1000;
-      if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-      for (uint8_t j = 0; j < 4; j++) { CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j]; }
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
-      if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) delay(10);
-      else if (maxi > 10) delay(10 + i * 20 / maxi);
-      else delay(50);
+    if (motorReverse == 2) return;
+    motorBrake.startBrake();
+    while (motorBrake.tick() == MotorBrake::BUSY) {
+        IO_Update();
     }
-  }
-  set_Position();
-  hexSpeed.vint = 0;
-  for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-  Can1.write(CAN_TX_msg);
-  while (Can1.read(CAN_RX_msg))
-    ;
-  if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) {
-    for (uint8_t i = 0; i < 10; i++) {
-      count = millis();
-      while (millis() - count < 100) blink_Work();
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
-    }
-  } else {
-    for (uint8_t i = 0; i < 1; i++) {
-      count = millis();
-      while (millis() - count < 100) blink_Work();
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg))
-        ;
-    }
-  }
-  oldSpeed = 0;
-  motorStart = 0;
-  motorReverse = 2;
-  mooveCount = 0;
-  oldPosition = currentPosition;
+    oldSpeed = 0;
+    motorStart = 0;
+    motorReverse = 2;
+    mooveCount = 0;
+    oldPosition = currentPosition;
 }
 
 // Форсмажорная остановка движения
