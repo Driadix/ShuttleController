@@ -1085,6 +1085,7 @@ public:
     LifterState currentState = LifterState::IDLE;
     uint32_t stateStartTime = 0;
     uint32_t lastRampTime = 0;
+    uint32_t lastCanSendTime = 0;
     uint8_t rampStep = 5;
 
     int currentSum = 0;
@@ -1099,7 +1100,8 @@ public:
         makeLog(LOG_INFO, "Moove lifter up...");
         currentState = LifterState::RAMP_UP;
         stateStartTime = millis();
-        lastRampTime = millis();
+        lastRampTime = millis() - 30;
+        lastCanSendTime = 0;
         rampStep = 5;
         currentSum = 0;
         currentSamples = 0;
@@ -1114,7 +1116,8 @@ public:
         makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
         currentState = LifterState::RAMP_DOWN;
         stateStartTime = millis();
-        lastRampTime = millis();
+        lastRampTime = millis() - 30;
+        lastCanSendTime = 0;
         rampStep = 5;
     }
 
@@ -1183,15 +1186,14 @@ public:
                         if (currentSamples > 3) currentSum += current;
                     }
                 }
-                // Periodic resend just like the original code
-                static uint32_t lastCanSendUp = 0;
-                if (millis() - lastCanSendUp > 10) {
+                
+                if (millis() - lastCanSendTime > 10) {
                     CAN_TX_msg.id = (101);
                     CAN_TX_msg.len = 4;
                     hexSpeed.vint = -50000;
                     for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
                     Can1.write(CAN_TX_msg);
-                    lastCanSendUp = millis();
+                    lastCanSendTime = millis();
                 }
                 return LifterStatus::BUSY;
 
@@ -1234,15 +1236,14 @@ public:
 
                 blink_Work();
                 get_Distance();
-
-                static uint32_t lastCanSendDown = 0;
-                if (millis() - lastCanSendDown > 10) {
+                
+                if (millis() - lastCanSendTime > 10) {
                     CAN_TX_msg.id = (101);
                     CAN_TX_msg.len = 4;
                     hexSpeed.vint = 50000;
                     for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
                     Can1.write(CAN_TX_msg);
-                    lastCanSendDown = millis();
+                    lastCanSendTime = millis();
                 }
                 return LifterStatus::BUSY;
 
