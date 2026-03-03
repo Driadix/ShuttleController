@@ -713,6 +713,54 @@ void SystemYield() {
   }
 }
 
+enum IndicatorPattern { PATTERN_IDLE, PATTERN_WARNING, PATTERN_ERROR, PATTERN_WORK };
+
+class IndicatorManager {
+public:
+    uint32_t lastTickTime = 0;
+    uint8_t currentStep = 0;
+    IndicatorPattern currentPattern = PATTERN_IDLE;
+
+    void startWarning() {
+        currentPattern = PATTERN_WARNING;
+        currentStep = 0;
+        lastTickTime = millis();
+        digitalWrite(RED_LED, HIGH);
+        digitalWrite(GREEN_LED, HIGH);
+        digitalWrite(ZOOMER, HIGH);
+        digitalWrite(BOARD_LED, HIGH);
+    }
+
+    bool tick() {
+        switch (currentPattern) {
+            case PATTERN_WARNING:
+                if (millis() - lastTickTime >= 100) {
+                    currentStep++;
+                    if (currentStep >= 5) {
+                        digitalWrite(RED_LED, LOW);
+                        digitalWrite(GREEN_LED, LOW);
+                        digitalWrite(ZOOMER, LOW);
+                        digitalWrite(BOARD_LED, LOW);
+                        currentPattern = PATTERN_IDLE;
+                        return true;
+                    } else {
+                        digitalToggle(RED_LED);
+                        digitalToggle(GREEN_LED);
+                        digitalToggle(ZOOMER);
+                        digitalToggle(BOARD_LED);
+                    }
+                    lastTickTime = millis();
+                }
+                break;
+            default:
+                break;
+        }
+        return false;
+    }
+};
+
+IndicatorManager indicatorManager;
+
 // Основной цикл
 
 enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
@@ -733,6 +781,7 @@ void loop() {
 
   switch (currentMode) {
     case CoreOpMode::IDLE: {
+      indicatorManager.tick();
       if (status != 0 && status != CMD_STOP) {
         
         uint8_t inChannel = digitalRead(CHANNEL);
@@ -822,6 +871,7 @@ void loop() {
       break;
     }
     case CoreOpMode::ERROR: {
+      indicatorManager.tick();
       motor_Force_Stop();
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
@@ -1745,75 +1795,7 @@ void blink_Work() {
 
 // Моргание светодиодом на предупреждение
 void blink_Warning() {
-  digitalWrite(RED_LED, HIGH);
-  digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(ZOOMER, HIGH);
-  digitalWrite(BOARD_LED, HIGH);
-  count = millis();
-  while (millis() - count < 100)
-    if (shouldAbortLoop()) {
-      digitalWrite(RED_LED, LOW);
-      digitalWrite(GREEN_LED, LOW);
-      digitalWrite(ZOOMER, LOW);
-      digitalWrite(BOARD_LED, LOW);
-      return;
-    }
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(ZOOMER, LOW);
-  digitalWrite(BOARD_LED, LOW);
-  count = millis();
-  while (millis() - count < 100)
-    if (shouldAbortLoop()) {
-      digitalWrite(RED_LED, LOW);
-      digitalWrite(GREEN_LED, LOW);
-      digitalWrite(ZOOMER, LOW);
-      digitalWrite(BOARD_LED, LOW);
-      return;
-    }
-  digitalWrite(RED_LED, HIGH);
-  digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(ZOOMER, HIGH);
-  digitalWrite(BOARD_LED, HIGH);
-  count = millis();
-  while (millis() - count < 100)
-    if (shouldAbortLoop()) {
-      digitalWrite(RED_LED, LOW);
-      digitalWrite(GREEN_LED, LOW);
-      digitalWrite(ZOOMER, LOW);
-      digitalWrite(BOARD_LED, LOW);
-      return;
-    }
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
-  digitalWrite(ZOOMER, LOW);
-  digitalWrite(BOARD_LED, LOW);
-  count = millis();
-  while (millis() - count < 100)
-    if (shouldAbortLoop()) {
-      digitalWrite(RED_LED, LOW);
-      digitalWrite(GREEN_LED, LOW);
-      digitalWrite(ZOOMER, LOW);
-      digitalWrite(BOARD_LED, LOW);
-      return;
-    }
-  digitalWrite(RED_LED, HIGH);
-  digitalWrite(GREEN_LED, HIGH);
-  digitalWrite(ZOOMER, HIGH);
-  digitalWrite(BOARD_LED, HIGH);
-  count = millis();
-  while (millis() - count < 100)
-    if (shouldAbortLoop()) {
-      digitalWrite(RED_LED, LOW);
-      digitalWrite(GREEN_LED, LOW);
-      digitalWrite(ZOOMER, LOW);
-      digitalWrite(BOARD_LED, LOW);
-      return;
-    }
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(ZOOMER, LOW);
-  digitalWrite(BOARD_LED, LOW);
-  return;
+  indicatorManager.startWarning();
 }
 
 // Моргание светодиодом в режиме ошибки
