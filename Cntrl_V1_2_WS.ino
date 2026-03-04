@@ -338,7 +338,9 @@ static inline bool isOverrideCommand(uint8_t cmd) {
     return (cmd == CMD_STOP || 
             cmd == CMD_STOP_MANUAL || 
             cmd == CMD_SYSTEM_RESET || 
-            cmd == CMD_RESET_ERROR);
+            cmd == CMD_RESET_ERROR ||
+            cmd == CMD_SAVE_EEPROM ||     // <-- Allow saving in error state
+            cmd == CMD_GET_CONFIG);       // <-- Allow config reads in error state
 }
 
 // Evaluates if the shuttle is currently doing nothing
@@ -863,6 +865,9 @@ void loop() {
         status = 0;
         digitalWrite(RED_LED, LOW);
         currentMode = CoreOpMode::IDLE;
+      } else if (status == CMD_SAVE_EEPROM) {
+        save_EEPROM_Data();
+        status = 0; // Clear the command after executing
       }
 
       detect_Pallete();
@@ -1315,6 +1320,65 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 break;
         }
         sendAck(header->seq, 0, replyPort);
+        return NO_NEW_CMD;
+    } else if (header->msgID == MSG_CONFIG_SYNC_PUSH) {
+        FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
+        
+        // Apply to RAM
+        eepromData.interPalleteDistance = fullCfg->interPallet;
+        interPalleteDistance            = fullCfg->interPallet;
+        eepromData.shuttleLength        = fullCfg->shuttleLen;
+        shuttleLength                   = fullCfg->shuttleLen;
+        eepromData.maxSpeed             = fullCfg->maxSpeed;
+        maxSpeed                        = fullCfg->maxSpeed;
+        eepromData.waitTime             = fullCfg->waitTime;
+        waitTime                        = fullCfg->waitTime;
+        eepromData.mprOffset            = fullCfg->mprOffset;
+        mprOffset                       = fullCfg->mprOffset;
+        eepromData.chnlOffset           = fullCfg->chnlOffset;
+        chnlOffset                      = fullCfg->chnlOffset;
+        eepromData.shuttleNum           = fullCfg->shuttleNumber;
+        shuttleNum                      = fullCfg->shuttleNumber;
+        eepromData.minBattCharge        = fullCfg->minBatt;
+        minBattCharge                   = fullCfg->minBatt;
+        eepromData.fifoLifo             = fullCfg->fifoLifo;
+        fifoLifo                        = fullCfg->fifoLifo;
+        eepromData.inverse              = fullCfg->reverseMode;
+        inverse                         = fullCfg->reverseMode;
+        
+        sendAck(header->seq, 0, replyPort);
+        return NO_NEW_CMD;
+
+    } else if (header->msgID == MSG_CONFIG_SYNC_REQ) {
+        FullConfigPacket rep;
+        rep.interPallet   = interPalleteDistance;
+        rep.shuttleLen    = shuttleLength;
+        rep.maxSpeed      = maxSpeed;
+        rep.waitTime      = waitTime;
+        rep.mprOffset     = mprOffset;
+        rep.chnlOffset    = chnlOffset;
+        rep.shuttleNumber = shuttleNum;
+        rep.minBatt       = minBattCharge;
+        rep.fifoLifo      = fifoLifo;
+        rep.reverseMode   = inverse;
+
+        uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(FullConfigPacket) + 2];
+        FrameHeader* repHeader = (FrameHeader*)localTxBuffer;
+        repHeader->sync1 = PROTOCOL_SYNC_1_V2;
+        repHeader->sync2 = PROTOCOL_SYNC_2_V2;
+        repHeader->length = sizeof(FullConfigPacket);
+        repHeader->targetID = TARGET_ID_NONE;
+        static uint8_t repSeq = 0;
+        repHeader->seq = repSeq++;
+        repHeader->msgID = MSG_CONFIG_SYNC_REP;
+        
+        memcpy(localTxBuffer + sizeof(FrameHeader), &rep, sizeof(FullConfigPacket));
+        uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
+        ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+        
+        if (replyPort->availableForWrite() >= totalLen + 2) {
+            replyPort->write(localTxBuffer, totalLen + 2);
+        }
         return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_GET) {
         ConfigPacket* req = (ConfigPacket*)payload;
