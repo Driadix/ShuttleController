@@ -894,6 +894,21 @@ void loop() {
 
 #pragma region Функции управления двигателем движения...
 
+bool clear_CAN_Buffer(uint32_t timeoutMs = 5) {
+    uint32_t startWait = millis();
+    bool packetReceived = false;
+
+    while (Can1.read(CAN_RX_msg)) {
+        packetReceived = true;
+        // Break out if the external driver floods the bus or hangs
+        if (millis() - startWait > timeoutMs) {
+            makeLog(LOG_WARNING, "CAN read timeout!");
+            break;
+        }
+    }
+    return packetReceived;
+}
+
 class MotorSpeedController {
 public:
     int targetSpeed = 0;
@@ -991,9 +1006,17 @@ MotorSpeedController motorSpeedController;
 void motor_Speed(int spd) {
   if (motorReverse == 2 || millis() - countMoove < 50) return;
   countMoove = millis();
-  while (Can1.read(CAN_RX_msg)) ;
+  clear_CAN_Buffer(5);
 
   motorSpeedController.setTarget(spd);
+
+  while (motorSpeedController.isRamping) {
+      IO_Update();
+      if (shouldAbortLoop()) {
+          motor_Stop();
+          return;
+      }
+  }
 
   set_Position();
 }
@@ -1027,7 +1050,7 @@ public:
 
     void startBrake() {
         startOldSpeed = motorSpeedController.currentSpeed;
-        Can1.read(CAN_RX_msg);
+        clear_CAN_Buffer(5);
         makeLog(LOG_INFO, "Motor stop, speed = %d", startOldSpeed);
 
         if (startOldSpeed > 1) {
@@ -1050,8 +1073,7 @@ public:
         CAN_TX_msg.len = 4;
         for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
         Can1.write(CAN_TX_msg);
-        while (Can1.read(CAN_RX_msg))
-            ;
+        clear_CAN_Buffer(5);
 
         if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) {
             maxFinalWaitSteps = 10;
@@ -1087,8 +1109,7 @@ public:
                 CAN_TX_msg.len = 4;
                 for (uint8_t j = 0; j < 4; j++) { CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j]; }
                 Can1.write(CAN_TX_msg);
-                while (Can1.read(CAN_RX_msg))
-                    ;
+                clear_CAN_Buffer(5);
 
                 if ((status == CMD_LONG_UNLOAD || status == CMD_UNLOAD) && lifterUp && distance[3] + 100 < distance[1]) {
                     currentDelayNeeded = 10;
@@ -1115,8 +1136,7 @@ public:
                     CAN_TX_msg.len = 4;
                     for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
                     Can1.write(CAN_TX_msg);
-                    while (Can1.read(CAN_RX_msg))
-                        ;
+                    clear_CAN_Buffer(5);
                     finalWaitStep++;
                     if (finalWaitStep < maxFinalWaitSteps) {
                         count = millis();
@@ -1157,8 +1177,7 @@ void motor_Stop() {
 // Форсмажорная остановка движения
 void motor_Force_Stop() {
   motorSpeedController.forceSpeed(0);
-  while (Can1.read(CAN_RX_msg))
-    ;
+  clear_CAN_Buffer(5);
   motorStart = 0;
   motorReverse = 2;
   mooveCount = 0;
@@ -1188,7 +1207,6 @@ public:
         }
         makeLog(LOG_INFO, "Moove lifter up...");
         currentState = LifterState::RAMP_UP;
-        stateStartTime = millis();
         lastRampTime = millis() - 30;
         lastCanSendTime = 0;
         rampStep = 5;
@@ -1204,7 +1222,6 @@ public:
         }
         makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
         currentState = LifterState::RAMP_DOWN;
-        stateStartTime = millis();
         lastRampTime = millis() - 30;
         lastCanSendTime = 0;
         rampStep = 5;
@@ -1227,6 +1244,7 @@ public:
                     lastRampTime = millis();
                     if (rampStep >= 50) {
                         currentState = LifterState::LIFTING;
+                        stateStartTime = millis();
                         hexSpeed.vint = -50000;
                         for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
                         if (digitalRead(DL_UP)) Can1.write(CAN_TX_msg);
@@ -1297,6 +1315,7 @@ public:
                     lastRampTime = millis();
                     if (rampStep >= 50) {
                         currentState = LifterState::LOWERING;
+                        stateStartTime = millis();
                         hexSpeed.vint = 50000;
                         for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
                         if (digitalRead(DL_DOWN)) Can1.write(CAN_TX_msg);
