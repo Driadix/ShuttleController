@@ -254,7 +254,6 @@ int pageAddressStat = 0;               // Адрес флэш памяти со 
 uint16_t speed = 0;                    // Скорость движения в канале в %
 uint16_t maxSpeed = 96;                // Максимальное значение скорости (от 0 до 100 %) -сохранять-
 uint16_t minSpeed = 3;                 // Минимальное значение скорости (лаг для АЦП) -сохранять-
-uint16_t oldSpeed = 0;                 // Запомненная cкорость движения в канале для плавного разгона и торможения
 uint16_t errorCode = 0;                // Битмап ошибок
 uint16_t SDsize = 0;                   // Объем SD карты
 uint16_t sensorParam = 500;           // Параметр обратнокубической аппроксимации чувствительности датчиков расстояния
@@ -711,6 +710,8 @@ void IO_Update() {
           }
       }
   }
+
+  motorSpeedController.tick();
 }
 
 enum IndicatorPattern { PATTERN_IDLE, PATTERN_WARNING, PATTERN_ERROR, PATTERN_WORK };
@@ -893,102 +894,107 @@ void loop() {
 
 #pragma region Функции управления двигателем движения...
 
+class MotorSpeedController {
+public:
+    int targetSpeed = 0;
+    int currentSpeed = 0;
+    int startSpeed = 0;
+    uint32_t lastStepTime = 0;
+    uint16_t currentDelayNeeded = 0;
+    bool isRamping = false;
+
+    void setTarget(int spd) {
+        if (spd >= 10 && spd - currentSpeed >= 10) spd = currentSpeed + 10;
+        if (spd > 100) spd = 100;
+        targetSpeed = spd;
+        if (targetSpeed != currentSpeed) {
+            isRamping = true;
+            startSpeed = currentSpeed;
+        }
+    }
+
+    void forceSpeed(int spd) {
+        currentSpeed = spd;
+        targetSpeed = spd;
+        isRamping = false;
+
+        cracked_int_t hexSpeed;
+        if (currentSpeed) hexSpeed.vint = minSpeed + currentSpeed * maxSpeed / 100;
+        else hexSpeed.vint = 0;
+
+        if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
+        hexSpeed.vint *= 1000;
+
+        CAN_TX_msg.id = (100);
+        CAN_TX_msg.len = 4;
+        for (uint8_t i = 0; i < 4; i++) {
+            CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i];
+        }
+        Can1.write(CAN_TX_msg);
+    }
+
+    void tick() {
+        if (!isRamping) return;
+
+        if (millis() - lastStepTime >= currentDelayNeeded) {
+            if (targetSpeed > currentSpeed) {
+                currentSpeed += 2;
+                if (currentSpeed >= targetSpeed) {
+                    currentSpeed = targetSpeed;
+                    isRamping = false;
+                }
+
+                if (currentSpeed > 4 && currentSpeed <= 80 && lifterUp) {
+                    currentDelayNeeded = 80 - (currentSpeed / 2) * 15 / 10;
+                } else {
+                    currentDelayNeeded = 35;
+                }
+            } else if (targetSpeed < currentSpeed) {
+                currentSpeed -= 2;
+                if (currentSpeed <= targetSpeed) {
+                    currentSpeed = targetSpeed;
+                    isRamping = false;
+                }
+
+                if (lifterUp) {
+                    int totalSteps = (startSpeed - targetSpeed) / 2;
+                    if (totalSteps < 1) totalSteps = 1;
+                    int stepsDone = (startSpeed - currentSpeed) / 2;
+                    currentDelayNeeded = 20 + stepsDone * 30 / totalSteps;
+                } else {
+                    currentDelayNeeded = 20;
+                }
+            }
+
+            cracked_int_t hexSpeed;
+            if (currentSpeed) hexSpeed.vint = minSpeed + currentSpeed * maxSpeed / 100;
+            else hexSpeed.vint = 0;
+
+            if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
+            hexSpeed.vint *= 1000;
+
+            CAN_TX_msg.id = (100);
+            CAN_TX_msg.len = 4;
+            for (uint8_t j = 0; j < 4; j++) {
+                CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j];
+            }
+            Can1.write(CAN_TX_msg);
+
+            lastStepTime = millis();
+        }
+    }
+};
+
+MotorSpeedController motorSpeedController;
+
 // Установка скорости движения
 void motor_Speed(int spd) {
   if (motorReverse == 2 || millis() - countMoove < 50) return;
   countMoove = millis();
   while (Can1.read(CAN_RX_msg)) ;
-  cracked_int_t hexSpeed;
-  CAN_TX_msg.id = (100);
-  CAN_TX_msg.len = 4;
-  uint8_t accel = 30;
-  int position;
-  int countDist = millis();
-  if (spd >= 10 && spd - oldSpeed >= 10) spd = oldSpeed + 10;
-  if (spd > 100) spd = 100;
-  if (spd <= 100 && spd >= 0) {
-    if (spd > oldSpeed) {
-      uint8_t steps = (spd - oldSpeed) / 2;
-      for (uint8_t i = 0; i < steps; i++) {
-        blink_Work();
-        get_Distance();
-        hexSpeed.vint = minSpeed + oldSpeed * maxSpeed / 100 + (spd - oldSpeed) * i * maxSpeed / (steps * 100);
-        if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-        hexSpeed.vint *= 1000;
-        for (uint8_t j = 0; j < 4; j++) { CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j]; }
-        Can1.write(CAN_TX_msg);
-        set_Position();
-        count = millis();
-        if (i > 2 && i <= 40 && lifterUp) accel = 80 - i * 15 / 10;
-        else accel = 35;
-        while (millis() - count < accel) {
-          IO_Update();
-          blink_Work();
-          get_Distance();
-          if (shouldAbortLoop()) {
-            status = CMD_STOP;
-            motor_Stop();
-            return;
-          } 
-        }
-      }
-      if (spd) hexSpeed.vint = minSpeed + spd * maxSpeed / 100;
-      else hexSpeed.vint = 0;
-      if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-      hexSpeed.vint *= 1000;
-      for (uint8_t i = 0; i < 5; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg)) ;
-      oldSpeed = spd;
-    } else if (spd < oldSpeed) {
-      uint8_t steps = (oldSpeed - spd) / 2;
-      if (distance[0] <= 400 || distance[1] <= 400) steps /= 2;
-      float currentSpeed;
-      for (uint8_t i = 0; i < steps; i++) {
-        blink_Work();
-        get_Distance();
-        hexSpeed.vint = minSpeed + oldSpeed * maxSpeed / 100 - (oldSpeed - spd) * i * maxSpeed / (steps * 100);
-        if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-        hexSpeed.vint *= 1000;
-        for (uint8_t j = 0; j < 4; j++) { CAN_TX_msg.buf[j] = (unsigned char)hexSpeed.bint[3 - j]; }
-        Can1.write(CAN_TX_msg);
-        set_Position();
-        count = millis();
-        if (lifterUp) accel = 20 + i * 30 / steps;
-        while (millis() - count < accel) {
-          IO_Update();
-          get_Distance();
-          if (shouldAbortLoop()) {
-            status = CMD_STOP;
-            motor_Stop();
-            return;
-          }
-          if (motorReverse == 2) return;
-        }
-      }
-      if (spd) hexSpeed.vint = minSpeed + spd * maxSpeed / 100;
-      else hexSpeed.vint = 0;
-      if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-      hexSpeed.vint *= 1000;
-      for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg)) ;
-      oldSpeed = spd;
-    } else if (spd == oldSpeed) {
-      hexSpeed.vint = minSpeed + spd * maxSpeed / 100;
-      if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
-      hexSpeed.vint *= 1000;
-      for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-      Can1.write(CAN_TX_msg);
-      while (Can1.read(CAN_RX_msg)) ;
-    }
-  } else {
-    hexSpeed.vint = 0;
-    for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-    Can1.write(CAN_TX_msg);
-    while (Can1.read(CAN_RX_msg)) ;
-    oldSpeed = 0;
-  }
+
+  motorSpeedController.setTarget(spd);
+
   set_Position();
 }
 
@@ -1020,7 +1026,7 @@ public:
     uint8_t maxFinalWaitSteps = 0;
 
     void startBrake() {
-        startOldSpeed = oldSpeed;
+        startOldSpeed = motorSpeedController.currentSpeed;
         Can1.read(CAN_RX_msg);
         makeLog(LOG_INFO, "Motor stop, speed = %d", startOldSpeed);
 
@@ -1135,11 +1141,13 @@ MotorBrake motorBrake;
 // Остановка движения
 void motor_Stop() {
     if (motorReverse == 2) return;
+    motorSpeedController.isRamping = false;
     motorBrake.startBrake();
     while (motorBrake.tick() == MotorBrake::BUSY) {
         IO_Update();
     }
-    oldSpeed = 0;
+    motorSpeedController.currentSpeed = 0;
+    motorSpeedController.targetSpeed = 0;
     motorStart = 0;
     motorReverse = 2;
     mooveCount = 0;
@@ -1148,13 +1156,7 @@ void motor_Stop() {
 
 // Форсмажорная остановка движения
 void motor_Force_Stop() {
-  cracked_int_t hexSpeed;
-  oldSpeed = 0;
-  hexSpeed.vint = 0;
-  CAN_TX_msg.id = (100);
-  CAN_TX_msg.len = 4;
-  for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
-  Can1.write(CAN_TX_msg);
+  motorSpeedController.forceSpeed(0);
   while (Can1.read(CAN_RX_msg))
     ;
   motorStart = 0;
@@ -1907,7 +1909,7 @@ void blink_Work() {
       makeLog(LOG_DEBUG, "Position = %d", currentPosition);
       int diff = abs(currentPosition - oldPosition);
       if (currentPosition == 0) diff = abs(channelLength - shuttleLength - oldPosition);
-      if (motorStart && oldSpeed && diff < 10) {
+      if (motorStart && motorSpeedController.currentSpeed && diff < 10) {
         if (!mooveCount) countCrush = millis();
         mooveCount = 1;
       } else {
@@ -1927,9 +1929,9 @@ void blink_Work() {
       digitalWrite(WHITE_LED, HIGH);
     } else if ((counter == 2 || counter == 12) && status != CMD_MANUAL_MODE) {
       if (motorStart) {
-        if (oldSpeed != lastLoggedSpeed) {
-          makeLog(LOG_DEBUG, "Speed = %d", oldSpeed);
-          lastLoggedSpeed = oldSpeed;
+        if (motorSpeedController.currentSpeed != lastLoggedSpeed) {
+          makeLog(LOG_DEBUG, "Speed = %d", motorSpeedController.currentSpeed);
+          lastLoggedSpeed = motorSpeedController.currentSpeed;
         }
       } else {
         makeLog(LOG_DEBUG, "standing...");
@@ -2024,7 +2026,7 @@ void stop_Before_Pallete_F() {
   makeLog(LOG_DEBUG, "Start stopping before pallete F... at %d", distance[3]);
   moove_Before_Pallete_F();
   if (shouldAbortLoop()) return;
-  if (oldSpeed == 0 && distance[1] > 250) motor_Speed(20);
+  if (motorSpeedController.currentSpeed == 0 && distance[1] > 250) motor_Speed(20);
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
   otstup += chnlOffset;
@@ -2033,7 +2035,7 @@ void stop_Before_Pallete_F() {
     while (distance[3] >= 550 && distance[1] > otstup) {
       int spd = (distance[3] - 200) / 20;
       if (spd > distance[1] / 23) spd = distance[1] / 23;
-      if (spd - oldSpeed > 3) spd = oldSpeed + 3;
+      if (spd - motorSpeedController.currentSpeed > 3) spd = motorSpeedController.currentSpeed + 3;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       blink_Work();
@@ -2048,7 +2050,7 @@ void stop_Before_Pallete_F() {
     }
     int dist = distance[3];
     int diffP = currentPosition + startDiff;
-    makeLog(LOG_DEBUG, "Speed = %d | Position = %d", oldSpeed, currentPosition);
+    makeLog(LOG_DEBUG, "Speed = %d | Position = %d", motorSpeedController.currentSpeed, currentPosition);
     int diff = distance[3];
     uint8_t i = 1;
     uint8_t j = 1;
@@ -2082,13 +2084,13 @@ void stop_Before_Pallete_F() {
         }
       }
       int spd = (distance[3] - 200) / 20;
-      if (oldSpeed < spd && distance[3] < 700 && distance[1] > 700) motor_Speed(oldSpeed);
+      if (motorSpeedController.currentSpeed < spd && distance[3] < 700 && distance[1] > 700) motor_Speed(motorSpeedController.currentSpeed);
       else if (distance[3] >= 700 && distance[1] > 700) moove_Before_Pallete_F();
       else if (spd > 7 && distance[1] > 700) motor_Speed(spd);
       else if (distance[1] <= 700 && distance[1] > 100 + chnlOffset) {
         spd = distance[1] / 23;
         if (spd < 5) spd = 5;
-        else if (spd > oldSpeed) spd = oldSpeed;
+        else if (spd > motorSpeedController.currentSpeed) spd = motorSpeedController.currentSpeed;
         motor_Speed(spd);
       } else if (distance[1] <= 100 + chnlOffset) {
         motor_Stop();
@@ -2108,7 +2110,7 @@ void stop_Before_Pallete_F() {
     dist = dist / 4 - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
-    moove_Distance_F(dist, oldSpeed, 7);
+    moove_Distance_F(dist, motorSpeedController.currentSpeed, 7);
   }
   motor_Stop();
   if (distance[1] > 250) makeLog(LOG_DEBUG, "Stopped before pallete F...");
@@ -2120,7 +2122,7 @@ void moove_Before_Pallete_F() {
   makeLog(LOG_INFO, "Going before pallete F...");
   uint8_t findPallete = 1;
   get_Distance();
-  if (motorStart) motor_Speed(oldSpeed);
+  if (motorStart) motor_Speed(motorSpeedController.currentSpeed);
   motor_Start_Forward();
   oldChannelDistanse = distance[1];
   oldPalleteDistanse = distance[3];
@@ -2148,26 +2150,26 @@ void moove_Before_Pallete_F() {
           motor_Speed(90);
         } else if (currentPosition > 100 && currentPosition <= 1800) {
           int spd = currentPosition / 20;
-          if (oldSpeed && spd > oldSpeed)
-            motor_Speed(oldSpeed);
+          if (motorSpeedController.currentSpeed && spd > motorSpeedController.currentSpeed)
+            motor_Speed(motorSpeedController.currentSpeed);
           else motor_Speed(spd);
         } else motor_Speed(5);
       } else if (distance[1] >= distance[3] && distance[3] >= 750) {
         int spd = (distance[3] - 40) / 25;
         if (lifterUp) spd = (distance[3] - 450) / 20;
-        if (spd > oldSpeed)
-          if (oldSpeed > 20) motor_Speed(oldSpeed);
+        if (spd > motorSpeedController.currentSpeed)
+          if (motorSpeedController.currentSpeed > 20) motor_Speed(motorSpeedController.currentSpeed);
           else motor_Speed(20);
         else motor_Speed(spd);
       } else if (distance[1] >= distance[3] && distance[3] < 750) {
         findPallete = 0;
       } else if (distance[1] > 150 + chnlOffset && distance[1] <= 1500) {
         int spd = (int)((distance[1] - 40) / 18);
-        if (lifterUp && spd > 40) if (spd > oldSpeed && oldSpeed) spd = oldSpeed; else spd = 40;
+        if (lifterUp && spd > 40) if (spd > motorSpeedController.currentSpeed && motorSpeedController.currentSpeed) spd = motorSpeedController.currentSpeed; else spd = 40;
         if (spd < 6) spd = 6;
-        if (spd > oldSpeed)
-          if (oldSpeed > 35) motor_Speed(oldSpeed);
-          else motor_Speed(oldSpeed + 5);
+        if (spd > motorSpeedController.currentSpeed)
+          if (motorSpeedController.currentSpeed > 35) motor_Speed(motorSpeedController.currentSpeed);
+          else motor_Speed(motorSpeedController.currentSpeed + 5);
         else motor_Speed(spd);
         if (distance[3] < 750) findPallete = 0;
       } else if (distance[1] > 90 + chnlOffset && distance[1] <= 150 + chnlOffset) {
@@ -2175,8 +2177,8 @@ void moove_Before_Pallete_F() {
       } else if (distance[1] <= 90 + chnlOffset) {
         findPallete = 0;
         currentPosition = 60;
-      } else if (oldSpeed) {
-        motor_Speed(oldSpeed);
+      } else if (motorSpeedController.currentSpeed) {
+        motor_Speed(motorSpeedController.currentSpeed);
       } else motor_Speed(5);
       if (shouldAbortLoop()) return;
       count = millis();
@@ -2194,7 +2196,7 @@ void stop_Before_Pallete_R() {
   makeLog(LOG_DEBUG, "Start stopping before pallete R... at %d", distance[2]);
   moove_Before_Pallete_R();
   if (shouldAbortLoop()) return;
-  if (oldSpeed == 0 && distance[0] > 250) motor_Speed(20);
+  if (motorSpeedController.currentSpeed == 0 && distance[0] > 250) motor_Speed(20);
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
   otstup += chnlOffset;
@@ -2203,7 +2205,7 @@ void stop_Before_Pallete_R() {
     while (distance[2] >= 550 && distance[0] > otstup) {
       int spd = (distance[2] - 200) / 20;
       if (spd > distance[0] / 23) spd = distance[0] / 23;
-      if (spd - oldSpeed > 3) spd = oldSpeed + 3;
+      if (spd - motorSpeedController.currentSpeed > 3) spd = motorSpeedController.currentSpeed + 3;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       while (millis() - count < 50) {
@@ -2220,7 +2222,7 @@ void stop_Before_Pallete_R() {
       set_Position();      
     }
     int dist = distance[2];
-    makeLog(LOG_DEBUG, "Speed = %d position = %d", oldSpeed, currentPosition);
+    makeLog(LOG_DEBUG, "Speed = %d position = %d", motorSpeedController.currentSpeed, currentPosition);
     int diff = distance[2];
     int diffP = currentPosition + startDiff;
     uint8_t i = 1;
@@ -2254,13 +2256,13 @@ void stop_Before_Pallete_R() {
         }
       }
       int spd = (distance[2] - 200) / 20;
-      if (oldSpeed < spd && distance[2] < 700 && distance[0] > 700) motor_Speed(oldSpeed);
+      if (motorSpeedController.currentSpeed < spd && distance[2] < 700 && distance[0] > 700) motor_Speed(motorSpeedController.currentSpeed);
       else if (distance[2] >= 700 && distance[0] > 700) moove_Before_Pallete_R();
       else if (spd > 7 && distance[0] > 700) motor_Speed(spd);
       else if (distance[0] <= 700 && distance[0] > 100 + chnlOffset) {
         spd = distance[0] / 23;
         if (spd < 5) spd = 5;
-        else if (spd > oldSpeed && oldSpeed > 5) spd = oldSpeed;
+        else if (spd > motorSpeedController.currentSpeed && motorSpeedController.currentSpeed > 5) spd = motorSpeedController.currentSpeed;
         motor_Speed(spd);
       } else if (distance[0] <= 100 + chnlOffset) {
         motor_Stop();
@@ -2280,7 +2282,7 @@ void stop_Before_Pallete_R() {
     dist = dist / 4 + diffPallete - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
-    moove_Distance_R(dist, oldSpeed, 7);
+    moove_Distance_R(dist, motorSpeedController.currentSpeed, 7);
   }
   motor_Stop();
   if (distance[0] > 250) makeLog(LOG_DEBUG, "Stopped before pallete R...");
@@ -2291,11 +2293,11 @@ void stop_Before_Pallete_R() {
 void moove_Before_Pallete_R() {
   makeLog(LOG_INFO, "Going before pallete R...");
   uint8_t findPallete = 1;
-  if (motorStart) motor_Speed(oldSpeed);
+  if (motorStart) motor_Speed(motorSpeedController.currentSpeed);
   get_Distance();
   oldChannelDistanse = distance[0];
   oldPalleteDistanse = distance[2];
-  if (motorStart) motor_Speed(oldSpeed);
+  if (motorStart) motor_Speed(motorSpeedController.currentSpeed);
   motor_Start_Reverse();
   count = millis();
   while (findPallete) {
@@ -2313,9 +2315,9 @@ void moove_Before_Pallete_R() {
         if (lifterUp && lastPallete) {
           int diff = lastPalletePosition - currentPosition;
           if (diff > 3000) motor_Speed(80);
-          else if ((diff - 600) / 30 > oldSpeed) {
-            if (oldSpeed < 50) motor_Speed(50);
-            else motor_Speed(oldSpeed);
+          else if ((diff - 600) / 30 > motorSpeedController.currentSpeed) {
+            if (motorSpeedController.currentSpeed < 50) motor_Speed(50);
+            else motor_Speed(motorSpeedController.currentSpeed);
           } else if ((diff - 600) / 30 > 40) motor_Speed((diff - 600) / 30);
           else motor_Speed(40);
         } else if (lifterUp && channelLength > 3000) {
@@ -2324,9 +2326,9 @@ void moove_Before_Pallete_R() {
           else if (diff < 100) {
             if (maxSpeed > 86) motor_Speed(60);
             else motor_Speed(66);
-          } else if (diff / 25 > oldSpeed) {
-            if (oldSpeed < 20) motor_Speed(20);
-            else motor_Speed(oldSpeed);
+          } else if (diff / 25 > motorSpeedController.currentSpeed) {
+            if (motorSpeedController.currentSpeed < 20) motor_Speed(20);
+            else motor_Speed(motorSpeedController.currentSpeed);
           } else if (diff / 25 > 50) motor_Speed(diff / 25);
           else motor_Speed(50);
         } else if (lifterUp) {
@@ -2337,13 +2339,13 @@ void moove_Before_Pallete_R() {
         } else if (channelLength - shuttleLength - currentPosition >= 100 && channelLength - shuttleLength - currentPosition <= 1800) {
           int spd = (channelLength - shuttleLength - currentPosition) / 20;
           if (!endOfChannel && spd < 50) spd = 50;
-          if (endOfChannel && spd > oldSpeed && oldSpeed) {
-            motor_Speed(oldSpeed);
+          if (endOfChannel && spd > motorSpeedController.currentSpeed && motorSpeedController.currentSpeed) {
+            motor_Speed(motorSpeedController.currentSpeed);
           } else motor_Speed(spd);
         } else motor_Speed(5);
       } else if (distance[0] >= distance[2] && distance[2] >= 750) {
-        if ((distance[2] - 40) / 25 < oldSpeed) motor_Speed((distance[2] - 40) / 25);
-        else if (oldSpeed >= 20) motor_Speed(oldSpeed);
+        if ((distance[2] - 40) / 25 < motorSpeedController.currentSpeed) motor_Speed((distance[2] - 40) / 25);
+        else if (motorSpeedController.currentSpeed >= 20) motor_Speed(motorSpeedController.currentSpeed);
         else motor_Speed(20);
       } else if (distance[0] >= distance[2] && distance[2] < 750) {
         findPallete = 0;
@@ -2351,15 +2353,15 @@ void moove_Before_Pallete_R() {
         int spd = (int)((distance[0] - 40) / 18);
         if (lifterUp && spd > 40) spd = 40;
         if (spd < 6) spd = 6;
-        if (spd > oldSpeed)
-          if (oldSpeed > 35) motor_Speed(oldSpeed);
-          else motor_Speed(oldSpeed + 5);
+        if (spd > motorSpeedController.currentSpeed)
+          if (motorSpeedController.currentSpeed > 35) motor_Speed(motorSpeedController.currentSpeed);
+          else motor_Speed(motorSpeedController.currentSpeed + 5);
         else motor_Speed(spd);
         if (distance[2] < 750) findPallete = 0;
       } else if (distance[0] > 90 + chnlOffset && distance[0] <= 150 + chnlOffset) motor_Speed(5);
       else if (distance[0] <= 90 + chnlOffset) {
         findPallete = 0;
-      } else motor_Speed(oldSpeed);
+      } else motor_Speed(motorSpeedController.currentSpeed);
       if (shouldAbortLoop()) return;
       count = millis();
     }
@@ -2473,10 +2475,10 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
       } else if (dist < maxSpeed * 15 && dist > minSpeed * 15) {
         motor_Speed((int)(dist / 15));
       } else if (dist > 0 && dist <= minSpeed * 15) {
-        if (oldSpeed > minSpeed) {
+        if (motorSpeedController.currentSpeed > minSpeed) {
           motor_Speed(minSpeed);
-        } else if (oldSpeed) {
-          motor_Speed(oldSpeed);
+        } else if (motorSpeedController.currentSpeed) {
+          motor_Speed(motorSpeedController.currentSpeed);
         } else motor_Speed(minSpeed);
       } else if (dist <= 0) {
         moove = 0;
@@ -2598,10 +2600,10 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
       } else if (dist < maxSpeed * 15 && dist > minSpeed * 15) {
         motor_Speed((int)(dist / 15));
       } else if (dist > 0 && dist <= minSpeed * 15) {
-        if (oldSpeed > minSpeed) {
+        if (motorSpeedController.currentSpeed > minSpeed) {
           motor_Speed(minSpeed);
-        } else if (oldSpeed) {
-          motor_Speed(oldSpeed);
+        } else if (motorSpeedController.currentSpeed) {
+          motor_Speed(motorSpeedController.currentSpeed);
         } else motor_Speed(minSpeed);
       } else if (dist <= 0) moove = 0;
       if (lifterUp && millis() - cnt > 3000 && dist < 30) {
@@ -2651,15 +2653,15 @@ void moove_Forward() {
         if (speed < 70) speed = 70;
       } else if (distance[1] >= 1500 && currentPosition <= 1500) {
         speed = 70;
-        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 35 && speed > motorSpeedController.currentSpeed) speed = motorSpeedController.currentSpeed;
       } else if (distance[1] >= 1500 && (currentPosition >= 3000)) {
         speed = 100;
       } else if (distance[1] > 90 + chnlOffset && distance[1] < 1500) {
         speed = distance[1] / 20;
-        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= 1500) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 5 && speed > motorSpeedController.currentSpeed && currentPosition <= 1500) speed = motorSpeedController.currentSpeed;
         if (speed < 5) speed = 5;
         if (speed > 70) speed = 70;
-        if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 50 && speed > motorSpeedController.currentSpeed) speed = motorSpeedController.currentSpeed;
       } else if (distance[1] <= 90 + chnlOffset) {
         if ((status == CMD_LOAD || status == CMD_LONG_LOAD) && distance[1] > 80) speed = 5;
         else {
@@ -2709,14 +2711,14 @@ void moove_Reverse() {
         if (speed < 70) speed = 70;
       } else if (distance[0] >= 1500 && currentPosition >= channelLength - shuttleLength - 1500) {
         speed = 70;
-        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 35 && speed > motorSpeedController.currentSpeed) speed = motorSpeedController.currentSpeed;
       } else if (distance[0] >= 1500 && currentPosition < channelLength - shuttleLength - 3000) speed = 100;
       else if (distance[0] > 90 + chnlOffset && distance[0] < 1500) {
         speed = distance[0] / 20;
-        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= channelLength - shuttleLength - 100) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 5 && speed > motorSpeedController.currentSpeed && currentPosition <= channelLength - shuttleLength - 100) speed = motorSpeedController.currentSpeed;
         if (speed < 5) speed = 5;
         if (speed > 70) speed = 70;
-        if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
+        if (motorSpeedController.currentSpeed > 50 && speed > motorSpeedController.currentSpeed) speed = motorSpeedController.currentSpeed;
       } else if (distance[0] <= 90 + chnlOffset) {
         speed = 0;
         startAngle = angle;
@@ -2753,13 +2755,13 @@ void unload_Pallete() {
     frontBoard = 0;
   }
   if (shouldAbortLoop()) {  // Проверка на ошибки и стоп
-    oldSpeed = 0;
+    motorSpeedController.forceSpeed(0);
     if (fifoLifo) fifoLifo_Inverse();
     return;
   }
   moove = 1;
   motor_Start_Reverse();
-  if (oldSpeed > 20 || distance[0] < 250 + chnlOffset) motor_Speed(oldSpeed);
+  if (motorSpeedController.currentSpeed > 20 || distance[0] < 250 + chnlOffset) motor_Speed(motorSpeedController.currentSpeed);
   else motor_Speed(28);
   int cnt = millis();
   while (moove) {                                           // Едем до определения поддона
@@ -2779,7 +2781,7 @@ void unload_Pallete() {
       int dst = 600;
       if (shuttleLength == 1200) dst = 670;
       if (channelLength - currentPosition - shuttleLength < 1500 && shuttleLength == 800) dst = 500;
-      moove_Distance_R(dst, oldSpeed, 10);
+      moove_Distance_R(dst, motorSpeedController.currentSpeed, 10);
       frontBoard = 1;
     } else if (detectPalleteR1 && detectPalleteR2 && frontBoard) {  // Определяем что доехали до последней доски поддона
       uint8_t maxbb = 2 + (150 - maxSpeed) / 10; 
@@ -2805,7 +2807,7 @@ void unload_Pallete() {
         palleteLenght = abs(currentPalletePosition - currentPosition);
         detect_Pallete();
         if (frontBoard && detectPalleteF1 && detectPalleteF2) {frontBoard = 0; i = maxbb - 1;}
-        motor_Speed(oldSpeed);
+        motor_Speed(motorSpeedController.currentSpeed);
       }
       moove = 0;
       uint16_t pltMaxLn = shuttleLength - 20;
@@ -2825,7 +2827,7 @@ void unload_Pallete() {
     if (moove && millis() - count > 50) {  // Пока не нашли заднюю доску едем
       set_Position();
       int spd = distance[0] / 23;
-      if (spd > oldSpeed) spd = oldSpeed;
+      if (spd > motorSpeedController.currentSpeed) spd = motorSpeedController.currentSpeed;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
       if ((millis() - cnt > 2000000 / maxSpeed || distance[0] < 80)) {
@@ -3009,14 +3011,14 @@ void load_Pallete() {
       moove_Before_Pallete_F();
     }
     if (shouldAbortLoop()) {
-      oldSpeed = 0;
+      motorSpeedController.forceSpeed(0);
       return;
     }
     //Двигаемся под паллет
     if (distance[1] > 150) {  // Стартуем если не в конце канала
       moove = 1;
       motor_Start_Forward();
-      if (oldSpeed > 20) motor_Speed(oldSpeed);
+      if (motorSpeedController.currentSpeed > 20) motor_Speed(motorSpeedController.currentSpeed);
       else motor_Speed(20);
     }
     count = millis();
@@ -3039,7 +3041,7 @@ void load_Pallete() {
         if (shuttleLength == 1200) dst = 670;
         
         //if (channelLength - currentPosition - shuttleLength < 1500 && shuttleLength == 800) dst = 500;
-        moove_Distance_F(dst, oldSpeed, 10);
+        moove_Distance_F(dst, motorSpeedController.currentSpeed, 10);
         frontBoard = 1;
       } else if (detectPalleteF1 && detectPalleteF2 && frontBoard) {  // Определяем что доехали до последней доски короткого поддона
         uint8_t maxbb = 3 + (150 - maxSpeed) / 10;
@@ -3065,7 +3067,7 @@ void load_Pallete() {
           set_Position();
           palleteLenght = abs(currentPalletePosition - currentPosition);
           if (frontBoard && detectPalleteR1 && detectPalleteR2) {frontBoard = 0; i = maxbb - 1;}
-          motor_Speed(oldSpeed);
+          motor_Speed(motorSpeedController.currentSpeed);
         }
         moove = 0;
         motor_Stop();
@@ -3085,7 +3087,7 @@ void load_Pallete() {
       if (moove && millis() - count > 50) {
         set_Position();
         int spd = distance[1] / 23;
-        if (spd > oldSpeed) spd = oldSpeed;
+        if (spd > motorSpeedController.currentSpeed) spd = motorSpeedController.currentSpeed;
         if (spd < 5) spd = 5;
         motor_Speed(spd);
         detect_Pallete();
@@ -3313,7 +3315,7 @@ void pallete_Counting_F() {
         get_Distance();
         detect_Pallete();
         if (millis() - count > 50) {
-          int spd = oldSpeed;
+          int spd = motorSpeedController.currentSpeed;
           if (distance[0] <= 560 + chnlOffset && distance[0] > 120 + chnlOffset) spd = (distance[0] / 20);
           else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) spd = 6;
           else if (distance[0] <= 100 + chnlOffset) {
@@ -3329,7 +3331,7 @@ void pallete_Counting_F() {
     }
 
     if (millis() - count > 50 && moove) {
-      int spd = oldSpeed;
+      int spd = motorSpeedController.currentSpeed;
       if (distance[0] <= 560 + chnlOffset && distance[0] > 120 + chnlOffset) spd = (distance[0] / 20);
       else if (distance[0] <= 120 + chnlOffset && distance[0] > 80 + chnlOffset) spd = 6;
       else if (distance[0] <= 100 + chnlOffset) {
@@ -3367,8 +3369,8 @@ void pallete_Compacting_F() {
     }
     status = CMD_COMPACT_F;
     get_Distance();
-    if (distance[1] / 20 < oldSpeed) motor_Speed(distance[1] / 20);
-    else motor_Speed(oldSpeed);
+    if (distance[1] / 20 < motorSpeedController.currentSpeed) motor_Speed(distance[1] / 20);
+    else motor_Speed(motorSpeedController.currentSpeed);
   }
   while (status != CMD_STOP) {
     IO_Update();
@@ -3404,8 +3406,8 @@ void pallete_Compacting_R() {
     }
     status = CMD_COMPACT_R;
     get_Distance();
-    if (distance[0] / 20 < oldSpeed) motor_Speed(distance[0] / 20);
-    else motor_Speed(oldSpeed);
+    if (distance[0] / 20 < motorSpeedController.currentSpeed) motor_Speed(distance[0] / 20);
+    else motor_Speed(motorSpeedController.currentSpeed);
   }
   status = CMD_COMPACT_R;
   while (status != CMD_STOP) {
@@ -3725,7 +3727,7 @@ void moove_Right() {
     }
   }
   motor_Stop();
-  oldSpeed = 0;
+  motorSpeedController.forceSpeed(0);
   return;
 }
 
@@ -3773,7 +3775,7 @@ void moove_Left() {
     }
   }
   motor_Stop();
-  oldSpeed = 0;
+  motorSpeedController.forceSpeed(0);
   return;
 }
 
@@ -3795,8 +3797,8 @@ void demo_Mode() {
       return;
     }
     get_Distance();
-    if (distance[1] / 20 < oldSpeed) motor_Speed(distance[1] / 20);
-    else motor_Speed(oldSpeed);
+    if (distance[1] / 20 < motorSpeedController.currentSpeed) motor_Speed(distance[1] / 20);
+    else motor_Speed(motorSpeedController.currentSpeed);
     moove = 1;
   }
   while (1) {
@@ -4331,7 +4333,7 @@ void crash() {
     status = CMD_STOP;
     add_Error(12);
     STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
-    oldSpeed = 0;
+    motorSpeedController.forceSpeed(0);
   }
 }
 
