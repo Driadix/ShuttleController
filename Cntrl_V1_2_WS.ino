@@ -105,7 +105,6 @@ constexpr uint8_t NO_NEW_CMD = 0xFF;
 #pragma region Переменные...
 
 char logStringBuffer[256];
-uint8_t txBuffer[512];
 
 HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
 HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
@@ -405,6 +404,7 @@ void makeLog(LogLevel level, const char* format, ...) {
 
 void sendTelemetryPacket(Stream* port) {
     if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
     TelemetryPacket pkt;
 
     pkt.errorCode = errorCode;
@@ -424,7 +424,7 @@ void sendTelemetryPacket(Stream* port) {
     if (digitalRead(CHANNEL)) pkt.stateFlags |= (1 << 4);
     if (fifoLifo) pkt.stateFlags |= (1 << 5);
 
-    FrameHeader* header = (FrameHeader*)txBuffer;
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
     header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(TelemetryPacket);
@@ -433,16 +433,17 @@ void sendTelemetryPacket(Stream* port) {
     header->seq = seqCounter++;
     header->msgID = MSG_HEARTBEAT;
 
-    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(txBuffer, totalLen + 2);
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 void sendSensorPacket(Stream* port) {
     if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(SensorPacket) + 2];
     temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
 
     SensorPacket pkt;
@@ -464,7 +465,7 @@ void sendSensorPacket(Stream* port) {
     if (!digitalRead(DL_UP)) pkt.hardwareFlags |= (1 << 6);
     if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
 
-    FrameHeader* header = (FrameHeader*)txBuffer;
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
     header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(SensorPacket);
@@ -473,16 +474,17 @@ void sendSensorPacket(Stream* port) {
     header->seq = seqCounter++;
     header->msgID = MSG_SENSORS;
 
-    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(txBuffer, totalLen + 2);
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 void sendStatsPacket(Stream* port) {
     if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(StatsPacket) + 2];
     StatsPacket pkt;
     pkt.totalDist = sramStats->payload.totalDist;
     pkt.loadCounter = sramStats->payload.loadCounter;
@@ -498,7 +500,7 @@ void sendStatsPacket(Stream* port) {
     pkt.watchdogResets = sramStats->payload.watchdogResets;
     pkt.lowBatteryEvents = sramStats->payload.lowBatteryEvents;
 
-    FrameHeader* header = (FrameHeader*)txBuffer;
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
     header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(StatsPacket);
@@ -507,12 +509,12 @@ void sendStatsPacket(Stream* port) {
     header->seq = seqCounter++;
     header->msgID = MSG_STATS;
 
-    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(txBuffer, totalLen + 2);
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 // Инициация устройств
@@ -695,8 +697,15 @@ void SystemYield() {
       STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
   }
 
-  uint8_t newCmd = pollSerial(Serial1, parserDisplay);
-  if (newCmd == NO_NEW_CMD) newCmd = pollSerial(Serial2, parserRadio);
+  uint8_t cmdDisp = pollSerial(Serial1, parserDisplay);
+  uint8_t cmdRad  = pollSerial(Serial2, parserRadio);
+
+  uint8_t newCmd = NO_NEW_CMD;
+  if (cmdRad != NO_NEW_CMD) {
+      newCmd = cmdRad;
+  } else if (cmdDisp != NO_NEW_CMD) {
+      newCmd = cmdDisp;
+  }
 
   if (newCmd != NO_NEW_CMD) {
       if (isShuttleIdle() || isOverrideCommand(newCmd)) {
@@ -1183,11 +1192,12 @@ enum ParseState {
 
 void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(AckPacket) + 2];
     AckPacket pkt;
     pkt.refSeq = seq;
     pkt.result = result;
 
-    FrameHeader* header = (FrameHeader*)txBuffer;
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
     header->sync2 = PROTOCOL_SYNC_2_V2;
     header->length = sizeof(AckPacket);
@@ -1196,11 +1206,11 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     header->seq = seqCounter++;
     header->msgID = MSG_ACK;
 
-    memcpy(txBuffer + sizeof(FrameHeader), &pkt, sizeof(AckPacket));
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(AckPacket));
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(txBuffer, totalLen);
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(txBuffer, totalLen + 2);
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
@@ -1301,7 +1311,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             case CFG_REVERSE_MODE: rep.value = inverse; break;
         }
 
-        FrameHeader* repHeader = (FrameHeader*)txBuffer;
+        uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(ConfigPacket) + 2];
+        FrameHeader* repHeader = (FrameHeader*)localTxBuffer;
         repHeader->sync1 = PROTOCOL_SYNC_1_V2;
         repHeader->sync2 = PROTOCOL_SYNC_2_V2;
         repHeader->length = sizeof(ConfigPacket);
@@ -1310,13 +1321,13 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         repHeader->seq = repSeq++;
         repHeader->msgID = MSG_CONFIG_REP;
 
-        memcpy(txBuffer + sizeof(FrameHeader), &rep, sizeof(ConfigPacket));
+        memcpy(localTxBuffer + sizeof(FrameHeader), &rep, sizeof(ConfigPacket));
 
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
-        ProtocolUtils::appendCRC(txBuffer, totalLen);
+        ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
         if (replyPort->availableForWrite() >= totalLen + 2) {
-          replyPort->write(txBuffer, totalLen + 2);
+          replyPort->write(localTxBuffer, totalLen + 2);
         } else {
           LOG_RATE_LIMITED(LOG_WARN, 1000, "Dropped Config Reply: TX Buffer Full");
         }
