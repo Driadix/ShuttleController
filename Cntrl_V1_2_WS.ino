@@ -390,7 +390,9 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-  port->write(logBuffer, totalLen + 2);
+  if (port->availableForWrite() >= totalLen + 2) {
+      port->write(logBuffer, totalLen + 2);
+  }
 }
 void makeLog(LogLevel level, const char* format, ...) {
   va_list args;
@@ -438,7 +440,9 @@ void sendTelemetryPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
+    if (port->availableForWrite() >= totalLen + 2) {
+        port->write(localTxBuffer, totalLen + 2);
+    }
 }
 
 void sendSensorPacket(Stream* port) {
@@ -479,7 +483,9 @@ void sendSensorPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
+    if (port->availableForWrite() >= totalLen + 2) {
+        port->write(localTxBuffer, totalLen + 2);
+    }
 }
 
 void sendStatsPacket(Stream* port) {
@@ -514,7 +520,9 @@ void sendStatsPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
+    if (port->availableForWrite() >= totalLen + 2) {
+        port->write(localTxBuffer, totalLen + 2);
+    }
 }
 
 // Инициация устройств
@@ -555,6 +563,14 @@ void setup() {
 
   Serial.begin(115200);               // USBшный UART порт
   delay(2000);
+
+#if defined(ARDUINO_ARCH_STM32)
+  Serial1.setRxBufferSize(512);
+  Serial1.setTxBufferSize(512);
+  Serial2.setRxBufferSize(512);
+  Serial2.setTxBufferSize(512);
+#endif
+
   Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
   Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, используется для радиомодуля
   Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
@@ -700,25 +716,31 @@ void SystemYield() {
   uint8_t cmdDisp = pollSerial(Serial1, parserDisplay);
   uint8_t cmdRad  = pollSerial(Serial2, parserRadio);
 
-  uint8_t newCmd = NO_NEW_CMD;
-  if (cmdRad != NO_NEW_CMD) {
-      newCmd = cmdRad;
-  } else if (cmdDisp != NO_NEW_CMD) {
-      newCmd = cmdDisp;
+  // 1. Absolute highest priority: STOP commands from ANY source
+  if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
+      status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
+      motor_Stop(); // Force immediate reaction
+  } 
+  // 2. Radio Remote commands override C# Display commands (Operator on the floor has priority over the office)
+  else if (cmdRad != NO_NEW_CMD) {
+      if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
+          status = cmdRad;
+      }
+  } 
+  // 3. C# Display commands are processed last
+  else if (cmdDisp != NO_NEW_CMD) {
+      if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
+          status = cmdDisp;
+      }
   }
 
-  if (newCmd != NO_NEW_CMD) {
-      if (isShuttleIdle() || isOverrideCommand(newCmd)) {
-          status = newCmd;
-          if (status == CMD_FIRMWARE_UPDATE) {
-              motor_Stop();
-              jumpToBootloader();
-          } else if (status == CMD_SYSTEM_RESET) {
-              makeLog(LOG_INFO, "Reboot system by external command...");
-              delay(20);
-              HAL_NVIC_SystemReset();
-          }
-      }
+  if (status == CMD_FIRMWARE_UPDATE) {
+      motor_Stop();
+      jumpToBootloader();
+  } else if (status == CMD_SYSTEM_RESET) {
+      makeLog(LOG_INFO, "Reboot system by external command...");
+      delay(20);
+      HAL_NVIC_SystemReset();
   }
 }
 
@@ -1210,7 +1232,9 @@ void sendAck(uint8_t seq, uint8_t result, Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
+    if (port->availableForWrite() >= totalLen + 2) {
+        port->write(localTxBuffer, totalLen + 2);
+    }
 }
 
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
@@ -1339,14 +1363,18 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
     uint32_t now = millis();
+    uint8_t lastCmd = NO_NEW_CMD;
     while (port.available() > 0) {
         FrameHeader* header = parser.feed(port.read(), now);
         if (header != nullptr) {
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
-            return res;
+            if (res != NO_NEW_CMD) {
+                if (res == CMD_STOP || res == CMD_STOP_MANUAL) return res;
+                lastCmd = res;
+            }
         }
     }
-    return NO_NEW_CMD;
+    return lastCmd;
 }
 
 
