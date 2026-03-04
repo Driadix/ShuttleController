@@ -11,7 +11,7 @@
 #define LOG_RATE_LIMITED(level, interval, format, ...) \
     do { \
         static_assert(sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS, \
-            "Log format string too long! Max " #LOG_MAX_PRINTABLE_CHARS " printable chars."); \
+            "Log format string too long! Max 54 printable chars."); \
         static uint32_t lastLog = 0; \
         if (millis() - lastLog > (interval)) { \
             makeLogImpl(level, format, ##__VA_ARGS__); \
@@ -685,7 +685,7 @@ void setup() {
   uint8_t hour, minute, second, day, month, year, weekDay;
   rtc.getTime(&hour, &minute, &second, 0, nullptr);
   rtc.getDate(&weekDay, &day, &month, &year);
-  makeLog(LOG_INFO, "Time %02d:%02d:%02d, Date:%02d/%02d/%02d  Temperature = %.2f", hour, minute, second, day, month, year, temp);
+  makeLog(LOG_INFO, "Boot: %02d:%02d:%02d %02d/%02d/%02d T=%.1f", hour, minute, second, day, month, year, temp);
   delay(500);
   IWatchdog.begin(10000000);
 }
@@ -4222,7 +4222,7 @@ void read_EEPROM_Data() {
     shuttleNum = 0; 
     eepromData.shuttleNum = 0;
     saveConfigsToFlash();
-    makeLog(LOG_WARN, "EEPROM reset. Shuttle enters Provisioning State (ID=0).");
+    makeLog(LOG_WARN, "EEPROM reset. Provisioning State (ID=0).");
   }
   if (minBattCharge > 50) minBattCharge = 20;
   if (waitTime < 5000) waitTime = 5000;
@@ -4297,7 +4297,7 @@ void read_BatteryCharge() {
   while (Serial3.available()) Serial3.read();
   pinMode(RS485, INPUT_PULLDOWN);
   if (!errorStatus[0] && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
-        makeLog(LOG_ERROR, "Низкий уровень заряда батареи! Выполнение аварийного режима.");
+        makeLog(LOG_ERROR, "Low battery! Emergency stop.");
         lifter_Down();
         moove_Forward();
         add_Error(11);
@@ -4369,9 +4369,12 @@ void HardFault_Handler(void) {
       k++;
     }
     if (k == 20) {
-      makeLog(LOG_ERROR, "HardFault! R0=%lx R1=%lx R2=%lx R3=%lx R12=%lx LR=%lx PC=%lx PSR=%lx BFAR=%lx CFSR=%lx HFSR=%lx",
-              stack_ptr->r0, stack_ptr->r1, stack_ptr->r2, stack_ptr->r3, stack_ptr->r12,
-              stack_ptr->lr, stack_ptr->pc, stack_ptr->psr, BFAR, CFSR, HFSR);
+      makeLog(LOG_ERROR, "HardFault! R0=%lx R1=%lx R2=%lx R3=%lx",
+              stack_ptr->r0, stack_ptr->r1, stack_ptr->r2, stack_ptr->r3);
+      makeLog(LOG_ERROR, "R12=%lx LR=%lx PC=%lx PSR=%lx",
+              stack_ptr->r12, stack_ptr->lr, stack_ptr->pc, stack_ptr->psr);
+      makeLog(LOG_ERROR, "BFAR=%lx CFSR=%lx HFSR=%lx",
+              BFAR, CFSR, HFSR);
       k = 0;
     }
   }
