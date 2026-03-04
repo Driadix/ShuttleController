@@ -327,7 +327,7 @@ private:
     uint32_t lastRxTime = 0;
     static constexpr uint32_t RX_TIMEOUT_MS = 100;
     
-    uint8_t rxBuffer[64]; // Matches max possible wire frame size (64 bytes)
+    uint8_t rxBuffer[64];
     uint16_t rxIndex;
     uint8_t payloadLen; 
 };
