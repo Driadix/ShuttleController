@@ -175,6 +175,8 @@ struct EEPROMData  // Структура данных параметров дл�
 
 EEPROMData eepromData;
 
+volatile bool pendingEepromSave = false;
+
 uint32_t lastValidRxTime = 0;
 
 struct ReportData {
@@ -754,6 +756,11 @@ CoreOpMode currentMode = CoreOpMode::IDLE;
 void loop() {
   SystemYield();
 
+  if (pendingEepromSave && motorStart == 0 && motorReverse == 2) {
+      saveConfigsToFlash();
+      pendingEepromSave = false;
+  }
+
   static int cntSns = millis();
   static int cntBattdata = cntSns;
   get_Distance();
@@ -1266,6 +1273,15 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         uint8_t reqCmd = (header->msgID == MSG_CMD_SIMPLE) ?
                          ((SimpleCmdPacket*)payload)->cmdType : ((ParamCmdPacket*)payload)->cmdType;
 
+        if (reqCmd == CMD_SAVE_EEPROM) {
+            pendingEepromSave = true;
+            sendAck(header->seq, 0, replyPort);
+            return NO_NEW_CMD; 
+        }
+        if (reqCmd == CMD_GET_CONFIG) {
+            sendAck(header->seq, 0, replyPort);
+            return NO_NEW_CMD;
+        }
         bool inChannel = digitalRead(CHANNEL);
 
         // 1. Force reject if in Error mode (unless it's an override like Reset)
@@ -4065,8 +4081,8 @@ bool loadConfigsFromFlash() {
 }
 
 void saveConfigsToFlash() {
-    if (motorStart || (status != CMD_STOP && status != CMD_MANUAL_MODE)) {
-        makeLog(LOG_ERROR, "FATAL: Trying to erase Flash while moving!");
+    if (motorStart != 0 || motorReverse != 2) {
+        makeLog(LOG_ERROR, "FATAL: Blocked Flash Erase while moving!");
         return;
     }
 
