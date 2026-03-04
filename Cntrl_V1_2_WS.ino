@@ -10,12 +10,23 @@
 
 #define LOG_RATE_LIMITED(level, interval, format, ...) \
     do { \
+        static_assert(sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS, \
+            "Log format string too long! Max " #LOG_MAX_PRINTABLE_CHARS " printable chars."); \
         static uint32_t lastLog = 0; \
         if (millis() - lastLog > (interval)) { \
-            makeLog(level, format, ##__VA_ARGS__); \
+            makeLogImpl(level, format, ##__VA_ARGS__); \
             lastLog = millis(); \
         } \
     } while(0)
+
+#define makeLog(level, format, ...) \
+    do { \
+        static_assert(sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS, \
+            "makeLog: format string literal exceeds LOG_MAX_PRINTABLE_CHARS (54)!"); \
+        makeLogImpl(level, format, ##__VA_ARGS__); \
+    } while(0)
+
+void makeLogImpl(LogLevel level, const char* format, ...);
 
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
@@ -398,7 +409,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
       port->write(logBuffer, totalLen + 2);
   }
 }
-void makeLog(LogLevel level, const char* format, ...) {
+void makeLogImpl(LogLevel level, const char* format, ...) {
   va_list args;
   va_start(args, format);
   vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
@@ -568,12 +579,6 @@ void setup() {
   Serial.begin(115200);               // USBшный UART порт
   delay(2000);
 
-#if defined(ARDUINO_ARCH_STM32)
-  Serial1.setRxBufferSize(512);
-  Serial1.setTxBufferSize(512);
-  Serial2.setRxBufferSize(512);
-  Serial2.setTxBufferSize(512);
-#endif
 
   Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
   Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, используется для радиомодуля
@@ -873,7 +878,7 @@ void loop() {
         digitalWrite(RED_LED, LOW);
         currentMode = CoreOpMode::IDLE;
       } else if (status == CMD_SAVE_EEPROM) {
-        save_EEPROM_Data();
+        saveEEPROMData(eepromData);
         status = 0; // Clear the command after executing
       }
 

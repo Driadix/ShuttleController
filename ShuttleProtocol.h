@@ -10,7 +10,8 @@ constexpr uint8_t PROTOCOL_VER = 2;
 constexpr uint8_t TARGET_ID_NONE = 0x00;       // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF;  // Global command
 
-constexpr uint8_t MAX_LOG_STRING_LEN = 254; // Not forget about null terminator, so human payload is 253 bytes
+constexpr uint8_t MAX_LOG_STRING_LEN     = 55;
+constexpr uint8_t LOG_MAX_PRINTABLE_CHARS = MAX_LOG_STRING_LEN - 1;
 
 #pragma pack(push, 1)
 
@@ -326,7 +327,7 @@ private:
     uint32_t lastRxTime = 0;
     static constexpr uint32_t RX_TIMEOUT_MS = 100;
     
-    uint8_t rxBuffer[270]; 
+    uint8_t rxBuffer[64]; // Matches max possible wire frame size (64 bytes)
     uint16_t rxIndex;
     uint8_t payloadLen; 
 };
