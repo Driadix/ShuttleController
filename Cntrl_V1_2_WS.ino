@@ -194,40 +194,6 @@ volatile bool pendingEepromSave = false;
 
 uint32_t lastValidRxTime = 0;
 
-struct ReportData {
-  // Основные характеристики
-  uint8_t shuttleNumber;          // Номер шаттла
-  uint16_t shuttleLength;         // Длина шаттла
-  uint16_t maxSpeed;              // Максимальная скорость
-  uint16_t minSpeed;              // Минимальная скорость
-  uint16_t interPalleteDistance;  // Межпаллетное расстояние
-  int inverse;                    // Inverse
-  int fifoLifo;                   // FIFO LIFO
-  int lifterSpeed;                // Скорость подъёмника
-  int waitTime;                   // Время ожидания при выгрузке
-
-  // Батарея
-  struct BatteryData battery;
-
-  // Калибровка и сенсоры
-  uint8_t calibrateEncoder_F[8];
-  uint8_t calibrateEncoder_R[8];
-  uint8_t calibrateSensor_F[3];
-  uint8_t calibrateSensor_R[3];
-  uint32_t timingBudget;  // Время измерения датчиками TOF
-  int8_t mprOffset;       // Смещение значения МПР
-  int8_t chnlOffset;      // Смещение канала
-  int blinkTime;          // Время квантования красивых морганий
-
-  // Статистика
-  float temp;                      // Температура чипа
-  struct GlobalDateTime dateTime;  // Время и дата согласно rtc
-
-  // Ошибки, предупреждения, статус
-  uint16_t errorCode;  // Битмап ошибок
-
-} reportData;
-
 uint16_t errorCode = 0;                // Битмап ошибок
 
 enum ShuttleFault : uint16_t {
