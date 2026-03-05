@@ -425,9 +425,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-  if (port->availableForWrite() >= totalLen + 2) {
-      port->write(logBuffer, totalLen + 2);
-  }
+  port->write(logBuffer, totalLen + 2);
 }
 void makeLogImpl(LogLevel level, const char* format, ...) {
   va_list args;
@@ -475,9 +473,7 @@ void sendTelemetryPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (port->availableForWrite() >= totalLen + 2) {
-        port->write(localTxBuffer, totalLen + 2);
-    }
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 void sendSensorPacket(Stream* port) {
@@ -518,9 +514,7 @@ void sendSensorPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (port->availableForWrite() >= totalLen + 2) {
-        port->write(localTxBuffer, totalLen + 2);
-    }
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 void sendStatsPacket(Stream* port) {
@@ -555,9 +549,7 @@ void sendStatsPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (port->availableForWrite() >= totalLen + 2) {
-        port->write(localTxBuffer, totalLen + 2);
-    }
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 // Инициация устройств
@@ -1288,9 +1280,7 @@ void sendAck(uint8_t seq, AckResult result, Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (port->availableForWrite() >= totalLen + 2) {
-        port->write(localTxBuffer, totalLen + 2);
-    }
+    port->write(localTxBuffer, totalLen + 2);
 }
 
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
