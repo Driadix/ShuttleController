@@ -360,7 +360,7 @@ public:
 private:
     State state;
     uint32_t lastRxTime = 0;
-    static constexpr uint32_t RX_TIMEOUT_MS = 100;
+    static constexpr uint32_t RX_TIMEOUT_MS = 250;
     
     uint8_t rxBuffer[64];
     uint16_t rxIndex;
