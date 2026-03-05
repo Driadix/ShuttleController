@@ -1316,64 +1316,69 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
     lastValidRxTime = millis(); 
 
-    if (header->msgID == MSG_REQ_HEARTBEAT) {
+    // --- NEW LOGIC: Extract and strip the flag ---
+    bool suppressAck = (header->msgID & MSG_FLAG_NO_ACK) != 0;
+    uint8_t realMsgID = header->msgID & MSG_ID_MASK;
+    // ---------------------------------------------
+
+    if (realMsgID == MSG_REQ_HEARTBEAT) {
         sendTelemetryPacket(replyPort);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_REQ_SENSORS) {
+    } else if (realMsgID == MSG_REQ_SENSORS) {
         sendSensorPacket(replyPort);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_REQ_STATS) {
+    } else if (realMsgID == MSG_REQ_STATS) {
         sendStatsPacket(replyPort);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_CMD_SIMPLE || header->msgID == MSG_CMD_WITH_ARG) {
-        uint8_t reqCmd = (header->msgID == MSG_CMD_SIMPLE) ?
+    } else if (realMsgID == MSG_CMD_SIMPLE || realMsgID == MSG_CMD_WITH_ARG) {
+        uint8_t reqCmd = (realMsgID == MSG_CMD_SIMPLE) ?
                          ((SimpleCmdPacket*)payload)->cmdType : ((ParamCmdPacket*)payload)->cmdType;
 
         if (reqCmd == CMD_SAVE_EEPROM) {
             pendingEepromSave = true;
-            sendAck(header->seq, ACK_OK, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
             return NO_NEW_CMD; 
         }
         if (reqCmd == CMD_GET_CONFIG) {
-            sendAck(header->seq, ACK_OK, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
             return NO_NEW_CMD;
         }
         bool inChannel = digitalRead(CHANNEL);
 
         // 1. Force reject if in Error mode (unless it's an override like Reset)
         if (errorStatus[0] != 0 && !isOverrideCommand(reqCmd)) {
-            sendAck(header->seq, ACK_ERROR_STATE, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_ERROR_STATE, replyPort);
             return NO_NEW_CMD;
         }
 
         // 2. Force reject movement commands if not in channel (Prevents the IDLE ACK Lie)
         if (!inChannel && reqCmd != CMD_SAVE_EEPROM && reqCmd != CMD_GET_CONFIG && reqCmd != CMD_RESET_ERROR) {
-            sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
 
         // 3. Normal preemption check
         if (isShuttleIdle() || isOverrideCommand(reqCmd)) {
-            sendAck(header->seq, ACK_OK, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
 
-            if (header->msgID == MSG_CMD_WITH_ARG) {
+            if (realMsgID == MSG_CMD_WITH_ARG) {
                 ParamCmdPacket* cmdArgs = (ParamCmdPacket*)payload;
                 if (reqCmd == CMD_MOVE_DIST_R || reqCmd == CMD_MOVE_DIST_F) mooveDistance = cmdArgs->arg;
                 else if (reqCmd == CMD_LONG_UNLOAD_QTY) UPQuant = (uint8_t)cmdArgs->arg;
             }
             return reqCmd;
         } else {
-            sendAck(header->seq, ACK_BUSY, replyPort);
+            if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
             return NO_NEW_CMD;
         }
-    } else if (header->msgID == MSG_SET_DATETIME) {
+    } else if (realMsgID == MSG_SET_DATETIME) {
         DateTimePacket* dt = (DateTimePacket*)payload;
-        sendAck(header->seq, ACK_OK, replyPort);
+        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
 
         rtc.setTime(dt->hour, dt->minute, dt->second);
         rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_CONFIG_SET) {
+    } else if (realMsgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
         switch (cfg->paramID) {
             case CFG_SHUTTLE_NUM: eepromData.shuttleNum = cfg->value; shuttleNum = cfg->value; break;
@@ -1391,9 +1396,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 currentPosition = channelLength - currentPosition - 800;
                 break;
         }
-        sendAck(header->seq, ACK_OK, replyPort);
+        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_CONFIG_SYNC_PUSH) {
+    } else if (realMsgID == MSG_CONFIG_SYNC_PUSH) {
         FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
         
         // Apply to RAM
@@ -1418,10 +1423,10 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         eepromData.inverse              = fullCfg->reverseMode;
         inverse                         = fullCfg->reverseMode;
         
-        sendAck(header->seq, ACK_OK, replyPort);
+        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
 
-    } else if (header->msgID == MSG_CONFIG_SYNC_REQ) {
+    } else if (realMsgID == MSG_CONFIG_SYNC_REQ) {
         FullConfigPacket rep;
         rep.interPallet   = interPalleteDistance;
         rep.shuttleLen    = shuttleLength;
@@ -1443,7 +1448,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         static uint8_t repSeq = 0;
         repHeader->seq = repSeq++;
         repHeader->msgID = MSG_CONFIG_SYNC_REP;
-        
+
         memcpy(localTxBuffer + sizeof(FrameHeader), &rep, sizeof(FullConfigPacket));
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
         ProtocolUtils::appendCRC(localTxBuffer, totalLen);
@@ -1452,7 +1457,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             replyPort->write(localTxBuffer, totalLen + 2);
         }
         return NO_NEW_CMD;
-    } else if (header->msgID == MSG_CONFIG_GET) {
+    } else if (realMsgID == MSG_CONFIG_GET) {
         ConfigPacket* req = (ConfigPacket*)payload;
         ConfigPacket rep;
         rep.paramID = req->paramID;
