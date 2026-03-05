@@ -224,7 +224,7 @@ struct ReportData {
   struct GlobalDateTime dateTime;  // Время и дата согласно rtc
 
   // Ошибки, предупреждения, статус
-  uint8_t errorStatus[16];  // Битмап ошибок
+  uint16_t errorCode;  // Битмап ошибок
 
 } reportData;
 
@@ -234,10 +234,7 @@ const String shuttleNums[32] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8",
 const String shuttleErrors[16] = { "No_Error", "Channel_F_Error", "Channel_R_Error", "Channel_DF_Error", "Channel_DR_Error", "Pallete_F_Error", "Pallete_R_Error", "Pallete_DF_Error", "Pallete_DR_Error", "Lifter_Error", "Moove_Fault", "Low_Battery", "Crash" };  // Статусы ошибок
 const String shuttleWarnings[16] = { "No_Warning", "Out_Of_Channel", "Battery charge < 20%", "Pallete_Not_Found", "Pallete_Damaged" };                                                                                                                               // Статусы ошибок
 uint8_t status = 0;                                                                                                                                                                                                                                                  // Командный статус
-ShuttleState currentOperation = STATE_IDLE;  // High-level operation state for protocol telemetry
-uint8_t errorStatus[16] = {
-  0,
-};                                                                   // Номера статусов ошибки
+ShuttleState currentOperation = STATE_IDLE;
 uint8_t warningStatus = 0;                                           // Номер статуса предупреждений
 uint8_t shuttleNum = 0;                                              // Номер шаттла -сохранять-
 uint8_t channel[1024];                                               // Массив канала
@@ -392,9 +389,14 @@ static inline bool isShuttleIdle() {
     return (status == 0 || status == CMD_STOP);
 }
 
+// Evaluates if the shuttle is currently in an error state
+static inline bool isErrorActive() {
+    return (errorCode != 0);
+}
+
 // Evaluates if a physical loop must immediately terminate
 static inline bool shouldAbortLoop() {
-    return (status == CMD_STOP || status == CMD_STOP_MANUAL || errorStatus[0] != 0);
+    return (status == CMD_STOP || status == CMD_STOP_MANUAL || isErrorActive());
 }
 
 void localLog(LogLevel level, const char* msg) {
@@ -815,7 +817,7 @@ void loop() {
     cntBattdata = millis();
   }
 
-  if (errorStatus[0] != 0) currentMode = CoreOpMode::ERROR;
+  if (isErrorActive()) currentMode = CoreOpMode::ERROR;
 
   switch (currentMode) {
     case CoreOpMode::IDLE: {
@@ -922,7 +924,6 @@ void loop() {
       blink_Error();
       
       if (status == CMD_RESET_ERROR) {
-        for(uint8_t i = 0; i < sizeof(errorStatus); i++) errorStatus[i] = 0;
         errorCode = 0;
         status = 0;
         currentOperation = STATE_IDLE;
@@ -1346,7 +1347,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         bool inChannel = digitalRead(CHANNEL);
 
         // 1. Force reject if in Error mode (unless it's an override like Reset)
-        if (errorStatus[0] != 0 && !isOverrideCommand(reqCmd)) {
+        if (isErrorActive() && !isOverrideCommand(reqCmd)) {
             if (!suppressAck) sendAck(header->seq, ACK_ERROR_STATE, replyPort);
             return NO_NEW_CMD;
         }
@@ -1623,7 +1624,7 @@ void run_Cmd() {
     moove_Forward();
     long_Unload();
     longWork = 0;
-    if (status == CMD_STOP && distance[1] > 100 || errorStatus[0]) return;
+    if (status == CMD_STOP && distance[1] > 100 || isErrorActive()) return;
     status = CMD_MOVE_RIGHT_MAN;
     moove_Forward();
     status = CMD_STOP;
@@ -1637,7 +1638,7 @@ void run_Cmd() {
     long_Unload(UPQuant);
     UPQuant = 0;
     longWork = 0;
-    if (status == CMD_STOP && distance[1] > 100 || errorStatus[0]) return;
+    if (status == CMD_STOP && distance[1] > 100 || isErrorActive()) return;
     status = CMD_MOVE_RIGHT_MAN;
     moove_Forward();
     status = CMD_STOP;
@@ -1663,12 +1664,10 @@ void update_Sensors() {
 
 // Добавление ошибки
 void add_Error(uint8_t error) {
-  uint8_t i = 0;
-  while (errorStatus[i]) {
-    if (errorStatus[i] == error) return;
-    i++;
-  }
-  errorStatus[i] = error;
+    // Ensure we don't overflow the 16-bit mask
+    if (error > 0 && error < 16) {
+        errorCode |= (1 << error);
+    }
 }
 
 // Получение данных с датчиков обраружения паллет
@@ -2025,19 +2024,15 @@ void blink_Error() {
   else if (errCounter == 14) {
     debuger++;    
     if (debuger == 1) {
-      uint8_t i = 0;
-      while (errorStatus[i]) {
-        if (batteryCharge > minBattCharge && errorStatus[i] == 11) {
-          errorStatus[i] = 0;
-          errorCode &= ~(1 << 11);
+        // If Low Battery bit (11) is set, and battery recovered, clear the bit
+        if ((errorCode & (1 << 11)) && batteryCharge > minBattCharge) {
+            errorCode &= ~(1 << 11);
         }
-        i++;
-      }
-      
-      makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
-      
-      sendTelemetryPacket(&Serial1);
-      sendTelemetryPacket(&Serial2);
+        
+        makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
+        
+        sendTelemetryPacket(&Serial1);
+        sendTelemetryPacket(&Serial2);
     }
     else if (debuger == 10) {
       debuger = 0;    
@@ -3536,7 +3531,7 @@ void long_Load() {
     }
     uint8_t wait = 0;
     get_Distance();
-    if (distance[1] < 90 + chnlOffset && !errorStatus[0]) {
+    if (distance[1] < 90 + chnlOffset && !isErrorActive()) {
       status = CMD_LONG_LOAD;
       moove_Distance_R(shuttleLength + 300, 60, 30);
       motor_Stop();
@@ -3586,7 +3581,7 @@ void long_Unload() {
     if (fifoLifo) fifoLifo_Inverse();
     unload_Pallete();
     if (fifoLifo) fifoLifo_Inverse();
-    if (distance[0] < 200 + chnlOffset && !errorStatus[0]) {
+    if (distance[0] < 200 + chnlOffset && !isErrorActive()) {
       detect = 0;
       status = CMD_LONG_UNLOAD;
       break;
@@ -3659,7 +3654,7 @@ void long_Unload(uint8_t num) {
     if (fifoLifo) fifoLifo_Inverse();
     get_Distance();
     blink_Work();
-    if (distance[0] < 200 + chnlOffset && !errorStatus[0]) {
+    if (distance[0] < 200 + chnlOffset && !isErrorActive()) {
       detect = 0;
       status = CMD_LONG_UNLOAD_QTY;
       break;
@@ -3859,14 +3854,14 @@ void demo_Mode() {
       }
       moove = 0;
       load_Pallete();
-      if (errorStatus[0]) {
+      if (isErrorActive()) {
         motor_Stop();
         return;
       }
       update_Sensors();
       if (distance[1] < 200) status = CMD_STOP;
     }
-    if (status == CMD_STOP && distance[1] > 200 || errorStatus[0]) {
+    if ((status == CMD_STOP && distance[1] > 200) || isErrorActive()) {
       motor_Stop();
       return;
     } else status = CMD_DEMO;
@@ -3909,15 +3904,15 @@ void demo_Mode() {
       unload_Pallete();
       update_Sensors();
       firstPalletePosition = currentPosition;
-      if (errorStatus[0]) {
+      if (isErrorActive()) {
         motor_Stop();
         return;
       }
       if (distance[0] < 200) status = CMD_STOP;
     }
     firstPalletePosition = 0;
-    if (!errorStatus[0] && status == CMD_STOP && distance[1] < 200) status = CMD_DEMO;
-    else if (status == CMD_STOP && distance[0] > 200 || errorStatus[0]) {
+    if (!isErrorActive() && status == CMD_STOP && distance[1] < 200) status = CMD_DEMO;
+    else if ((status == CMD_STOP && distance[0] > 200) || isErrorActive()) {
       motor_Stop();
       return;
     } else status = CMD_DEMO;
@@ -4352,7 +4347,7 @@ void read_BatteryCharge() {
   }
   while (Serial3.available()) Serial3.read();
   pinMode(RS485, INPUT_PULLDOWN);
-  if (!errorStatus[0] && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
+  if (!isErrorActive() && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
         makeLog(LOG_ERROR, "Low battery! Emergency stop.");
         lifter_Down();
         moove_Forward();
