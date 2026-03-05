@@ -108,6 +108,36 @@ enum ConfigParamID : uint8_t {
     CFG_REVERSE_MODE    = 10
 };
 
+enum AckResult : uint8_t {
+    ACK_OK              = 0, // Command accepted and will execute
+    ACK_REJECTED        = 1, // Generic rejection (reserved)
+    ACK_BUSY            = 2, // Shuttle is already executing another operation
+    ACK_BAD_ENVIRONMENT = 3, // Shuttle not in valid physical state (e.g., not in channel)
+    ACK_ERROR_STATE     = 4  // Shuttle is in error mode, only overrides accepted
+};
+
+enum ShuttleState : uint8_t {
+    STATE_IDLE = 0,
+    STATE_MANUAL = 1,
+    STATE_LOAD = 2,
+    STATE_UNLOAD = 3,
+    STATE_COMPACT = 4,
+    STATE_EVACUATE = 5,
+    STATE_DEMO = 6,
+    STATE_COUNT_PALLETS = 7,
+    STATE_TESTING = 8,
+    STATE_ERROR = 9,
+    STATE_WAITING = 10,
+    STATE_LONG_LOAD = 11,
+    STATE_LONG_UNLOAD = 12,
+    STATE_LONG_UNLOAD_QTY = 13,
+    STATE_MOVE_FWD = 14,
+    STATE_MOVE_REV = 15,
+    STATE_LIFT_UP = 16,
+    STATE_LIFT_DOWN = 17,
+    STATE_INIT = 18
+};
+
 struct TelemetryPacket {
     uint16_t errorCode;        
     uint16_t currentPosition;  // mm
@@ -193,19 +223,10 @@ struct LogPacket {
     char message[MAX_LOG_STRING_LEN];  // Null terminated via vsnprintf
 };
 
-// Result codes for MSG_ACK
-enum AckResult : uint8_t {
-    ACK_OK              = 0, // Command accepted and will execute
-    ACK_REJECTED        = 1, // Generic rejection (reserved)
-    ACK_BUSY            = 2, // Shuttle is already executing another operation
-    ACK_BAD_ENVIRONMENT = 3, // Shuttle is not in a valid physical state (e.g., not in channel)
-    ACK_ERROR_STATE     = 4, // Shuttle is in error mode, only overrides accepted
-};
-
 // Used with MSG_ACK (2 bytes)
 struct AckPacket {
-    uint8_t refSeq;            // Sequence number of the command being ACK'd
-    uint8_t result;            // AckResult enum value
+    uint8_t  refSeq;  // Sequence number of the command being ACK'd
+    AckResult result; // Reason code for the ACK response
 };
 
 #pragma pack(pop)
