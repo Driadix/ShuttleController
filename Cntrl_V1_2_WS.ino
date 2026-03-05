@@ -1719,21 +1719,21 @@ void get_Distance() {
     
     data[currentSensor][filterCount] = 1500;
     
-    // Evaluate thresholds
-    if (err[currentSensor] == 7) { // Only log exactly once when the threshold is crossed
-      if (currentSensor == 0) {
-        setFault(FAULT_TOF_CH_F);
-        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
-      } else if (currentSensor == 1) {
-        setFault(FAULT_TOF_CH_R);
-        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
-      } else if (currentSensor == 2) {
-        setFault(FAULT_TOF_PAL_F);
-        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
-      } else if (currentSensor == 3) {
-        setFault(FAULT_TOF_PAL_R);
-        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
-      }
+    // 3. CONTINUOUS LATCH: If the sensor is dead, aggressively hold the fault bit high!
+    // Even if an operator clears the error, this puts it right back on the next loop.
+    if (err[currentSensor] >= 7) { 
+      if (currentSensor == 0) setFault(FAULT_TOF_CH_F);
+      else if (currentSensor == 1) setFault(FAULT_TOF_CH_R);
+      else if (currentSensor == 2) setFault(FAULT_TOF_PAL_F);
+      else if (currentSensor == 3) setFault(FAULT_TOF_PAL_R);
+    }
+
+    // 4. ONE-TIME LOG: Only spam the console at the exact moment of failure
+    if (err[currentSensor] == 7) { 
+      if (currentSensor == 0) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
+      else if (currentSensor == 1) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
+      else if (currentSensor == 2) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
+      else if (currentSensor == 3) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
     }
     return;
   } else {
