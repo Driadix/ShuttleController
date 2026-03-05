@@ -328,7 +328,6 @@ float temp = 0;                        // Температура чипа
 float weelDia = 100;                   // Диаметр колеса
 
 uint16_t mesRes[2][4];
-int countManual = millis();
 int countCrush = 0;
 int startDiff = 0;
 
@@ -725,6 +724,21 @@ void SystemYield() {
   uint8_t cmdDisp = pollSerial(Serial1, parserDisplay);
   uint8_t cmdRad  = pollSerial(Serial2, parserRadio);
 
+  static uint32_t lastManualCmdMillis = currentMillis;
+
+  if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
+      cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
+      lastManualCmdMillis = currentMillis;
+  }
+  
+  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
+      if (currentMillis - lastManualCmdMillis > 800) {
+          status = CMD_STOP_MANUAL;
+          makeLog(LOG_WARN, "Connection drop timeout!");
+          motor_Stop();
+      }
+  }
+
   // 1. Absolute highest priority: STOP commands from ANY source
   if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
       status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
@@ -841,16 +855,15 @@ void loop() {
     }
     
     case CoreOpMode::MANUAL: {
-      if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); countManual = millis(); }
-      else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); countManual = millis(); }
-      else if (status == CMD_LIFT_UP) { lifter_Up(); countManual = millis(); }
-      else if (status == CMD_LIFT_DOWN) { lifter_Down(); countManual = millis(); }
+      if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); }
+      else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
+      else if (status == CMD_LIFT_UP) { lifter_Up(); }
+      else if (status == CMD_LIFT_DOWN) { lifter_Down(); }
       else if (status == CMD_LOAD) { run_Cmd(); }
       else if (status == CMD_UNLOAD) { run_Cmd(); }
       else if (status == CMD_LONG_LOAD) { run_Cmd(); }
       else if (status == CMD_LONG_UNLOAD) { run_Cmd(); }
 
-      if (millis() - countManual > 120000) status = CMD_STOP;
       if (millis() - count > 330) {
         digitalWrite(GREEN_LED, !digitalRead(GREEN_LED));
         digitalWrite(BOARD_LED, !digitalRead(BOARD_LED));
