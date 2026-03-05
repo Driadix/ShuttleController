@@ -234,6 +234,7 @@ const String shuttleNums[32] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8",
 const String shuttleErrors[16] = { "No_Error", "Channel_F_Error", "Channel_R_Error", "Channel_DF_Error", "Channel_DR_Error", "Pallete_F_Error", "Pallete_R_Error", "Pallete_DF_Error", "Pallete_DR_Error", "Lifter_Error", "Moove_Fault", "Low_Battery", "Crash" };  // Статусы ошибок
 const String shuttleWarnings[16] = { "No_Warning", "Out_Of_Channel", "Battery charge < 20%", "Pallete_Not_Found", "Pallete_Damaged" };                                                                                                                               // Статусы ошибок
 uint8_t status = 0;                                                                                                                                                                                                                                                  // Командный статус
+ShuttleState currentOperation = STATE_IDLE;  // High-level operation state for protocol telemetry
 uint8_t errorStatus[16] = {
   0,
 };                                                                   // Номера статусов ошибки
@@ -350,6 +351,33 @@ uint16_t data[4][5] = {
 
 #pragma endregion
 
+// Maps an accepted command to the high-level ShuttleState for protocol telemetry.
+// This is the Hexagonal "adapter" between internal domain logic and external DTO.
+static ShuttleState mapCmdToOperation(uint8_t cmd) {
+    switch (cmd) {
+        case CMD_LOAD:            return STATE_LOAD;
+        case CMD_UNLOAD:          return STATE_UNLOAD;
+        case CMD_LONG_LOAD:       return STATE_LONG_LOAD;
+        case CMD_LONG_UNLOAD:     return STATE_LONG_UNLOAD;
+        case CMD_LONG_UNLOAD_QTY: return STATE_LONG_UNLOAD_QTY;
+        case CMD_COMPACT_F:
+        case CMD_COMPACT_R:       return STATE_COMPACT;
+        case CMD_EVACUATE_ON:     return STATE_EVACUATE;
+        case CMD_DEMO:            return STATE_DEMO;
+        case CMD_COUNT_PALLETS:   return STATE_COUNT_PALLETS;
+        case CMD_MOVE_DIST_F:     return STATE_MOVE_FWD;
+        case CMD_MOVE_DIST_R:     return STATE_MOVE_REV;
+        case CMD_LIFT_UP:         return STATE_LIFT_UP;
+        case CMD_LIFT_DOWN:       return STATE_LIFT_DOWN;
+        case CMD_HOME:            return STATE_HOME;
+        case CMD_CALIBRATE:       return STATE_CALIBRATE;
+        case CMD_MANUAL_MODE:
+        case CMD_MOVE_RIGHT_MAN:
+        case CMD_MOVE_LEFT_MAN:   return STATE_MANUAL;
+        default:                  return STATE_IDLE;
+    }
+}
+
 static inline bool isOverrideCommand(uint8_t cmd) {
     return (cmd == CMD_STOP || 
             cmd == CMD_STOP_MANUAL || 
@@ -428,12 +456,7 @@ void sendTelemetryPacket(Stream* port) {
     TelemetryPacket pkt;
 
     pkt.errorCode = errorCode;
-    if (currentMode == CoreOpMode::MANUAL && 
-        (status == CMD_STOP || status == CMD_STOP_MANUAL || status == CMD_MANUAL_MODE || status == 0)) {
-        pkt.shuttleStatus = CMD_MANUAL_MODE;
-    } else {
-        pkt.shuttleStatus = status;
-    }
+    pkt.shuttleStatus = currentOperation;
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;
     pkt.batteryCharge = batteryCharge;
@@ -806,7 +829,8 @@ void loop() {
             makeLog(LOG_WARN, "Command 0x%02X rejected: Shuttle not in channel", status);
             status = 0;
         } else {
-            makeLog(LOG_INFO, "Shuttle accepted CMD: 0x%02X", status);
+            currentOperation = mapCmdToOperation(status);
+            makeLog(LOG_INFO, "Shuttle accepted CMD: 0x%02X -> State %d", status, currentOperation);
             lastPalletePosition = 0;
             send_Cmd(); 
 
@@ -854,6 +878,7 @@ void loop() {
       if (status != CMD_STOP) {
         status = 0;
       }
+      currentOperation = STATE_IDLE;
       currentMode = CoreOpMode::IDLE;
       break;
     }
@@ -863,12 +888,13 @@ void loop() {
       else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
       else if (status == CMD_LIFT_UP) { lifter_Up(); }
       else if (status == CMD_LIFT_DOWN) { lifter_Down(); }
-      else if (status == CMD_LOAD) { run_Cmd(); }
-      else if (status == CMD_UNLOAD) { run_Cmd(); }
-      else if (status == CMD_LONG_LOAD) { run_Cmd(); }
-      else if (status == CMD_LONG_UNLOAD) { run_Cmd(); }
+      else if (status == CMD_LOAD) { currentOperation = STATE_LOAD; run_Cmd(); }
+      else if (status == CMD_UNLOAD) { currentOperation = STATE_UNLOAD; run_Cmd(); }
+      else if (status == CMD_LONG_LOAD) { currentOperation = STATE_LONG_LOAD; run_Cmd(); }
+      else if (status == CMD_LONG_UNLOAD) { currentOperation = STATE_LONG_UNLOAD; run_Cmd(); }
 
       if (millis() - lastManualActionTime > 5000) {
+          currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
           status = CMD_STOP; 
       }
@@ -884,11 +910,13 @@ void loop() {
       }
       
       if (status == CMD_STOP) {
+          currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
       }
       break;
     }
     case CoreOpMode::ERROR: {
+      currentOperation = STATE_ERROR;
       motor_Force_Stop();
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
@@ -897,6 +925,7 @@ void loop() {
         for(uint8_t i = 0; i < sizeof(errorStatus); i++) errorStatus[i] = 0;
         errorCode = 0;
         status = 0;
+        currentOperation = STATE_IDLE;
         digitalWrite(RED_LED, LOW);
         currentMode = CoreOpMode::IDLE;
       } else if (status == CMD_SAVE_EEPROM) {

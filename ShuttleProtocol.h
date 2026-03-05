@@ -117,25 +117,25 @@ enum AckResult : uint8_t {
 };
 
 enum ShuttleState : uint8_t {
-    STATE_IDLE = 0,
-    STATE_MANUAL = 1,
-    STATE_LOAD = 2,
-    STATE_UNLOAD = 3,
-    STATE_COMPACT = 4,
-    STATE_EVACUATE = 5,
-    STATE_DEMO = 6,
-    STATE_COUNT_PALLETS = 7,
-    STATE_TESTING = 8,
-    STATE_ERROR = 9,
-    STATE_WAITING = 10,
-    STATE_LONG_LOAD = 11,
-    STATE_LONG_UNLOAD = 12,
-    STATE_LONG_UNLOAD_QTY = 13,
-    STATE_MOVE_FWD = 14,
-    STATE_MOVE_REV = 15,
-    STATE_LIFT_UP = 16,
-    STATE_LIFT_DOWN = 17,
-    STATE_INIT = 18
+    STATE_IDLE            = 0,
+    STATE_MANUAL          = 1,
+    STATE_LOAD            = 2,
+    STATE_UNLOAD          = 3,
+    STATE_COMPACT         = 4,
+    STATE_EVACUATE        = 5,
+    STATE_DEMO            = 6,
+    STATE_COUNT_PALLETS   = 7,
+    STATE_ERROR           = 8,
+    STATE_WAITING         = 9,
+    STATE_LONG_LOAD       = 10,
+    STATE_LONG_UNLOAD     = 11,
+    STATE_LONG_UNLOAD_QTY = 12,
+    STATE_MOVE_FWD        = 13,  // Move by distance forward
+    STATE_MOVE_REV        = 14,  // Move by distance reverse
+    STATE_LIFT_UP         = 15,
+    STATE_LIFT_DOWN       = 16,
+    STATE_HOME            = 17,
+    STATE_CALIBRATE       = 18
 };
 
 struct TelemetryPacket {
@@ -144,7 +144,7 @@ struct TelemetryPacket {
     uint16_t speed;
     uint16_t batteryVoltage_mV;// 12500 = 12.5V
     uint16_t stateFlags;       // Bit 0: lifterUp, 1: motorStart, 2: reverse, 3: inv, 4: inChnl, 5: fifoLifo
-    uint8_t  shuttleStatus;    // Current Cmd/Status
+    ShuttleState shuttleStatus; // Current high-level operation
     uint8_t  batteryCharge;    // %
     uint8_t  shuttleNumber;    
     uint8_t  palleteCount;     
