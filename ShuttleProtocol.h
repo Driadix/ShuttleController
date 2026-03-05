@@ -193,10 +193,19 @@ struct LogPacket {
     char message[MAX_LOG_STRING_LEN];  // Null terminated via vsnprintf
 };
 
+// Result codes for MSG_ACK
+enum AckResult : uint8_t {
+    ACK_OK              = 0, // Command accepted and will execute
+    ACK_REJECTED        = 1, // Generic rejection (reserved)
+    ACK_BUSY            = 2, // Shuttle is already executing another operation
+    ACK_BAD_ENVIRONMENT = 3, // Shuttle is not in a valid physical state (e.g., not in channel)
+    ACK_ERROR_STATE     = 4, // Shuttle is in error mode, only overrides accepted
+};
+
 // Used with MSG_ACK (2 bytes)
 struct AckPacket {
     uint8_t refSeq;            // Sequence number of the command being ACK'd
-    uint8_t result;            // 0 = Success, 1 = Error, 2 = Busy
+    uint8_t result;            // AckResult enum value
 };
 
 #pragma pack(pop)

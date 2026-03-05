@@ -1302,30 +1302,30 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         if (reqCmd == CMD_SAVE_EEPROM) {
             pendingEepromSave = true;
-            sendAck(header->seq, 0, replyPort);
+            sendAck(header->seq, ACK_OK, replyPort);
             return NO_NEW_CMD; 
         }
         if (reqCmd == CMD_GET_CONFIG) {
-            sendAck(header->seq, 0, replyPort);
+            sendAck(header->seq, ACK_OK, replyPort);
             return NO_NEW_CMD;
         }
         bool inChannel = digitalRead(CHANNEL);
 
         // 1. Force reject if in Error mode (unless it's an override like Reset)
         if (errorStatus[0] != 0 && !isOverrideCommand(reqCmd)) {
-            sendAck(header->seq, 2, replyPort); // ACK 2 = Busy / Error
+            sendAck(header->seq, ACK_ERROR_STATE, replyPort);
             return NO_NEW_CMD;
         }
 
         // 2. Force reject movement commands if not in channel (Prevents the IDLE ACK Lie)
         if (!inChannel && reqCmd != CMD_SAVE_EEPROM && reqCmd != CMD_GET_CONFIG && reqCmd != CMD_RESET_ERROR) {
-            sendAck(header->seq, 3, replyPort); // ACK 3 = Invalid Environment (or use 2)
+            sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
 
         // 3. Normal preemption check
         if (isShuttleIdle() || isOverrideCommand(reqCmd)) {
-            sendAck(header->seq, 0, replyPort); // ACK 0 = Success
+            sendAck(header->seq, ACK_OK, replyPort);
 
             if (header->msgID == MSG_CMD_WITH_ARG) {
                 ParamCmdPacket* cmdArgs = (ParamCmdPacket*)payload;
@@ -1334,12 +1334,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             }
             return reqCmd;
         } else {
-            sendAck(header->seq, 2, replyPort); // ACK 2 = Busy
+            sendAck(header->seq, ACK_BUSY, replyPort);
             return NO_NEW_CMD;
         }
     } else if (header->msgID == MSG_SET_DATETIME) {
         DateTimePacket* dt = (DateTimePacket*)payload;
-        sendAck(header->seq, 0, replyPort);
+        sendAck(header->seq, ACK_OK, replyPort);
 
         rtc.setTime(dt->hour, dt->minute, dt->second);
         rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
@@ -1362,7 +1362,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 currentPosition = channelLength - currentPosition - 800;
                 break;
         }
-        sendAck(header->seq, 0, replyPort);
+        sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
     } else if (header->msgID == MSG_CONFIG_SYNC_PUSH) {
         FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
@@ -1389,7 +1389,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         eepromData.inverse              = fullCfg->reverseMode;
         inverse                         = fullCfg->reverseMode;
         
-        sendAck(header->seq, 0, replyPort);
+        sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
 
     } else if (header->msgID == MSG_CONFIG_SYNC_REQ) {
