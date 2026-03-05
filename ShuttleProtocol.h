@@ -51,6 +51,11 @@ enum MsgID : uint8_t {
     MSG_ACK              = 0x33  // Shuttle -> Pult/Display: Command acknowledgment
 };
 
+// Flag placed in the MSB of msgID to suppress ACKs for volatile commands
+constexpr uint8_t MSG_FLAG_NO_ACK  = 0x80; 
+// Mask to extract the real MsgID
+constexpr uint8_t MSG_ID_MASK      = 0x7F; 
+
 enum LogLevel : uint8_t {
     LOG_INFO = 0, 
     LOG_WARN = 1, 
