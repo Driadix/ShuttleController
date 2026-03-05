@@ -117,6 +117,10 @@ constexpr uint8_t NO_NEW_CMD = 0xFF;
 
 char logStringBuffer[256];
 
+enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
+CoreOpMode currentMode = CoreOpMode::IDLE;
+uint32_t lastManualActionTime = 0;
+
 HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
 HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
 STM32_CAN Can1(CAN1, ALT, RX_SIZE_256, TX_SIZE_256);  // CAN шина на пинах PB8 PB9
@@ -424,7 +428,12 @@ void sendTelemetryPacket(Stream* port) {
     TelemetryPacket pkt;
 
     pkt.errorCode = errorCode;
-    pkt.shuttleStatus = status;
+    if (currentMode == CoreOpMode::MANUAL && 
+        (status == CMD_STOP || status == CMD_STOP_MANUAL || status == CMD_MANUAL_MODE || status == 0)) {
+        pkt.shuttleStatus = CMD_MANUAL_MODE;
+    } else {
+        pkt.shuttleStatus = status;
+    }
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;
     pkt.batteryCharge = batteryCharge;
@@ -724,15 +733,13 @@ void SystemYield() {
   uint8_t cmdDisp = pollSerial(Serial1, parserDisplay);
   uint8_t cmdRad  = pollSerial(Serial2, parserRadio);
 
-  static uint32_t lastManualCmdMillis = currentMillis;
-
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
       cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
-      lastManualCmdMillis = currentMillis;
+      lastManualActionTime = currentMillis;
   }
   
   if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
-      if (currentMillis - lastManualCmdMillis > 800) {
+      if (currentMillis - lastManualActionTime > 500) {
           status = CMD_STOP_MANUAL;
           makeLog(LOG_WARN, "Connection drop timeout!");
           motor_Stop();
@@ -768,9 +775,6 @@ void SystemYield() {
 }
 
 // Основной цикл
-
-enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
-CoreOpMode currentMode = CoreOpMode::IDLE;
 
 void loop() {
   SystemYield();
@@ -863,6 +867,11 @@ void loop() {
       else if (status == CMD_UNLOAD) { run_Cmd(); }
       else if (status == CMD_LONG_LOAD) { run_Cmd(); }
       else if (status == CMD_LONG_UNLOAD) { run_Cmd(); }
+
+      if (millis() - lastManualActionTime > 5000) {
+          currentMode = CoreOpMode::IDLE;
+          status = CMD_STOP; 
+      }
 
       if (millis() - count > 330) {
         digitalWrite(GREEN_LED, !digitalRead(GREEN_LED));
