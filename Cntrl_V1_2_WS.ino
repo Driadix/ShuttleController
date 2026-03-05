@@ -1251,7 +1251,7 @@ enum ParseState {
     STATE_READ_CRC
 };
 
-void sendAck(uint8_t seq, uint8_t result, Stream* port) {
+void sendAck(uint8_t seq, AckResult result, Stream* port) {
     if (!port) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(AckPacket) + 2];
     AckPacket pkt;
