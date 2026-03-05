@@ -228,6 +228,28 @@ struct ReportData {
 
 } reportData;
 
+uint16_t errorCode = 0;                // Битмап ошибок
+
+enum ShuttleFault : uint16_t {
+    FAULT_NONE             = 0x0000,
+    FAULT_TOF_CH_F         = (1 << 1),  // 0x0002 (Old Error 1)
+    FAULT_TOF_CH_R         = (1 << 2),  // 0x0004 (Old Error 2)
+    FAULT_TOF_PAL_F        = (1 << 3),  // 0x0008 (Old Error 5)
+    FAULT_TOF_PAL_R        = (1 << 4),  // 0x0010 (Old Error 6)
+    FAULT_LIFTER_TIMEOUT   = (1 << 9),  // 0x0200 (Old Error 9)
+    FAULT_MOTOR_STALL      = (1 << 10), // 0x0400 (Old Error 10)
+    FAULT_LOW_BATTERY      = (1 << 11), // 0x0800 (Old Error 11)
+    FAULT_CRASH_BUMPER     = (1 << 12), // 0x1000 (Old Error 12 in crash)
+    FAULT_MOVE_TIMEOUT     = (1 << 13)  // 0x2000 (Detailed movement stall)
+};
+
+void setFault(ShuttleFault fault) {
+    errorCode |= fault;
+}
+
+void clearFault(ShuttleFault fault) {
+    errorCode &= ~fault;
+}
 
 AS5600 as5600;  // Магнитный энкодер на свободном колесе
 const String shuttleNums[32] = { "A1", "B2", "C3", "D4", "E5", "F6", "G7", "H8", "I9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32" };                                   // Номера шаттлов
@@ -269,7 +291,6 @@ uint16_t speed = 0;                    // Скорость движения в �
 uint16_t maxSpeed = 96;                // Максимальное значение скорости (от 0 до 100 %) -сохранять-
 uint16_t minSpeed = 3;                 // Минимальное значение скорости (лаг для АЦП) -сохранять-
 uint16_t oldSpeed = 0;                 // Запомненная cкорость движения в канале для плавного разгона и торможения
-uint16_t errorCode = 0;                // Битмап ошибок
 uint16_t SDsize = 0;                   // Объем SD карты
 uint16_t sensorParam = 500;           // Параметр обратнокубической аппроксимации чувствительности датчиков расстояния
 uint16_t distance[8] = { 0 };          // Значения от сенсоров расстояния и датчиков положения
@@ -1172,7 +1193,7 @@ void lifter_Up() {
     }
     if (millis() - cnt > lifterDelay) {
       lifter_Stop();
-      add_Error(9);
+      setFault(FAULT_LIFTER_TIMEOUT);
       makeLog(LOG_ERROR, "Lifter timeout!");
       status = CMD_STOP;
       break;
@@ -1241,7 +1262,7 @@ void lifter_Down() {
     }
     if (millis() - cnt > lifterDelay) {
       lifter_Stop();
-      add_Error(9);
+      setFault(FAULT_LIFTER_TIMEOUT);
       makeLog(LOG_ERROR, "Lifter timeout!");
       status = CMD_STOP;
       break;
@@ -1662,13 +1683,7 @@ void update_Sensors() {
   detect_Pallete();
 }
 
-// Добавление ошибки
-void add_Error(uint8_t error) {
-    // Ensure we don't overflow the 16-bit mask
-    if (error > 0 && error < 16) {
-        errorCode |= (1 << error);
-    }
-}
+// Removed add_Error
 
 // Получение данных с датчиков обраружения паллет
 void detect_Pallete() {
@@ -1726,43 +1741,67 @@ void get_Distance() {
   static uint8_t err[4] = {0};
   TOF_Parameter sensor;
   countSensor = millis();
-  if (!TOF_Is_Device_Present(sensorIndex + 1)) {
-    err[sensorIndex]++;
-    if (sensorIndex == 0 && err[sensorIndex] > 6) {
-      add_Error(1);
-      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
-    } else if (sensorIndex == 1 && err[sensorIndex] > 6) {
-      add_Error(2);
-      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
-    } else if (sensorIndex == 2 && err[sensorIndex] > 6) {
-      add_Error(5);
-      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
-    } else if (sensorIndex == 3 && err[sensorIndex] > 6) {
-      add_Error(6);
-      LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
+
+  uint8_t currentSensor = sensorIndex;
+  sensorIndex = (sensorIndex + 1) % 4;
+  if (currentSensor == 3) filterCount = (filterCount + 1) % 5;
+
+  if (!TOF_Is_Device_Present(currentSensor + 1)) {
+    if (err[currentSensor] < 250) {
+        err[currentSensor]++;
+    }
+    
+    data[currentSensor][filterCount] = 1500;
+    
+    // Evaluate thresholds
+    if (err[currentSensor] == 7) { // Only log exactly once when the threshold is crossed
+      if (currentSensor == 0) {
+        setFault(FAULT_TOF_CH_F);
+        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
+      } else if (currentSensor == 1) {
+        setFault(FAULT_TOF_CH_R);
+        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
+      } else if (currentSensor == 2) {
+        setFault(FAULT_TOF_PAL_F);
+        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
+      } else if (currentSensor == 3) {
+        setFault(FAULT_TOF_PAL_R);
+        LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
+      }
     }
     return;
-  } else err[sensorIndex] = 0;
-  TOF_Inquire_I2C_Decoding_ByID(sensorIndex + 1, &sensor);
+  } else {
+    if (err[currentSensor] > 0) {
+      err[currentSensor] = 0;
+      if (currentSensor == 0) clearFault(FAULT_TOF_CH_F);
+      else if (currentSensor == 1) clearFault(FAULT_TOF_CH_R);
+      else if (currentSensor == 2) clearFault(FAULT_TOF_PAL_F);
+      else if (currentSensor == 3) clearFault(FAULT_TOF_PAL_R);
+    }
+  }
+
+  TOF_Inquire_I2C_Decoding_ByID(currentSensor + 1, &sensor);
   uint16_t dist = sensor.dis;
+  
   if ((dist <= 1500 && sensor.signal_strength > 100) || dist > 1500) {
     if (!dist || dist > 1500) dist = 1500;
-    data[sensorIndex][filterCount] = dist;
-    if (inverse && sensorIndex == 0) distance[1] = filter_Distance(data[sensorIndex]);
-    else if (inverse && sensorIndex == 1) distance[0] = filter_Distance(data[sensorIndex]);
-    else if (inverse && sensorIndex == 2) distance[3] = filter_Distance(data[sensorIndex]);
-    else if (inverse && sensorIndex == 3) distance[2] = filter_Distance(data[sensorIndex]);
-    else distance[sensorIndex] = filter_Distance(data[sensorIndex]);
+    data[currentSensor][filterCount] = dist;
+    
+    if (inverse && currentSensor == 0) distance[1] = filter_Distance(data[currentSensor]);
+    else if (inverse && currentSensor == 1) distance[0] = filter_Distance(data[currentSensor]);
+    else if (inverse && currentSensor == 2) distance[3] = filter_Distance(data[currentSensor]);
+    else if (inverse && currentSensor == 3) distance[2] = filter_Distance(data[currentSensor]);
+    else distance[currentSensor] = filter_Distance(data[currentSensor]);
+    
   } else if (sensor.dis_status != 1 ) {
-    if (inverse && sensorIndex == 0) distance[1] = 1500;
-    else if (inverse && sensorIndex == 1) distance[0] = 1500;
-    else if (inverse && sensorIndex == 2) distance[3] = 1500;
-    else if (inverse && sensorIndex == 3) distance[2] = 1500;
-    else distance[sensorIndex] = 1500;
+    if (inverse && currentSensor == 0) distance[1] = 1500;
+    else if (inverse && currentSensor == 1) distance[0] = 1500;
+    else if (inverse && currentSensor == 2) distance[3] = 1500;
+    else if (inverse && currentSensor == 3) distance[2] = 1500;
+    else distance[currentSensor] = 1500;
+  } else {
+    fault += pow(10, currentSensor);
   }
-  else fault += pow(10, sensorIndex);
-  sensorIndex = (sensorIndex + 1) % 4;
-  if (sensorIndex == 3) filterCount = (filterCount + 1) % 5;
 }
 
 uint16_t filter_Distance(uint16_t arr[5]) {
@@ -1887,7 +1926,7 @@ void blink_Work() {
       if (mooveCount && millis() - countCrush > 1500) {
         motor_Stop();
         status = CMD_STOP;
-        add_Error(10);
+        setFault(FAULT_MOTOR_STALL);
         STATS_ATOMIC_UPDATE(sramStats->payload.motorStallCount++);
         return;
       }
@@ -2518,7 +2557,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
         motor_Stop();
         return;
       } else if (millis() - cnt > 5000) {
-        add_Error(12);
+        setFault(FAULT_MOVE_TIMEOUT);
         motor_Stop();
         lifter_Down();
         status = CMD_STOP;
@@ -2641,7 +2680,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
         motor_Stop();
         return;
       } else if (millis() - cnt > 5000) {
-        add_Error(12);
+        setFault(FAULT_MOVE_TIMEOUT);
         motor_Stop();
         lifter_Down();
         status = CMD_STOP;
@@ -3871,7 +3910,7 @@ void demo_Mode() {
       lifter_Down();
       moove_Forward();
       status = CMD_STOP;
-      add_Error(11);
+      setFault(FAULT_LOW_BATTERY);
       return;
     }
     count = millis();
@@ -3923,7 +3962,7 @@ void demo_Mode() {
       lifter_Down();
       moove_Forward();
       status = CMD_STOP;
-      add_Error(11);
+      setFault(FAULT_LOW_BATTERY);
       return;
     }
     count = millis();
@@ -4351,7 +4390,7 @@ void read_BatteryCharge() {
         makeLog(LOG_ERROR, "Low battery! Emergency stop.");
         lifter_Down();
         moove_Forward();
-        add_Error(11);
+        setFault(FAULT_LOW_BATTERY);
         STATS_ATOMIC_UPDATE(sramStats->payload.lowBatteryEvents++);
         status = CMD_STOP;
     }
@@ -4362,7 +4401,7 @@ void crash() {
   if (!(status == CMD_STOP)) {
     motor_Force_Stop();
     status = CMD_STOP;
-    add_Error(12);
+    setFault(FAULT_CRASH_BUMPER);
     STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
     oldSpeed = 0;
   }
