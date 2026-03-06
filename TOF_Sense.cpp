@@ -82,7 +82,6 @@ void IIC_Change_Mode_To_UART(uint8_t id) {
 
 bool TOF_Is_Device_Present(uint8_t id) {
   uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
-  uint8_t dummy;
 
   Wire.beginTransmission(slave_addr);
   Wire.write(TOF_ADDR_ID); // Запрашиваем регистр ID
@@ -92,7 +91,7 @@ bool TOF_Is_Device_Present(uint8_t id) {
 
   Wire.requestFrom(slave_addr, (uint8_t)1);
   if (Wire.available()) {
-    dummy = Wire.read();
+    Wire.read();
     return true; // Есть ответ
   }
 

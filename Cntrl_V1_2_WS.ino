@@ -8,6 +8,10 @@
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wunknown-pragmas"
+#endif
+
 #ifndef CONNECTION_LOGS
 #define CONNECTION_LOGS 0
 #endif
@@ -424,6 +428,7 @@ static inline bool shouldAbortLoop() {
 }
 
 void localLog(LogLevel level, const char* msg) {
+  (void)level;
   char timeStr[16];
   uint8_t hour, minute, second;
   rtc.getTime(&hour, &minute, &second, 0, nullptr);
@@ -787,19 +792,19 @@ void SystemYield() {
   static uint32_t timerUptime = 0;
 
   if (currentMillis - timerTelemetry >= 300) {
-    if (Serial1.availableForWrite() >= sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2) {
+    if (Serial1.availableForWrite() >= (int)(sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2U)) {
       timerTelemetry = currentMillis;
       sendTelemetryPacket(&Serial1);
     }
   }
   if (currentMillis - timerSensors >= 500) {
-    if (Serial1.availableForWrite() >= sizeof(SensorPacket) + sizeof(FrameHeader) + 2) {
+    if (Serial1.availableForWrite() >= (int)(sizeof(SensorPacket) + sizeof(FrameHeader) + 2U)) {
       timerSensors = currentMillis;
       sendSensorPacket(&Serial1);
     }
   }
   if (currentMillis - timerStats >= 5000) {
-    if (Serial1.availableForWrite() >= sizeof(StatsPacket) + sizeof(FrameHeader) + 2) {
+    if (Serial1.availableForWrite() >= (int)(sizeof(StatsPacket) + sizeof(FrameHeader) + 2U)) {
       timerStats = currentMillis;
       sendStatsPacket(&Serial1);
     }
@@ -840,8 +845,10 @@ void SystemYield() {
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
       cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
       if (lastManualRadioCmdTime != 0) {
-          uint32_t gap = currentMillis - lastManualRadioCmdTime;
-          DIAG_ONLY(if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;);
+          DIAG_ONLY(
+              uint32_t gap = currentMillis - lastManualRadioCmdTime;
+              if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
+          );
       }
       lastManualRadioCmdTime = currentMillis;
   }
@@ -1052,8 +1059,6 @@ void motor_Speed(int spd) {
   CAN_TX_msg.id = (100);
   CAN_TX_msg.len = 4;
   uint8_t accel = 30;
-  int position;
-  int countDist = millis();
   if (spd >= 10 && spd - oldSpeed >= 10) spd = oldSpeed + 10;
   if (spd > 100) spd = 100;
   if (spd <= 100 && spd >= 0) {
@@ -1086,14 +1091,13 @@ void motor_Speed(int spd) {
       else hexSpeed.vint = 0;
       if (motorReverse ^ inverse) hexSpeed.vint = -hexSpeed.vint;
       hexSpeed.vint *= 1000;
-      for (uint8_t i = 0; i < 5; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
+      for (uint8_t i = 0; i < 4; i++) { CAN_TX_msg.buf[i] = (unsigned char)hexSpeed.bint[3 - i]; }
       Can1.write(CAN_TX_msg);
       while (Can1.read(CAN_RX_msg)) ;
       oldSpeed = spd;
     } else if (spd < oldSpeed) {
       uint8_t steps = (oldSpeed - spd) / 2;
       if (distance[0] <= 400 || distance[1] <= 400) steps /= 2;
-      float currentSpeed;
       for (uint8_t i = 0; i < steps; i++) {
         blink_Work();
         get_Distance();
@@ -1240,8 +1244,7 @@ void lifter_Up() {
   int summCurrent = 0;
   int current = 0;
   cracked_int_t hexSpeed;
-  int cnt2 = millis();
-  int cnt = millis();
+  uint32_t cnt = millis();
   CAN_TX_msg.id = (101);
   CAN_TX_msg.len = 4;
   for (uint8_t j = 5; j < 50; j += 5) {
@@ -1268,7 +1271,7 @@ void lifter_Up() {
       status = CMD_STOP;
       return;
     }
-    if (millis() - cnt > lifterDelay) {
+    if (millis() - cnt > (uint32_t)lifterDelay) {
       lifter_Stop();
       setFault(FAULT_LIFTER_TIMEOUT);
       makeLog(LOG_ERROR, "Lifter timeout!");
@@ -1286,7 +1289,6 @@ void lifter_Up() {
         if (lifterCurrent < current && k > 3) lifterCurrent = current;
         k++;
         if (k > 3) summCurrent += current;
-        cnt2 = millis();
       }
     }
   }
@@ -1309,7 +1311,7 @@ void lifter_Down() {
     return;
   }
   makeLog(LOG_INFO, "Moove lifter down... status = %d", status);
-  int cnt = millis();
+  uint32_t cnt = millis();
   cracked_int_t hexSpeed;
   CAN_TX_msg.id = (101);
   CAN_TX_msg.len = 4;
@@ -1337,7 +1339,7 @@ void lifter_Down() {
       status = CMD_STOP;
       return;
     }
-    if (millis() - cnt > lifterDelay) {
+    if (millis() - cnt > (uint32_t)lifterDelay) {
       lifter_Stop();
       setFault(FAULT_LIFTER_TIMEOUT);
       makeLog(LOG_ERROR, "Lifter timeout!");
@@ -1617,6 +1619,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 }
 
 uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
+    (void)isRadioPort;
     uint32_t now = millis();
     uint8_t lastCmd = NO_NEW_CMD;
     while (port.available() > 0) {
@@ -1751,7 +1754,7 @@ void run_Cmd() {
     moove_Forward();
     long_Unload();
     longWork = 0;
-    if (status == CMD_STOP && distance[1] > 100 || isErrorActive()) return;
+    if ((status == CMD_STOP && distance[1] > 100) || isErrorActive()) return;
     status = CMD_MOVE_RIGHT_MAN;
     moove_Forward();
     status = CMD_STOP;
@@ -1765,7 +1768,7 @@ void run_Cmd() {
     long_Unload(UPQuant);
     UPQuant = 0;
     longWork = 0;
-    if (status == CMD_STOP && distance[1] > 100 || isErrorActive()) return;
+    if ((status == CMD_STOP && distance[1] > 100) || isErrorActive()) return;
     status = CMD_MOVE_RIGHT_MAN;
     moove_Forward();
     status = CMD_STOP;
@@ -1932,10 +1935,9 @@ uint16_t filter_Distance(uint16_t arr[5]) {
 // Определяет текущую позицию шаттла в канале по переднему фронту (передней панели)
 void set_Position() {
   angle = as5600.readAngle();
-  int oldAng = oldAngle;
   while (angle > 4096 || angle < 0) angle = as5600.readAngle();
   int diff = 0;
-  if (motorReverse == 0 ^ inverse) {
+  if ((motorReverse == 0) ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
       uint8_t s = oldAngle / 512;
       uint8_t f = angle / 512;
@@ -1963,7 +1965,7 @@ void set_Position() {
       oldAngle = angle;
       STATS_ATOMIC_UPDATE(sramStats->payload.totalDist += diff);
     }
-  } else if (motorReverse == 1 ^ inverse) {
+  } else if ((motorReverse == 1) ^ inverse) {
     if (oldAngle - angle > 0 && oldAngle - angle <= 2000) {
       uint8_t s = oldAngle / 512;
       uint8_t f = angle / 512;
@@ -2013,7 +2015,7 @@ void fifoLifo_Inverse() {
 // Моргание светодиодом в режиме работы
 void blink_Work() {
   static uint16_t lastLoggedSpeed = 0xFFFF;
-  if (millis() - count2 > blinkTime) { // Счетчик блинков, всего 20 по blinkTime
+  if (millis() - count2 > (uint32_t)blinkTime) { // Счетчик блинков, всего 20 по blinkTime
     counter++;
     Can1.read(CAN_RX_msg);  // Считывание Can шины для очистки буфера
     if (counter == 10 && status != CMD_MANUAL_MODE) {  // Тики для сообщения позиции в канале
@@ -2341,7 +2343,10 @@ void moove_Before_Pallete_F() {
         findPallete = 0;
       } else if (distance[1] > 150 + chnlOffset && distance[1] <= 1500) {
         int spd = (int)((distance[1] - 40) / 18);
-        if (lifterUp && spd > 40) if (spd > oldSpeed && oldSpeed) spd = oldSpeed; else spd = 40;
+        if (lifterUp && spd > 40) {
+          if (spd > oldSpeed && oldSpeed) spd = oldSpeed;
+          else spd = 40;
+        }
         if (spd < 6) spd = 6;
         if (spd > oldSpeed)
           if (oldSpeed > 35) motor_Speed(oldSpeed);
@@ -2565,7 +2570,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   }
   makeLog(LOG_INFO, "Moove F distance = %d Pos = %d", dist, currentPosition);
   uint16_t startAngle = as5600.readAngle();
-  while (startAngle > 4096 || startAngle < 0) startAngle = as5600.readAngle();
+  while (startAngle > 4096) startAngle = as5600.readAngle();
   uint16_t currentAngle = startAngle;
   uint8_t moove = 1;
   count = millis();
@@ -2592,7 +2597,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
     if (millis() - count > 50) {
       set_Position();
       currentAngle = as5600.readAngle();
-      while (currentAngle > 4096 || currentAngle < 0) currentAngle = as5600.readAngle();
+      while (currentAngle > 4096) currentAngle = as5600.readAngle();
       int diff = 0;
       if (!inverse) {
         if (startAngle - currentAngle > 0 && startAngle - currentAngle <= 2000) {
@@ -2690,7 +2695,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
   }
   makeLog(LOG_INFO, "Moove R distance = %d Pos = %d", dist, currentPosition);
   uint16_t startAngle = as5600.readAngle();
-  while (startAngle > 4096 || startAngle < 0) startAngle = as5600.readAngle();
+  while (startAngle > 4096) startAngle = as5600.readAngle();
   uint16_t currentAngle = startAngle;
   uint8_t moove = 1;
   count = millis();
@@ -2717,7 +2722,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
     if (millis() - count > 50) {
       set_Position();
       currentAngle = as5600.readAngle();
-      while (currentAngle > 4096 || currentAngle < 0) currentAngle = as5600.readAngle();
+      while (currentAngle > 4096) currentAngle = as5600.readAngle();
       int diff = 0;
       if (inverse) {
         if (startAngle - currentAngle > 0 && startAngle - currentAngle <= 2000) {
@@ -2868,7 +2873,6 @@ void moove_Reverse() {
   get_Distance();
   oldChannelDistanse = distance[0];
   uint8_t moove = 1;
-  uint8_t maxSpd = 0;
   count = millis();
   while (moove) {
     SystemYield();
@@ -3101,7 +3105,7 @@ void unload_Pallete() {
         blink_Work();
         get_Distance();
       }
-      while (millis() - count < waitTime) {
+      while (millis() - count < (uint32_t)waitTime) {
         SystemYield();
         blink_Work();
         get_Distance();
@@ -3198,7 +3202,6 @@ void load_Pallete() {
       else motor_Speed(20);
     }
     count = millis();
-    uint8_t free = 0;
     int cnt = millis();
     while (moove) {  // Едем до определения поддона
       SystemYield();
@@ -3447,8 +3450,6 @@ void pallete_Counting_F() {
   get_Distance();
   motor_Start_Reverse();
   motor_Speed(28);
-  uint8_t detect = 0;
-  uint8_t detectBoard = 0;
   uint8_t boardCount = 0;
   int count = millis();
   int countBoard = count;
@@ -4353,6 +4354,7 @@ void saveConfigsToFlash() {
 
 // Wrapper for compatibility
 void saveEEPROMData(const EEPROMData& data) {
+    (void)data;
     saveConfigsToFlash();
 }
 
@@ -4466,6 +4468,7 @@ void read_BatteryCharge() {
     if (current > 32768) current = current - 65536;
     current /= 100;
     float capacity = (float)(dataRead[8] * 256 + dataRead[9]) / 100;
+    (void)capacity;
     uint16_t sum = 0;
     uint16_t res = dataRead[i - 2] * 256 + dataRead[i - 1];
     for (uint8_t j = 3; j < i - 2; j++) sum += dataRead[j];
@@ -4553,6 +4556,7 @@ void HardFault_Handler(void) {
     : [hfsr] "=r"(HFSR));
 
   volatile uint32_t HFSR_R = SCB->HFSR;
+  (void)HFSR_R;
 
   count = millis();
   uint8_t k = 0;
