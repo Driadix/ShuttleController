@@ -8,6 +8,16 @@
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
 
+#ifndef CONNECTION_LOGS
+#define CONNECTION_LOGS 0
+#endif
+
+#if CONNECTION_LOGS
+#define DIAG_ONLY(code) do { code; } while(0)
+#else
+#define DIAG_ONLY(code) do { } while(0)
+#endif
+
 #define LOG_RATE_LIMITED(level, interval, format, ...) \
     do { \
         static_assert(sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS, \
@@ -198,6 +208,7 @@ uint32_t lastValidRxTime = 0;
 
 uint16_t errorCode = 0;                // Битмап ошибок
 
+#if CONNECTION_LOGS
 struct LinkDiagCounters {
     uint32_t radioRxValid;
     uint32_t radioRxCrcFail;
@@ -218,8 +229,9 @@ struct LinkDiagCounters {
     uint32_t manualRadioGapMaxMs;
 };
 
-LinkDiagCounters linkDiag = {0};
+LinkDiagCounters linkDiag = {};
 uint32_t linkDiagLastYieldMs = 0;
+#endif
 
 enum ShuttleFault : uint16_t {
     FAULT_NONE             = 0x0000,
@@ -463,11 +475,16 @@ void makeLogImpl(LogLevel level, const char* format, ...) {
 }
 
 static inline void countTxFrame(Stream* port) {
+#if CONNECTION_LOGS
     if (port == &Serial2) linkDiag.radioTxFrames++;
     else if (port == &Serial1) linkDiag.displayTxFrames++;
+#else
+    (void)port;
+#endif
 }
 
 static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
+#if CONNECTION_LOGS
     if (port == &Serial2) {
         linkDiag.radioReplyCount++;
         linkDiag.radioReplyUsSum += elapsedUs;
@@ -477,6 +494,10 @@ static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
         linkDiag.displayReplyUsSum += elapsedUs;
         if (elapsedUs > linkDiag.displayReplyUsMax) linkDiag.displayReplyUsMax = elapsedUs;
     }
+#else
+    (void)port;
+    (void)elapsedUs;
+#endif
 }
 
 void sendTelemetryPacket(Stream* port) {
@@ -751,12 +772,14 @@ void SystemYield() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
 
+#if CONNECTION_LOGS
   if (linkDiagLastYieldMs != 0) {
     uint32_t gap = currentMillis - linkDiagLastYieldMs;
     if (gap > linkDiag.loopJitterMaxMs) linkDiag.loopJitterMaxMs = gap;
     if (gap > 20) linkDiag.loopGapOver20Ms++;
   }
   linkDiagLastYieldMs = currentMillis;
+#endif
   
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
@@ -789,6 +812,7 @@ void SystemYield() {
   uint8_t cmdDisp = pollSerial(Serial1, parserDisplay, false);
   uint8_t cmdRad  = pollSerial(Serial2, parserRadio, true);
 
+#if CONNECTION_LOGS
   uint32_t radioReplyAvgUs = linkDiag.radioReplyCount ? (linkDiag.radioReplyUsSum / linkDiag.radioReplyCount) : 0;
   uint32_t displayReplyAvgUs = linkDiag.displayReplyCount ? (linkDiag.displayReplyUsSum / linkDiag.displayReplyCount) : 0;
 
@@ -811,12 +835,13 @@ void SystemYield() {
   //     (unsigned long)linkDiag.loopJitterMaxMs,
   //     (unsigned long)linkDiag.loopGapOver20Ms,
   //     (unsigned long)linkDiag.manualRadioGapMaxMs);
+#endif
 
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
       cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
       if (lastManualRadioCmdTime != 0) {
           uint32_t gap = currentMillis - lastManualRadioCmdTime;
-          if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
+          DIAG_ONLY(if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;);
       }
       lastManualRadioCmdTime = currentMillis;
   }
@@ -1382,8 +1407,10 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
         header->targetID != shuttleNum) {
-        if (replyPort == &Serial2) linkDiag.radioRxDropTarget++;
-        else if (replyPort == &Serial1) linkDiag.displayRxDropTarget++;
+        DIAG_ONLY(
+            if (replyPort == &Serial2) linkDiag.radioRxDropTarget++;
+            else if (replyPort == &Serial1) linkDiag.displayRxDropTarget++;
+        );
         
         // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &Serial2) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
         return NO_NEW_CMD;
@@ -1595,16 +1622,20 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
     while (port.available() > 0) {
         FrameHeader* header = parser.feed(port.read(), now);
         if (parser.crcError) {
-            if (isRadioPort) linkDiag.radioRxCrcFail++;
-            else linkDiag.displayRxCrcFail++;
+            DIAG_ONLY(
+                if (isRadioPort) linkDiag.radioRxCrcFail++;
+                else linkDiag.displayRxCrcFail++;
+            );
             parser.crcError = false;
             // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=crc src=%s count=%lu",
             //                  isRadioPort ? "radio" : "display",
             //                  (unsigned long)(isRadioPort ? linkDiag.radioRxCrcFail : linkDiag.displayRxCrcFail));
         }
         if (header != nullptr) {
-            if (isRadioPort) linkDiag.radioRxValid++;
-            else linkDiag.displayRxValid++;
+            DIAG_ONLY(
+                if (isRadioPort) linkDiag.radioRxValid++;
+                else linkDiag.displayRxValid++;
+            );
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
             if (res != NO_NEW_CMD) {
                 if (res == CMD_STOP || res == CMD_STOP_MANUAL) return res;
