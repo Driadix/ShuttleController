@@ -792,25 +792,25 @@ void SystemYield() {
   uint32_t radioReplyAvgUs = linkDiag.radioReplyCount ? (linkDiag.radioReplyUsSum / linkDiag.radioReplyCount) : 0;
   uint32_t displayReplyAvgUs = linkDiag.displayReplyCount ? (linkDiag.displayReplyUsSum / linkDiag.displayReplyCount) : 0;
 
-  LOG_RATE_LIMITED(LOG_INFO, 10000,
-      "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
-      (unsigned long)linkDiag.radioRxValid,
-      (unsigned long)linkDiag.radioRxCrcFail,
-      (unsigned long)linkDiag.radioRxDropTarget,
-      (unsigned long)linkDiag.radioTxFrames,
-      (unsigned long)linkDiag.radioReplyCount,
-      (unsigned long)radioReplyAvgUs,
-      (unsigned long)linkDiag.radioReplyUsMax,
-      (unsigned long)linkDiag.displayRxValid,
-      (unsigned long)linkDiag.displayRxCrcFail,
-      (unsigned long)linkDiag.displayRxDropTarget,
-      (unsigned long)linkDiag.displayTxFrames,
-      (unsigned long)linkDiag.displayReplyCount,
-      (unsigned long)displayReplyAvgUs,
-      (unsigned long)linkDiag.displayReplyUsMax,
-      (unsigned long)linkDiag.loopJitterMaxMs,
-      (unsigned long)linkDiag.loopGapOver20Ms,
-      (unsigned long)linkDiag.manualRadioGapMaxMs);
+  // LOG_RATE_LIMITED(LOG_INFO, 10000,
+  //     "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
+  //     (unsigned long)linkDiag.radioRxValid,
+  //     (unsigned long)linkDiag.radioRxCrcFail,
+  //     (unsigned long)linkDiag.radioRxDropTarget,
+  //     (unsigned long)linkDiag.radioTxFrames,
+  //     (unsigned long)linkDiag.radioReplyCount,
+  //     (unsigned long)radioReplyAvgUs,
+  //     (unsigned long)linkDiag.radioReplyUsMax,
+  //     (unsigned long)linkDiag.displayRxValid,
+  //     (unsigned long)linkDiag.displayRxCrcFail,
+  //     (unsigned long)linkDiag.displayRxDropTarget,
+  //     (unsigned long)linkDiag.displayTxFrames,
+  //     (unsigned long)linkDiag.displayReplyCount,
+  //     (unsigned long)displayReplyAvgUs,
+  //     (unsigned long)linkDiag.displayReplyUsMax,
+  //     (unsigned long)linkDiag.loopJitterMaxMs,
+  //     (unsigned long)linkDiag.loopGapOver20Ms,
+  //     (unsigned long)linkDiag.manualRadioGapMaxMs);
 
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
       cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
@@ -968,7 +968,7 @@ void loop() {
       else if (status == CMD_LONG_LOAD) { currentOperation = STATE_LONG_LOAD; run_Cmd(); }
       else if (status == CMD_LONG_UNLOAD) { currentOperation = STATE_LONG_UNLOAD; run_Cmd(); }
 
-      if (millis() - lastManualActionTime > 5000) {
+      if (millis() - lastManualRadioCmdTime > 5000) {
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
           status = CMD_STOP; 
@@ -1385,7 +1385,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         if (replyPort == &Serial2) linkDiag.radioRxDropTarget++;
         else if (replyPort == &Serial1) linkDiag.displayRxDropTarget++;
         
-        LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &Serial2) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
+        // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &Serial2) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
         return NO_NEW_CMD;
     }
 
@@ -1598,9 +1598,9 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
             if (isRadioPort) linkDiag.radioRxCrcFail++;
             else linkDiag.displayRxCrcFail++;
             parser.crcError = false;
-            LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=crc src=%s count=%lu",
-                             isRadioPort ? "radio" : "display",
-                             (unsigned long)(isRadioPort ? linkDiag.radioRxCrcFail : linkDiag.displayRxCrcFail));
+            // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=crc src=%s count=%lu",
+            //                  isRadioPort ? "radio" : "display",
+            //                  (unsigned long)(isRadioPort ? linkDiag.radioRxCrcFail : linkDiag.displayRxCrcFail));
         }
         if (header != nullptr) {
             if (isRadioPort) linkDiag.radioRxValid++;
