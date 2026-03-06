@@ -119,7 +119,9 @@ char logStringBuffer[256];
 
 enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
 CoreOpMode currentMode = CoreOpMode::IDLE;
-uint32_t lastManualActionTime = 0;
+uint32_t lastManualRadioCmdTime = 0;
+bool manualControlFromRadio = false;
+bool pendingDisplayManualModeBypass = false;
 
 HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
 HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
@@ -195,6 +197,29 @@ volatile bool pendingEepromSave = false;
 uint32_t lastValidRxTime = 0;
 
 uint16_t errorCode = 0;                // Битмап ошибок
+
+struct LinkDiagCounters {
+    uint32_t radioRxValid;
+    uint32_t radioRxCrcFail;
+    uint32_t radioRxDropTarget;
+    uint32_t radioTxFrames;
+    uint32_t radioReplyCount;
+    uint32_t radioReplyUsSum;
+    uint32_t radioReplyUsMax;
+    uint32_t displayRxValid;
+    uint32_t displayRxCrcFail;
+    uint32_t displayRxDropTarget;
+    uint32_t displayTxFrames;
+    uint32_t displayReplyCount;
+    uint32_t displayReplyUsSum;
+    uint32_t displayReplyUsMax;
+    uint32_t loopJitterMaxMs;
+    uint32_t loopGapOver20Ms;
+    uint32_t manualRadioGapMaxMs;
+};
+
+LinkDiagCounters linkDiag = {0};
+uint32_t linkDiagLastYieldMs = 0;
 
 enum ShuttleFault : uint16_t {
     FAULT_NONE             = 0x0000,
@@ -437,6 +462,23 @@ void makeLogImpl(LogLevel level, const char* format, ...) {
   sendLog(level, logStringBuffer, &Serial1);
 }
 
+static inline void countTxFrame(Stream* port) {
+    if (port == &Serial2) linkDiag.radioTxFrames++;
+    else if (port == &Serial1) linkDiag.displayTxFrames++;
+}
+
+static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
+    if (port == &Serial2) {
+        linkDiag.radioReplyCount++;
+        linkDiag.radioReplyUsSum += elapsedUs;
+        if (elapsedUs > linkDiag.radioReplyUsMax) linkDiag.radioReplyUsMax = elapsedUs;
+    } else if (port == &Serial1) {
+        linkDiag.displayReplyCount++;
+        linkDiag.displayReplyUsSum += elapsedUs;
+        if (elapsedUs > linkDiag.displayReplyUsMax) linkDiag.displayReplyUsMax = elapsedUs;
+    }
+}
+
 void sendTelemetryPacket(Stream* port) {
     if (!port) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
@@ -474,6 +516,7 @@ void sendTelemetryPacket(Stream* port) {
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
     port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
 }
 
 void sendSensorPacket(Stream* port) {
@@ -515,6 +558,7 @@ void sendSensorPacket(Stream* port) {
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
     port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
 }
 
 void sendStatsPacket(Stream* port) {
@@ -550,6 +594,7 @@ void sendStatsPacket(Stream* port) {
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
     port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
 }
 
 // Инициация устройств
@@ -705,6 +750,13 @@ void setup() {
 void SystemYield() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
+
+  if (linkDiagLastYieldMs != 0) {
+    uint32_t gap = currentMillis - linkDiagLastYieldMs;
+    if (gap > linkDiag.loopJitterMaxMs) linkDiag.loopJitterMaxMs = gap;
+    if (gap > 20) linkDiag.loopGapOver20Ms++;
+  }
+  linkDiagLastYieldMs = currentMillis;
   
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
@@ -734,16 +786,43 @@ void SystemYield() {
       STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
   }
 
-  uint8_t cmdDisp = pollSerial(Serial1, parserDisplay);
-  uint8_t cmdRad  = pollSerial(Serial2, parserRadio);
+  uint8_t cmdDisp = pollSerial(Serial1, parserDisplay, false);
+  uint8_t cmdRad  = pollSerial(Serial2, parserRadio, true);
+
+  uint32_t radioReplyAvgUs = linkDiag.radioReplyCount ? (linkDiag.radioReplyUsSum / linkDiag.radioReplyCount) : 0;
+  uint32_t displayReplyAvgUs = linkDiag.displayReplyCount ? (linkDiag.displayReplyUsSum / linkDiag.displayReplyCount) : 0;
+
+  // LOG_RATE_LIMITED(LOG_INFO, 10000,
+  //     "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
+  //     (unsigned long)linkDiag.radioRxValid,
+  //     (unsigned long)linkDiag.radioRxCrcFail,
+  //     (unsigned long)linkDiag.radioRxDropTarget,
+  //     (unsigned long)linkDiag.radioTxFrames,
+  //     (unsigned long)linkDiag.radioReplyCount,
+  //     (unsigned long)radioReplyAvgUs,
+  //     (unsigned long)linkDiag.radioReplyUsMax,
+  //     (unsigned long)linkDiag.displayRxValid,
+  //     (unsigned long)linkDiag.displayRxCrcFail,
+  //     (unsigned long)linkDiag.displayRxDropTarget,
+  //     (unsigned long)linkDiag.displayTxFrames,
+  //     (unsigned long)linkDiag.displayReplyCount,
+  //     (unsigned long)displayReplyAvgUs,
+  //     (unsigned long)linkDiag.displayReplyUsMax,
+  //     (unsigned long)linkDiag.loopJitterMaxMs,
+  //     (unsigned long)linkDiag.loopGapOver20Ms,
+  //     (unsigned long)linkDiag.manualRadioGapMaxMs);
 
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
-      cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
-      lastManualActionTime = currentMillis;
+      cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
+      if (lastManualRadioCmdTime != 0) {
+          uint32_t gap = currentMillis - lastManualRadioCmdTime;
+          if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
+      }
+      lastManualRadioCmdTime = currentMillis;
   }
   
   if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
-      if (currentMillis - lastManualActionTime > 500) {
+      if (manualControlFromRadio && (currentMillis - lastManualRadioCmdTime > 800)) {
           status = CMD_STOP_MANUAL;
           makeLog(LOG_WARN, "Connection drop timeout!");
           motor_Stop();
@@ -753,18 +832,29 @@ void SystemYield() {
   // 1. Absolute highest priority: STOP commands from ANY source
   if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
       status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
+      manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
+      pendingDisplayManualModeBypass = false;
       motor_Stop(); // Force immediate reaction
   } 
   // 2. Radio Remote commands override C# Display commands (Operator on the floor has priority over the office)
   else if (cmdRad != NO_NEW_CMD) {
       if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
           status = cmdRad;
+          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN) {
+              manualControlFromRadio = true;
+              lastManualRadioCmdTime = currentMillis;
+              pendingDisplayManualModeBypass = false;
+          }
       }
   } 
   // 3. C# Display commands are processed last
   else if (cmdDisp != NO_NEW_CMD) {
       if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
           status = cmdDisp;
+          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
+              manualControlFromRadio = false;
+              pendingDisplayManualModeBypass = true;
+          }
       }
   }
 
@@ -815,7 +905,11 @@ void loop() {
             lastPalletePosition = 0;
             send_Cmd(); 
 
-            if (status == CMD_MANUAL_MODE) {
+            if (status == CMD_MANUAL_MODE || pendingDisplayManualModeBypass) {
+                if (pendingDisplayManualModeBypass) {
+                    makeLog(LOG_INFO, "Manual mode bypass from display command: 0x%02X", status);
+                }
+                pendingDisplayManualModeBypass = false;
                 currentMode = CoreOpMode::MANUAL;
             } else {
                 currentMode = CoreOpMode::AUTO_EXEC;
@@ -874,7 +968,7 @@ void loop() {
       else if (status == CMD_LONG_LOAD) { currentOperation = STATE_LONG_LOAD; run_Cmd(); }
       else if (status == CMD_LONG_UNLOAD) { currentOperation = STATE_LONG_UNLOAD; run_Cmd(); }
 
-      if (millis() - lastManualActionTime > 5000) {
+      if (millis() - lastManualRadioCmdTime > 5000) {
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
           status = CMD_STOP; 
@@ -1281,14 +1375,17 @@ void sendAck(uint8_t seq, AckResult result, Stream* port) {
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
     port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
 }
 
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
         header->targetID != shuttleNum) {
+        if (replyPort == &Serial2) linkDiag.radioRxDropTarget++;
+        else if (replyPort == &Serial1) linkDiag.displayRxDropTarget++;
         
-        LOG_RATE_LIMITED(LOG_WARN, 2000, "Packet Dropped. Expected ID: %d, Got: %d", shuttleNum, header->targetID);
+        // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &Serial2) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
         return NO_NEW_CMD;
     }
 
@@ -1300,13 +1397,19 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     // ---------------------------------------------
 
     if (realMsgID == MSG_REQ_HEARTBEAT) {
+        uint32_t startUs = micros();
         sendTelemetryPacket(replyPort);
+        countReplyTiming(replyPort, micros() - startUs);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_REQ_SENSORS) {
+        uint32_t startUs = micros();
         sendSensorPacket(replyPort);
+        countReplyTiming(replyPort, micros() - startUs);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_REQ_STATS) {
+        uint32_t startUs = micros();
         sendStatsPacket(replyPort);
+        countReplyTiming(replyPort, micros() - startUs);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CMD_SIMPLE || realMsgID == MSG_CMD_WITH_ARG) {
         uint8_t reqCmd = (realMsgID == MSG_CMD_SIMPLE) ?
@@ -1405,6 +1508,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
 
     } else if (realMsgID == MSG_CONFIG_SYNC_REQ) {
+        uint32_t startUs = micros();
         FullConfigPacket rep;
         rep.interPallet   = interPalleteDistance;
         rep.shuttleLen    = shuttleLength;
@@ -1433,9 +1537,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         
         if (replyPort->availableForWrite() >= totalLen + 2) {
             replyPort->write(localTxBuffer, totalLen + 2);
+            countTxFrame(replyPort);
+            countReplyTiming(replyPort, micros() - startUs);
         }
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_GET) {
+        uint32_t startUs = micros();
         ConfigPacket* req = (ConfigPacket*)payload;
         ConfigPacket rep;
         rep.paramID = req->paramID;
@@ -1471,6 +1578,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         if (replyPort->availableForWrite() >= totalLen + 2) {
           replyPort->write(localTxBuffer, totalLen + 2);
+          countTxFrame(replyPort);
+          countReplyTiming(replyPort, micros() - startUs);
         } else {
           LOG_RATE_LIMITED(LOG_WARN, 1000, "Dropped Config Reply: TX Buffer Full");
         }
@@ -1480,12 +1589,22 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     return NO_NEW_CMD;
 }
 
-uint8_t pollSerial(Stream& port, ProtocolParser& parser) {
+uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
     uint32_t now = millis();
     uint8_t lastCmd = NO_NEW_CMD;
     while (port.available() > 0) {
         FrameHeader* header = parser.feed(port.read(), now);
+        if (parser.crcError) {
+            if (isRadioPort) linkDiag.radioRxCrcFail++;
+            else linkDiag.displayRxCrcFail++;
+            parser.crcError = false;
+            // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=crc src=%s count=%lu",
+            //                  isRadioPort ? "radio" : "display",
+            //                  (unsigned long)(isRadioPort ? linkDiag.radioRxCrcFail : linkDiag.displayRxCrcFail));
+        }
         if (header != nullptr) {
+            if (isRadioPort) linkDiag.radioRxValid++;
+            else linkDiag.displayRxValid++;
             uint8_t res = processPacket(header, (uint8_t*)header + sizeof(FrameHeader), &port);
             if (res != NO_NEW_CMD) {
                 if (res == CMD_STOP || res == CMD_STOP_MANUAL) return res;
@@ -3715,7 +3834,7 @@ void moove_Right() {
   int cnt = millis();
   get_Distance();
   
-  lastValidRxTime = millis();  
+  lastManualRadioCmdTime = millis();
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку 
@@ -3745,7 +3864,7 @@ void moove_Right() {
       set_Position();
     }
  
-    if (millis() - lastValidRxTime > 500) {
+    if (manualControlFromRadio && (millis() - lastManualRadioCmdTime > 800)) {
       motor_Stop();
       moove = 0;
       makeLog(LOG_WARN, "Radio link timeout. Halting."); 
@@ -3765,7 +3884,7 @@ void moove_Left() {
   motor_Start_Forward();
   int cnt = millis();
   get_Distance();
-  lastValidRxTime = millis();
+  lastManualRadioCmdTime = millis();
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку
@@ -3793,7 +3912,7 @@ void moove_Left() {
       }
       set_Position();
     } 
-    if (millis() - lastValidRxTime > 500) {
+    if (manualControlFromRadio && (millis() - lastManualRadioCmdTime > 800)) {
       motor_Stop();
       moove = 0;
       makeLog(LOG_WARN, "Radio link timeout. Halting.");
