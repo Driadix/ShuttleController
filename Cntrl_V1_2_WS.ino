@@ -43,6 +43,9 @@
     } while(0)
 
 void makeLogImpl(LogLevel level, const char* format, ...);
+static inline bool isValidProvisionedShuttleId(int32_t id);
+static inline bool isProvisionedShuttle();
+static inline bool isSupportedCommand(uint8_t cmd);
 
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
@@ -61,6 +64,7 @@ SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
 ProtocolParser parserRadio;
 ProtocolParser parserDisplay;
 E32Radio::Radio e32Radio;
+constexpr E32Radio::UartBaud kRadioHostBaud = E32Radio::UartBaud::B57600;
 
 #define STATS_ATOMIC_UPDATE(action) \
     do { \
@@ -250,7 +254,6 @@ uint8_t calibrateSensor_R[3] = { 100, 100, 100 };                    // Масс
 
 uint8_t counter = 0;                   // Счетчик для красивых морганий в рабочем режиме
 uint8_t debuger = 0;                   // Счетчик для дебагера
-uint8_t pultConnect = 0;               // Флаг подключения пульта ДУ
 uint8_t sensorOff = 0;                 // Флаг отключения сенсоров в ручном режиме
 uint8_t lastPallete = 0;               // Флаг позиции последнего паллета
 uint8_t minBattCharge = 20;            // Минимальный заряд батареи
@@ -261,7 +264,6 @@ int blinkTime = 80;                    // Время квантования кр
 int waitTime = 15000;                  // Время ожидания при выгрузке
 int count = millis();                  // Счетчик времени общего назначения
 int count2 = count;                    // Счетчик времени общего назначения
-int countPult = count;                 // Счетчик времени пульта
 int countSensor = count;               // Счетчик времени опроса датчиков
 int countMoove = count;                // Счетчик времени обновления передачи скорости по Can шине
 int countBatt = count;                 // Счетчик времени батареи
@@ -366,10 +368,13 @@ void setup() {
 
 
   SerialDisplay.begin(230400, SERIAL_8E1);
-  SerialRS485.begin(57600);
-  SerialLora.begin(57600);
+  SerialRS485.begin(9600);
+  SerialLora.begin(E32Radio::uartBaudValue(kRadioHostBaud));
 
-  while (!SerialDisplay) {}
+  uint32_t displayWaitStart = millis();
+  while (!SerialDisplay && (millis() - displayWaitStart < 1500)) {
+    delay(10);
+  }
 
   initStatsSRAM();
 
@@ -527,15 +532,6 @@ void loop() {
         send_Cmd();
       }
 
-      if (millis() - countPult > 100000 && pultConnect) {
-        pultConnect = 0;
-        status = 0;
-      }
-      else if (millis() - countPult > 180000 && distance[1] > 150 && digitalRead(CHANNEL) && currentPosition > 200) {
-        makeLog(LOG_WARN, "Disconnect time off, dist = %d", distance[1]);
-        if (status != 0) status = 0;
-        moove_Forward();
-      }
       detect_Pallete();
       break;
     }
@@ -1003,6 +999,11 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         uint8_t reqCmd = (realMsgID == MSG_CMD_SIMPLE) ?
                          ((SimpleCmdPacket*)payload)->cmdType : ((ParamCmdPacket*)payload)->cmdType;
 
+        if (!isSupportedCommand(reqCmd)) {
+            if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+            return NO_NEW_CMD;
+        }
+
         if (reqCmd == CMD_SAVE_EEPROM) {
             pendingEepromSave = true;
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
@@ -1012,6 +1013,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
             return NO_NEW_CMD;
         }
+
+        if (!isProvisionedShuttle()) {
+            if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
+            return NO_NEW_CMD;
+        }
+
         bool inChannel = digitalRead(CHANNEL);
 
         if (isErrorActive() && !isOverrideCommand(reqCmd)) {
@@ -1046,26 +1053,90 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
+        bool shuttleIdChanged = false;
         switch (cfg->paramID) {
-            case CFG_SHUTTLE_NUM: eepromData.shuttleNum = cfg->value; shuttleNum = cfg->value; break;
-            case CFG_INTER_PALLET: eepromData.interPalleteDistance = cfg->value; interPalleteDistance = cfg->value; break;
-            case CFG_SHUTTLE_LEN: eepromData.shuttleLength = cfg->value; shuttleLength = cfg->value; break;
-            case CFG_MAX_SPEED: eepromData.maxSpeed = cfg->value; maxSpeed = cfg->value; break;
-            case CFG_MIN_BATT: eepromData.minBattCharge = cfg->value; minBattCharge = cfg->value; break;
-            case CFG_WAIT_TIME: eepromData.waitTime = cfg->value; waitTime = cfg->value; break;
-            case CFG_MPR_OFFSET: eepromData.mprOffset = cfg->value; mprOffset = cfg->value; break;
-            case CFG_CHNL_OFFSET: eepromData.chnlOffset = cfg->value; chnlOffset = cfg->value; break;
-            case CFG_FIFO_LIFO: eepromData.fifoLifo = cfg->value; fifoLifo = cfg->value; break;
-            case CFG_REVERSE_MODE:
-                eepromData.inverse = cfg->value;
-                inverse = cfg->value;
-                currentPosition = channelLength - currentPosition - 800;
+            case CFG_SHUTTLE_NUM: {
+                if (!isValidProvisionedShuttleId(cfg->value)) {
+                    if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+                    return NO_NEW_CMD;
+                }
+                uint8_t newId = (uint8_t)cfg->value;
+                shuttleIdChanged = (eepromData.shuttleNum != newId);
+                eepromData.shuttleNum = newId;
+                shuttleNum = newId;
                 break;
+            }
+            case CFG_INTER_PALLET: {
+                uint16_t value = (uint16_t)cfg->value;
+                eepromData.interPalleteDistance = value;
+                interPalleteDistance = value;
+                break;
+            }
+            case CFG_SHUTTLE_LEN: {
+                uint16_t value = (uint16_t)cfg->value;
+                eepromData.shuttleLength = value;
+                shuttleLength = value;
+                break;
+            }
+            case CFG_MAX_SPEED: {
+                uint16_t value = (uint16_t)cfg->value;
+                eepromData.maxSpeed = value;
+                maxSpeed = value;
+                break;
+            }
+            case CFG_MIN_BATT: {
+                uint8_t value = (uint8_t)cfg->value;
+                eepromData.minBattCharge = value;
+                minBattCharge = value;
+                break;
+            }
+            case CFG_WAIT_TIME: {
+                int value = (int)cfg->value;
+                eepromData.waitTime = value;
+                waitTime = value;
+                break;
+            }
+            case CFG_MPR_OFFSET: {
+                int8_t value = (int8_t)cfg->value;
+                eepromData.mprOffset = value;
+                mprOffset = value;
+                break;
+            }
+            case CFG_CHNL_OFFSET: {
+                int8_t value = (int8_t)cfg->value;
+                eepromData.chnlOffset = value;
+                chnlOffset = value;
+                break;
+            }
+            case CFG_FIFO_LIFO: {
+                uint8_t value = (uint8_t)cfg->value;
+                eepromData.fifoLifo = value;
+                fifoLifo = value;
+                break;
+            }
+            case CFG_REVERSE_MODE:
+                if (eepromData.inverse != (uint8_t)cfg->value) {
+                    currentPosition = channelLength - currentPosition - 800;
+                }
+                eepromData.inverse = (uint8_t)cfg->value;
+                inverse = (uint8_t)cfg->value;
+                break;
+            default:
+                if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+                return NO_NEW_CMD;
         }
+        if (shuttleIdChanged) pendingEepromSave = true;
         if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_SYNC_PUSH) {
         FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
+
+        if (!isValidProvisionedShuttleId(fullCfg->shuttleNumber)) {
+            if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+            return NO_NEW_CMD;
+        }
+
+        bool shuttleIdChanged = (eepromData.shuttleNum != fullCfg->shuttleNumber);
         
         eepromData.interPalleteDistance = fullCfg->interPallet;
         interPalleteDistance            = fullCfg->interPallet;
@@ -1075,10 +1146,10 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         maxSpeed                        = fullCfg->maxSpeed;
         eepromData.waitTime             = fullCfg->waitTime;
         waitTime                        = fullCfg->waitTime;
-        eepromData.mprOffset            = fullCfg->mprOffset;
-        mprOffset                       = fullCfg->mprOffset;
-        eepromData.chnlOffset           = fullCfg->chnlOffset;
-        chnlOffset                      = fullCfg->chnlOffset;
+        eepromData.mprOffset            = (int8_t)fullCfg->mprOffset;
+        mprOffset                       = (int8_t)fullCfg->mprOffset;
+        eepromData.chnlOffset           = (int8_t)fullCfg->chnlOffset;
+        chnlOffset                      = (int8_t)fullCfg->chnlOffset;
         eepromData.shuttleNum           = fullCfg->shuttleNumber;
         shuttleNum                      = fullCfg->shuttleNumber;
         eepromData.minBattCharge        = fullCfg->minBatt;
@@ -1087,6 +1158,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         fifoLifo                        = fullCfg->fifoLifo;
         eepromData.inverse              = fullCfg->reverseMode;
         inverse                         = fullCfg->reverseMode;
+
+        if (shuttleIdChanged) pendingEepromSave = true;
         
         if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
@@ -1616,7 +1689,8 @@ void blink_Warning() {
   digitalWrite(ZOOMER, HIGH);
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
-  while (millis() - count < 100)
+  while (millis() - count < 100) {
+    SystemYield();
     if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
@@ -1624,12 +1698,14 @@ void blink_Warning() {
       digitalWrite(BOARD_LED, LOW);
       return;
     }
+  }
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(ZOOMER, LOW);
   digitalWrite(BOARD_LED, LOW);
   count = millis();
-  while (millis() - count < 100)
+  while (millis() - count < 100) {
+    SystemYield();
     if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
@@ -1637,12 +1713,14 @@ void blink_Warning() {
       digitalWrite(BOARD_LED, LOW);
       return;
     }
+  }
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(ZOOMER, HIGH);
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
-  while (millis() - count < 100)
+  while (millis() - count < 100) {
+    SystemYield();
     if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
@@ -1650,12 +1728,14 @@ void blink_Warning() {
       digitalWrite(BOARD_LED, LOW);
       return;
     }
+  }
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(ZOOMER, LOW);
   digitalWrite(BOARD_LED, LOW);
   count = millis();
-  while (millis() - count < 100)
+  while (millis() - count < 100) {
+    SystemYield();
     if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
@@ -1663,12 +1743,14 @@ void blink_Warning() {
       digitalWrite(BOARD_LED, LOW);
       return;
     }
+  }
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(ZOOMER, HIGH);
   digitalWrite(BOARD_LED, HIGH);
   count = millis();
-  while (millis() - count < 100)
+  while (millis() - count < 100) {
+    SystemYield();
     if (shouldAbortLoop()) {
       digitalWrite(RED_LED, LOW);
       digitalWrite(GREEN_LED, LOW);
@@ -1676,6 +1758,7 @@ void blink_Warning() {
       digitalWrite(BOARD_LED, LOW);
       return;
     }
+  }
   digitalWrite(RED_LED, LOW);
   digitalWrite(ZOOMER, LOW);
   digitalWrite(BOARD_LED, LOW);
@@ -4004,6 +4087,13 @@ void read_EEPROM_Data() {
     saveConfigsToFlash();
     makeLog(LOG_WARN, "EEPROM reset. Provisioning State (ID=0).");
   }
+
+  if (!isValidProvisionedShuttleId(shuttleNum)) {
+    shuttleNum = 0;
+    eepromData.shuttleNum = 0;
+    makeLog(LOG_WARN, "Invalid shuttle ID in Flash. Provisioning State (ID=0).");
+  }
+
   if (minBattCharge > 50) minBattCharge = 20;
   if (waitTime < 5000) waitTime = 5000;
   else if (waitTime > 30000) waitTime = 30000;
@@ -4273,7 +4363,7 @@ void blink() {
 
 
 static void applyRadioConfigAtBoot() {
-  const bool shuttleAddressValid = E32Radio::isValidNodeId(shuttleNum);
+  const bool shuttleAddressValid = isProvisionedShuttle() && E32Radio::isValidNodeId(shuttleNum);
   const uint8_t radioAddress = shuttleAddressValid ? shuttleNum : E32Radio::kAddressLowUnassigned;
   if (!shuttleAddressValid) {
     makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
@@ -4283,7 +4373,7 @@ static void applyRadioConfigAtBoot() {
   const E32Radio::LogicalConfig desiredConfig = E32Radio::makeTransparentConfig(
     address,
     E32Radio::kDefaultChannel433,
-    E32Radio::UartBaud::B57600,
+    kRadioHostBaud,
     E32Radio::AirDataRate::B9600,
     E32Radio::TxPower::Dbm27,
     E32Radio::UartParity::U8N1,
@@ -4297,7 +4387,7 @@ static void applyRadioConfigAtBoot() {
 
   e32Radio.init(&SerialLora,
                 LORA,
-                E32Radio::uartBaudValue(desiredConfig.uartBaud),
+                E32Radio::uartBaudValue(kRadioHostBaud),
                 E32Radio::ConfigModeLevel::ConfigHigh, NULL);
 
   const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
@@ -4319,7 +4409,6 @@ static ShuttleState mapCmdToOperation(uint8_t cmd) {
         case CMD_LONG_UNLOAD_QTY: return STATE_LONG_UNLOAD_QTY;
         case CMD_COMPACT_F:
         case CMD_COMPACT_R:       return STATE_COMPACT;
-        case CMD_EVACUATE_ON:     return STATE_EVACUATE;
         case CMD_DEMO:            return STATE_DEMO;
         case CMD_COUNT_PALLETS:   return STATE_COUNT_PALLETS;
         case CMD_MOVE_DIST_F:     return STATE_MOVE_FWD;
@@ -4332,6 +4421,47 @@ static ShuttleState mapCmdToOperation(uint8_t cmd) {
         case CMD_MOVE_RIGHT_MAN:
         case CMD_MOVE_LEFT_MAN:   return STATE_MANUAL;
         default:                  return STATE_IDLE;
+    }
+}
+
+static inline bool isValidProvisionedShuttleId(int32_t id) {
+    return (id >= 1 && id <= 254);
+}
+
+static inline bool isProvisionedShuttle() {
+    return isValidProvisionedShuttleId(shuttleNum);
+}
+
+static inline bool isSupportedCommand(uint8_t cmd) {
+    switch (cmd) {
+        case CMD_STOP:
+        case CMD_STOP_MANUAL:
+        case CMD_SYSTEM_RESET:
+        case CMD_RESET_ERROR:
+        case CMD_MANUAL_MODE:
+        case CMD_DEMO:
+        case CMD_HOME:
+        case CMD_MOVE_RIGHT_MAN:
+        case CMD_MOVE_LEFT_MAN:
+        case CMD_MOVE_DIST_R:
+        case CMD_MOVE_DIST_F:
+        case CMD_LIFT_UP:
+        case CMD_LIFT_DOWN:
+        case CMD_CALIBRATE:
+        case CMD_LOAD:
+        case CMD_UNLOAD:
+        case CMD_LONG_LOAD:
+        case CMD_LONG_UNLOAD:
+        case CMD_LONG_UNLOAD_QTY:
+        case CMD_COMPACT_F:
+        case CMD_COMPACT_R:
+        case CMD_COUNT_PALLETS:
+        case CMD_SAVE_EEPROM:
+        case CMD_GET_CONFIG:
+        case CMD_FIRMWARE_UPDATE:
+            return true;
+        default:
+            return false;
     }
 }
 
