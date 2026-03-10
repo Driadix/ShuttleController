@@ -7,6 +7,7 @@
 #include <IWatchdog.h>
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
+#include "E32Radio.hpp"
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
@@ -58,6 +59,7 @@ SecureStats* volatile sramStats = (SecureStats*)BKPSRAM_BASE_ADDR;
 
 ProtocolParser parserRadio;
 ProtocolParser parserDisplay;
+E32Radio::Radio e32Radio;
 
 #define STATS_ATOMIC_UPDATE(action) \
     do { \
@@ -332,6 +334,45 @@ uint16_t data[4][5] = {
 };
 
 #pragma endregion
+
+static void applyRadioConfigAtBoot() {
+  const bool shuttleAddressValid = E32Radio::isValidNodeId(shuttleNum);
+  const uint8_t radioAddress = shuttleAddressValid ? shuttleNum : E32Radio::kAddressLowUnassigned;
+  if (!shuttleAddressValid) {
+    makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
+  }
+
+  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
+  const E32Radio::LogicalConfig desiredConfig = E32Radio::makeTransparentConfig(
+    address,
+    E32Radio::kDefaultChannel433,
+    E32Radio::UartBaud::B57600,
+    E32Radio::AirDataRate::B9600,
+    E32Radio::TxPower::Dbm27,
+    E32Radio::UartParity::U8N1,
+    E32Radio::IoDriveMode::PushPull,
+    E32Radio::WakeupTime::Ms250,
+    E32Radio::Fec::On
+  );
+
+  E32Radio::EnsureOptions ensureOptions = {};
+  ensureOptions.maxAttempts = E32Radio::kDefaultEnsureAttempts;
+
+  e32Radio.init(&Serial2,
+                LORA,
+                E32Radio::uartBaudValue(desiredConfig.uartBaud),
+                E32Radio::ConfigModeLevel::ConfigHigh,
+                &Serial);
+
+  const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
+  if (ensureResult.ok()) {
+    makeLog(LOG_INFO, "Radio cfg ok: addr=%u baud=%lu", radioAddress,
+            (unsigned long)E32Radio::uartBaudValue(desiredConfig.uartBaud));
+  } else {
+    makeLog(LOG_WARN, "Radio cfg failed(%s): addr=%u",
+            E32Radio::statusToString(ensureResult.status), radioAddress);
+  }
+}
 
 // Maps an accepted command to the high-level ShuttleState for protocol telemetry.
 // This is the Hexagonal "adapter" between internal domain logic and external DTO.
@@ -621,7 +662,7 @@ void setup() {
 
 
   Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
-  Serial2.begin(9600);                // UART2 порт на пинах РА2 РА3, используется для радиомодуля
+  Serial2.begin(57600);               // UART2 for radio module (single-baud policy)
   Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
 
   while (!Serial1) {}
@@ -634,6 +675,7 @@ void setup() {
   __HAL_RCC_CLEAR_RESET_FLAGS();
 
   read_EEPROM_Data();
+  applyRadioConfigAtBoot();
   analogReadResolution(12);
 
   makeLog(LOG_INFO, "Start init board...");
@@ -664,16 +706,7 @@ void setup() {
   delay(10);
   if (TOF_Is_Device_Present(3)) makeLog(LOG_INFO, "TOF pallete sensor reverse present...");
   else makeLog(LOG_ERROR, "TOF pallete sensor reverse failed!!!");
-  
-  digitalWrite(LORA, HIGH);
-  delay(150);
-  uint8_t loraConfig[] = { 0xC0, 0x00, 0x00, 0x1C, 0x10, 0x47 };
-  Serial2.write(loraConfig, sizeof(loraConfig));
-  delay(100);
-  while(Serial2.available()) Serial2.read();
-  digitalWrite(LORA, LOW);
-  delay(150);
-  
+
   makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
 
@@ -775,25 +808,25 @@ void SystemYield() {
   uint32_t radioReplyAvgUs = linkDiag.radioReplyCount ? (linkDiag.radioReplyUsSum / linkDiag.radioReplyCount) : 0;
   uint32_t displayReplyAvgUs = linkDiag.displayReplyCount ? (linkDiag.displayReplyUsSum / linkDiag.displayReplyCount) : 0;
 
-  // LOG_RATE_LIMITED(LOG_INFO, 10000,
-  //     "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
-  //     (unsigned long)linkDiag.radioRxValid,
-  //     (unsigned long)linkDiag.radioRxCrcFail,
-  //     (unsigned long)linkDiag.radioRxDropTarget,
-  //     (unsigned long)linkDiag.radioTxFrames,
-  //     (unsigned long)linkDiag.radioReplyCount,
-  //     (unsigned long)radioReplyAvgUs,
-  //     (unsigned long)linkDiag.radioReplyUsMax,
-  //     (unsigned long)linkDiag.displayRxValid,
-  //     (unsigned long)linkDiag.displayRxCrcFail,
-  //     (unsigned long)linkDiag.displayRxDropTarget,
-  //     (unsigned long)linkDiag.displayTxFrames,
-  //     (unsigned long)linkDiag.displayReplyCount,
-  //     (unsigned long)displayReplyAvgUs,
-  //     (unsigned long)linkDiag.displayReplyUsMax,
-  //     (unsigned long)linkDiag.loopJitterMaxMs,
-  //     (unsigned long)linkDiag.loopGapOver20Ms,
-  //     (unsigned long)linkDiag.manualRadioGapMaxMs);
+  LOG_RATE_LIMITED(LOG_INFO, 10000,
+      "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
+      (unsigned long)linkDiag.radioRxValid,
+      (unsigned long)linkDiag.radioRxCrcFail,
+      (unsigned long)linkDiag.radioRxDropTarget,
+      (unsigned long)linkDiag.radioTxFrames,
+      (unsigned long)linkDiag.radioReplyCount,
+      (unsigned long)radioReplyAvgUs,
+      (unsigned long)linkDiag.radioReplyUsMax,
+      (unsigned long)linkDiag.displayRxValid,
+      (unsigned long)linkDiag.displayRxCrcFail,
+      (unsigned long)linkDiag.displayRxDropTarget,
+      (unsigned long)linkDiag.displayTxFrames,
+      (unsigned long)linkDiag.displayReplyCount,
+      (unsigned long)displayReplyAvgUs,
+      (unsigned long)linkDiag.displayReplyUsMax,
+      (unsigned long)linkDiag.loopJitterMaxMs,
+      (unsigned long)linkDiag.loopGapOver20Ms,
+      (unsigned long)linkDiag.manualRadioGapMaxMs);
 #endif
 
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
