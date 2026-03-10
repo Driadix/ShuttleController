@@ -4091,7 +4091,7 @@ void read_EEPROM_Data() {
   if (!isValidProvisionedShuttleId(shuttleNum)) {
     shuttleNum = 0;
     eepromData.shuttleNum = 0;
-    makeLog(LOG_WARN, "Invalid shuttle ID in Flash. Provisioning State (ID=0).");
+    makeLog(LOG_WARN, "Invalid shuttle ID. Provisioning State (ID=0)");
   }
 
   if (minBattCharge > 50) minBattCharge = 20;
