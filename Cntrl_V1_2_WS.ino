@@ -225,15 +225,15 @@ uint32_t linkDiagLastYieldMs = 0;
 
 enum ShuttleFault : uint16_t {
     FAULT_NONE             = 0x0000,
-    FAULT_TOF_CH_F         = (1 << 1),  // 0x0002 (Old Error 1)
-    FAULT_TOF_CH_R         = (1 << 2),  // 0x0004 (Old Error 2)
-    FAULT_TOF_PAL_F        = (1 << 3),  // 0x0008 (Old Error 5)
-    FAULT_TOF_PAL_R        = (1 << 4),  // 0x0010 (Old Error 6)
-    FAULT_LIFTER_TIMEOUT   = (1 << 9),  // 0x0200 (Old Error 9)
-    FAULT_MOTOR_STALL      = (1 << 10), // 0x0400 (Old Error 10)
-    FAULT_LOW_BATTERY      = (1 << 11), // 0x0800 (Old Error 11)
-    FAULT_CRASH_BUMPER     = (1 << 12), // 0x1000 (Old Error 12 in crash)
-    FAULT_MOVE_TIMEOUT     = (1 << 13)  // 0x2000 (Detailed movement stall)
+    FAULT_TOF_CH_F         = (1 << 1),  // 0x0002
+    FAULT_TOF_CH_R         = (1 << 2),  // 0x0004
+    FAULT_TOF_PAL_F        = (1 << 3),  // 0x0008
+    FAULT_TOF_PAL_R        = (1 << 4),  // 0x0010
+    FAULT_LIFTER_TIMEOUT   = (1 << 9),  // 0x0200
+    FAULT_MOTOR_STALL      = (1 << 10), // 0x0400
+    FAULT_LOW_BATTERY      = (1 << 11), // 0x0800
+    FAULT_CRASH_BUMPER     = (1 << 12), // 0x1000
+    FAULT_MOVE_TIMEOUT     = (1 << 13)  // 0x2000
 };
 
 void setFault(ShuttleFault fault) {
@@ -374,8 +374,6 @@ static void applyRadioConfigAtBoot() {
   }
 }
 
-// Maps an accepted command to the high-level ShuttleState for protocol telemetry.
-// This is the Hexagonal "adapter" between internal domain logic and external DTO.
 static ShuttleState mapCmdToOperation(uint8_t cmd) {
     switch (cmd) {
         case CMD_LOAD:            return STATE_LOAD;
@@ -406,21 +404,18 @@ static inline bool isOverrideCommand(uint8_t cmd) {
             cmd == CMD_STOP_MANUAL || 
             cmd == CMD_SYSTEM_RESET || 
             cmd == CMD_RESET_ERROR ||
-            cmd == CMD_SAVE_EEPROM ||     // <-- Allow saving in error state
-            cmd == CMD_GET_CONFIG);       // <-- Allow config reads in error state
+            cmd == CMD_SAVE_EEPROM ||
+            cmd == CMD_GET_CONFIG);
 }
 
-// Evaluates if the shuttle is currently doing nothing
 static inline bool isShuttleIdle() {
     return (status == 0 || status == CMD_STOP);
 }
 
-// Evaluates if the shuttle is currently in an error state
 static inline bool isErrorActive() {
     return (errorCode != 0);
 }
 
-// Evaluates if a physical loop must immediately terminate
 static inline bool shouldAbortLoop() {
     return (status == CMD_STOP || status == CMD_STOP_MANUAL || isErrorActive());
 }
@@ -436,11 +431,9 @@ void localLog(LogLevel level, const char* msg) {
 }
 
 void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
-  uint8_t logBuffer[300]; // Ample room for header + MAX_LOG_STRING_LEN + CRC
+  uint8_t logBuffer[300];
   uint16_t msgLen = strlen(msg);
 
-  // SECURE BOUNDS: Cap at 253 bytes to leave room for the null terminator
-  // ensuring total payload never exceeds MAX_LOG_STRING_LEN
   if (msgLen > MAX_LOG_STRING_LEN - 1) {
       msgLen = MAX_LOG_STRING_LEN - 1;
   }
@@ -448,7 +441,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
   FrameHeader* header = (FrameHeader*)logBuffer;
   header->sync1 = PROTOCOL_SYNC_1_V2;
   header->sync2 = PROTOCOL_SYNC_2_V2;
-  header->length = 1 + msgLen + 1;    // Level byte + Msg bytes + Null terminator
+  header->length = 1 + msgLen + 1;
   header->targetID = TARGET_ID_NONE;
 
   static uint8_t seqCounter = 0;
@@ -457,10 +450,8 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
 
   logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
 
-  // Safe memory copy, implicitly including the null terminator because
-  // logBuffer is zeroed out or we explicitly terminate it
   memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
-  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0'; // Force null termination
+  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0';
 
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
@@ -848,14 +839,12 @@ void SystemYield() {
       }
   }
 
-  // 1. Absolute highest priority: STOP commands from ANY source
   if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
       status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
       manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
       pendingDisplayManualModeBypass = false;
-      motor_Stop(); // Force immediate reaction
-  } 
-  // 2. Radio Remote commands override C# Display commands (Operator on the floor has priority over the office)
+      motor_Stop();
+  }
   else if (cmdRad != NO_NEW_CMD) {
       if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
           status = cmdRad;
@@ -866,7 +855,6 @@ void SystemYield() {
           }
       }
   } 
-  // 3. C# Display commands are processed last
   else if (cmdDisp != NO_NEW_CMD) {
       if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
           status = cmdDisp;
@@ -1023,7 +1011,7 @@ void loop() {
         currentMode = CoreOpMode::IDLE;
       } else if (status == CMD_SAVE_EEPROM) {
         saveEEPROMData(eepromData);
-        status = 0; // Clear the command after executing
+        status = 0;
       }
 
       detect_Pallete();
@@ -1407,10 +1395,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
     lastValidRxTime = millis(); 
 
-    // --- NEW LOGIC: Extract and strip the flag ---
     bool suppressAck = (header->msgID & MSG_FLAG_NO_ACK) != 0;
     uint8_t realMsgID = header->msgID & MSG_ID_MASK;
-    // ---------------------------------------------
 
     if (realMsgID == MSG_REQ_HEARTBEAT) {
         uint32_t startUs = micros();
@@ -1442,19 +1428,16 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
         bool inChannel = digitalRead(CHANNEL);
 
-        // 1. Force reject if in Error mode (unless it's an override like Reset)
         if (isErrorActive() && !isOverrideCommand(reqCmd)) {
             if (!suppressAck) sendAck(header->seq, ACK_ERROR_STATE, replyPort);
             return NO_NEW_CMD;
         }
 
-        // 2. Force reject movement commands if not in channel (Prevents the IDLE ACK Lie)
         if (!inChannel && reqCmd != CMD_SAVE_EEPROM && reqCmd != CMD_GET_CONFIG && reqCmd != CMD_RESET_ERROR) {
             if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
 
-        // 3. Normal preemption check
         if (isShuttleIdle() || isOverrideCommand(reqCmd)) {
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
 
@@ -1498,7 +1481,6 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
     } else if (realMsgID == MSG_CONFIG_SYNC_PUSH) {
         FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
         
-        // Apply to RAM
         eepromData.interPalleteDistance = fullCfg->interPallet;
         interPalleteDistance            = fullCfg->interPallet;
         eepromData.shuttleLength        = fullCfg->shuttleLen;
@@ -1769,8 +1751,6 @@ void run_Cmd() {
 
 // Ответы на запросы от пульта или сетевого клиента
 void send_Cmd() {
-  // Push an immediate state update strictly to the fast display UART
-  // The C# backend will parse the updated shuttleStatus byte instantly.
   sendTelemetryPacket(&Serial1);
 }
 
@@ -1778,8 +1758,6 @@ void update_Sensors() {
   angle = as5600.readAngle();
   detect_Pallete();
 }
-
-// Removed add_Error
 
 // Получение данных с датчиков обраружения паллет
 void detect_Pallete() {
@@ -1849,8 +1827,6 @@ void get_Distance() {
     
     data[currentSensor][filterCount] = 1500;
     
-    // 3. CONTINUOUS LATCH: If the sensor is dead, aggressively hold the fault bit high!
-    // Even if an operator clears the error, this puts it right back on the next loop.
     if (err[currentSensor] >= 7) { 
       if (currentSensor == 0) setFault(FAULT_TOF_CH_F);
       else if (currentSensor == 1) setFault(FAULT_TOF_CH_R);
@@ -1858,7 +1834,6 @@ void get_Distance() {
       else if (currentSensor == 3) setFault(FAULT_TOF_PAL_R);
     }
 
-    // 4. ONE-TIME LOG: Only spam the console at the exact moment of failure
     if (err[currentSensor] == 7) { 
       if (currentSensor == 0) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
       else if (currentSensor == 1) LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
@@ -2158,7 +2133,6 @@ void blink_Error() {
   else if (errCounter == 14) {
     debuger++;    
     if (debuger == 1) {
-        // If Low Battery bit (11) is set, and battery recovered, clear the bit
         if ((errorCode & (1 << 11)) && batteryCharge > minBattCharge) {
             errorCode &= ~(1 << 11);
         }
@@ -4339,7 +4313,6 @@ void saveConfigsToFlash() {
     digitalWrite(ZOOMER, LOW);
 }
 
-// Wrapper for compatibility
 void saveEEPROMData(const EEPROMData& data) {
     (void)data;
     saveConfigsToFlash();
