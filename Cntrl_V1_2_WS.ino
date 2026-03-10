@@ -9,6 +9,7 @@
 #include "ShuttleProtocol.h"
 #include "E32Radio.hpp"
 
+#pragma region Макросы...
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wunknown-pragmas"
 #endif
@@ -80,37 +81,30 @@ struct ConfigPageHeader {
     uint8_t reserved[1];
     uint16_t crc16;
 };
+#define MEDIAN(a, b, c) ((a) + (b) + (c) - min(min(a, b), c) - max(max(a, b), c))
+
+#pragma endregion
 
 #pragma region Пины и дефайны...
 
-#define DL_UP PD7        // Пин датчика положения лифтера в поднятом состоянии PD7
-#define DL_DOWN PD15     // Пин датчика положения лифтера в опущенном состоянии PC7
-#define DATCHIK_F1 PC7   // Пин датчика 1 обнаружения паллета вперед
-#define DATCHIK_F2 PB3   // Пин датчика 2 обнаружения паллета вперед
-#define DATCHIK_R1 PD5   // Пин датчика 1 обнаружения паллета назад
-#define DATCHIK_R2 PD3   // Пин датчика 2 обнаружения паллета назад
-#define GREEN_LED PD12   // Пин зеленого светодиода
-#define BUMPER_LED PD14  // Пин светодиода на плате
+#define DL_UP PC13       // Пин датчика положения лифтера в поднятом состоянии
+#define DL_DOWN PB4      // Пин датчика положения лифтера в опущенном состоянии
+#define DATCHIK_F1 PA5   // Пин датчика 1 обнаружения паллета вперед
+#define DATCHIK_F2 PC4   // Пин датчика 2 обнаружения паллета вперед
+#define DATCHIK_R1 PB6   // Пин датчика 1 обнаружения паллета назад
+#define DATCHIK_R2 PD2   // Пин датчика 2 обнаружения паллета назад
+#define GREEN_LED PC1    // Пин зеленого светодиода
 #define BOARD_LED PA1    // Пин светодиода на плате
-#define RED_LED PD11     // Пин красного светодиода ошибки
-#define WHITE_LED PD10   // Пин белого светодиода работы
-#define ZOOMER PA15      // Зумер
-#define LORA PA5         // Пин включения радиомодуля
-#define RS485 PB15       // Пин передачи шины RS485
-#define BUMPER_F PC6     // Пин бампера вперед
-#define BUMPER_R PA8     // Пин бампера назад
-#define CHANNEL PD1      // Пин датчика канала
-
-#define RST PE2
-#define BOOT PE4
-
-#define SD_CLK_DIV 64
-#define SDX_D0 PC8
-#define SDX_D1 PC9
-#define SDX_D2 PC10
-#define SDX_D3 PC11
-#define SDX_CK PC12
-#define SDX_CMD PD2
+#define RED_LED PC3      // Пин красного светодиода ошибки
+#define WHITE_LED PC2    // Пин белого светодиода работы
+#define ZOOMER PA0       // Зумер
+#define LORA PB15        // Пин включения радиомодуля
+#define RS485 PB13       // Пин передачи шины RS485
+#define BUMPER_F1 PB7    // Пин бампера вперед
+#define BUMPER_F2 PB3    // Пин бампера вперед
+#define BUMPER_R1 PA6    // Пин бампера назад
+#define BUMPER_R2 PC5    // Пин бампера назад
+#define CHANNEL PB5      // Пин датчика канала
 
 #define FLASH_SECTOR_SIZE 4 * 1024  // 16 kb
 #define EEPROM_PAGE_SIZE 512
@@ -118,11 +112,9 @@ struct ConfigPageHeader {
 #define EEPROM_HEADER_SIZE 1
 #define EEPROM_DATA_SIZE EEPROM_PAGE_SIZE - EEPROM_HEADER_SIZE
 
-#define MEDIAN(a, b, c) ((a) + (b) + (c) - min(min(a, b), c) - max(max(a, b), c))
-
-// Адрес регистра идентификатора модели для VL53L0X
-#define VL53L0X_REG_IDENTIFICATION_MODEL_ID         0xC0
-#define VL53L0X_EXPECTED_MODEL_ID                   0xEEAA // Ожидаемый ID для VL53L0X
+#define SerialLora    Serial3
+#define SerialRS485   Serial2
+#define SerialDisplay Serial1
 
 constexpr uint8_t NO_NEW_CMD = 0xFF;
 
@@ -138,8 +130,10 @@ uint32_t lastManualRadioCmdTime = 0;
 bool manualControlFromRadio = false;
 bool pendingDisplayManualModeBypass = false;
 
-HardwareSerial Serial2(PA3, PA2);                     // Второй изолированный канал UART
-HardwareSerial Serial3(PD9, PD8);                     // Канал под RS485 для BMS батареи
+HardwareSerial Serial1(PA10, PA9);                    // Порт для экранцика LilyGo 
+HardwareSerial Serial2(PA3, PA2);                     // Порт под RS485 для BMS батареи 
+HardwareSerial Serial3(PC7, PC6);                     // Порт Lora
+
 STM32_CAN Can1(CAN1, ALT, RX_SIZE_256, TX_SIZE_256);  // CAN шина на пинах PB8 PB9
 static CAN_message_t CAN_TX_msg;                      // Пакет данных CAN на передачу
 static CAN_message_t CAN_RX_msg;                      // Пакет данных CAN на прием
@@ -335,288 +329,10 @@ uint16_t data[4][5] = {
 
 #pragma endregion
 
-static void applyRadioConfigAtBoot() {
-  const bool shuttleAddressValid = E32Radio::isValidNodeId(shuttleNum);
-  const uint8_t radioAddress = shuttleAddressValid ? shuttleNum : E32Radio::kAddressLowUnassigned;
-  if (!shuttleAddressValid) {
-    makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
-  }
-
-  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
-  const E32Radio::LogicalConfig desiredConfig = E32Radio::makeTransparentConfig(
-    address,
-    E32Radio::kDefaultChannel433,
-    E32Radio::UartBaud::B57600,
-    E32Radio::AirDataRate::B9600,
-    E32Radio::TxPower::Dbm27,
-    E32Radio::UartParity::U8N1,
-    E32Radio::IoDriveMode::PushPull,
-    E32Radio::WakeupTime::Ms250,
-    E32Radio::Fec::On
-  );
-
-  E32Radio::EnsureOptions ensureOptions = {};
-  ensureOptions.maxAttempts = E32Radio::kDefaultEnsureAttempts;
-
-  e32Radio.init(&Serial2,
-                LORA,
-                E32Radio::uartBaudValue(desiredConfig.uartBaud),
-                E32Radio::ConfigModeLevel::ConfigHigh,
-                &Serial);
-
-  const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
-  if (ensureResult.ok()) {
-    makeLog(LOG_INFO, "Radio cfg ok: addr=%u baud=%lu", radioAddress,
-            (unsigned long)E32Radio::uartBaudValue(desiredConfig.uartBaud));
-  } else {
-    makeLog(LOG_WARN, "Radio cfg failed(%s): addr=%u",
-            E32Radio::statusToString(ensureResult.status), radioAddress);
-  }
-}
-
-static ShuttleState mapCmdToOperation(uint8_t cmd) {
-    switch (cmd) {
-        case CMD_LOAD:            return STATE_LOAD;
-        case CMD_UNLOAD:          return STATE_UNLOAD;
-        case CMD_LONG_LOAD:       return STATE_LONG_LOAD;
-        case CMD_LONG_UNLOAD:     return STATE_LONG_UNLOAD;
-        case CMD_LONG_UNLOAD_QTY: return STATE_LONG_UNLOAD_QTY;
-        case CMD_COMPACT_F:
-        case CMD_COMPACT_R:       return STATE_COMPACT;
-        case CMD_EVACUATE_ON:     return STATE_EVACUATE;
-        case CMD_DEMO:            return STATE_DEMO;
-        case CMD_COUNT_PALLETS:   return STATE_COUNT_PALLETS;
-        case CMD_MOVE_DIST_F:     return STATE_MOVE_FWD;
-        case CMD_MOVE_DIST_R:     return STATE_MOVE_REV;
-        case CMD_LIFT_UP:         return STATE_LIFT_UP;
-        case CMD_LIFT_DOWN:       return STATE_LIFT_DOWN;
-        case CMD_HOME:            return STATE_HOME;
-        case CMD_CALIBRATE:       return STATE_CALIBRATE;
-        case CMD_MANUAL_MODE:
-        case CMD_MOVE_RIGHT_MAN:
-        case CMD_MOVE_LEFT_MAN:   return STATE_MANUAL;
-        default:                  return STATE_IDLE;
-    }
-}
-
-static inline bool isOverrideCommand(uint8_t cmd) {
-    return (cmd == CMD_STOP || 
-            cmd == CMD_STOP_MANUAL || 
-            cmd == CMD_SYSTEM_RESET || 
-            cmd == CMD_RESET_ERROR ||
-            cmd == CMD_SAVE_EEPROM ||
-            cmd == CMD_GET_CONFIG);
-}
-
-static inline bool isShuttleIdle() {
-    return (status == 0 || status == CMD_STOP);
-}
-
-static inline bool isErrorActive() {
-    return (errorCode != 0);
-}
-
-static inline bool shouldAbortLoop() {
-    return (status == CMD_STOP || status == CMD_STOP_MANUAL || isErrorActive());
-}
-
-void localLog(LogLevel level, const char* msg) {
-  (void)level;
-  char timeStr[16];
-  uint8_t hour, minute, second;
-  rtc.getTime(&hour, &minute, &second, 0, nullptr);
-  snprintf(timeStr, sizeof(timeStr), "[%02d:%02d:%02d] ", hour, minute, second);
-  Serial.print(timeStr);
-  Serial.println(msg);
-}
-
-void sendLog(LogLevel level, const char* msg, Stream* port = &Serial1) {
-  uint8_t logBuffer[300];
-  uint16_t msgLen = strlen(msg);
-
-  if (msgLen > MAX_LOG_STRING_LEN - 1) {
-      msgLen = MAX_LOG_STRING_LEN - 1;
-  }
-
-  FrameHeader* header = (FrameHeader*)logBuffer;
-  header->sync1 = PROTOCOL_SYNC_1_V2;
-  header->sync2 = PROTOCOL_SYNC_2_V2;
-  header->length = 1 + msgLen + 1;
-  header->targetID = TARGET_ID_NONE;
-
-  static uint8_t seqCounter = 0;
-  header->seq = seqCounter++;
-  header->msgID = MSG_LOG;
-
-  logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
-
-  memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
-  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0';
-
-  uint16_t totalLen = sizeof(FrameHeader) + header->length;
-  ProtocolUtils::appendCRC(logBuffer, totalLen);
-
-  port->write(logBuffer, totalLen + 2);
-}
-void makeLogImpl(LogLevel level, const char* format, ...) {
-  va_list args;
-  va_start(args, format);
-  vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
-  va_end(args);
-
-  localLog(level, logStringBuffer);
-  sendLog(level, logStringBuffer, &Serial1);
-}
-
-static inline void countTxFrame(Stream* port) {
-#if CONNECTION_LOGS
-    if (port == &Serial2) linkDiag.radioTxFrames++;
-    else if (port == &Serial1) linkDiag.displayTxFrames++;
-#else
-    (void)port;
-#endif
-}
-
-static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
-#if CONNECTION_LOGS
-    if (port == &Serial2) {
-        linkDiag.radioReplyCount++;
-        linkDiag.radioReplyUsSum += elapsedUs;
-        if (elapsedUs > linkDiag.radioReplyUsMax) linkDiag.radioReplyUsMax = elapsedUs;
-    } else if (port == &Serial1) {
-        linkDiag.displayReplyCount++;
-        linkDiag.displayReplyUsSum += elapsedUs;
-        if (elapsedUs > linkDiag.displayReplyUsMax) linkDiag.displayReplyUsMax = elapsedUs;
-    }
-#else
-    (void)port;
-    (void)elapsedUs;
-#endif
-}
-
-void sendTelemetryPacket(Stream* port) {
-    if (!port) return;
-    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
-    TelemetryPacket pkt;
-
-    pkt.errorCode = errorCode;
-    pkt.shuttleStatus = currentOperation;
-    pkt.currentPosition = currentPosition;
-    pkt.speed = speed;
-    pkt.batteryCharge = batteryCharge;
-    pkt.batteryVoltage_mV = (uint16_t)(batteryVoltage * 1000);
-    pkt.shuttleNumber = shuttleNum;
-    pkt.palleteCount = palleteCount;
-
-    pkt.stateFlags = 0;
-    if (lifterUp) pkt.stateFlags |= (1 << 0);
-    if (motorStart) pkt.stateFlags |= (1 << 1);
-    if (motorReverse) pkt.stateFlags |= (1 << 2);
-    if (inverse) pkt.stateFlags |= (1 << 3);
-    if (digitalRead(CHANNEL)) pkt.stateFlags |= (1 << 4);
-    if (fifoLifo) pkt.stateFlags |= (1 << 5);
-
-    FrameHeader* header = (FrameHeader*)localTxBuffer;
-    header->sync1 = PROTOCOL_SYNC_1_V2;
-    header->sync2 = PROTOCOL_SYNC_2_V2;
-    header->length = sizeof(TelemetryPacket);
-    header->targetID = TARGET_ID_NONE;
-    static uint8_t seqCounter = 0;
-    header->seq = seqCounter++;
-    header->msgID = MSG_HEARTBEAT;
-
-    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
-
-    uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
-
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
-}
-
-void sendSensorPacket(Stream* port) {
-    if (!port) return;
-    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(SensorPacket) + 2];
-    temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
-
-    SensorPacket pkt;
-    pkt.distanceF = distance[1];
-    pkt.distanceR = distance[0];
-    pkt.distancePltF = distance[3];
-    pkt.distancePltR = distance[2];
-    pkt.angle = as5600.readAngle();
-    pkt.lifterCurrent = lifterCurrent;
-    pkt.temperature_dC = (int16_t)(temp * 10);
-
-    pkt.hardwareFlags = 0;
-    if (detectPalleteF1) pkt.hardwareFlags |= (1 << 0);
-    if (detectPalleteF2) pkt.hardwareFlags |= (1 << 1);
-    if (detectPalleteR1) pkt.hardwareFlags |= (1 << 2);
-    if (detectPalleteR2) pkt.hardwareFlags |= (1 << 3);
-    if (digitalRead(BUMPER_F)) pkt.hardwareFlags |= (1 << 4);
-    if (digitalRead(BUMPER_R)) pkt.hardwareFlags |= (1 << 5);
-    if (!digitalRead(DL_UP)) pkt.hardwareFlags |= (1 << 6);
-    if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
-
-    FrameHeader* header = (FrameHeader*)localTxBuffer;
-    header->sync1 = PROTOCOL_SYNC_1_V2;
-    header->sync2 = PROTOCOL_SYNC_2_V2;
-    header->length = sizeof(SensorPacket);
-    header->targetID = TARGET_ID_NONE;
-    static uint8_t seqCounter = 0;
-    header->seq = seqCounter++;
-    header->msgID = MSG_SENSORS;
-
-    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
-
-    uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
-
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
-}
-
-void sendStatsPacket(Stream* port) {
-    if (!port) return;
-    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(StatsPacket) + 2];
-    StatsPacket pkt;
-    pkt.totalDist = sramStats->payload.totalDist;
-    pkt.loadCounter = sramStats->payload.loadCounter;
-    pkt.unloadCounter = sramStats->payload.unloadCounter;
-    pkt.compactCounter = sramStats->payload.compactCounter;
-    pkt.liftUpCounter = sramStats->payload.liftUpCounter;
-    pkt.liftDownCounter = sramStats->payload.liftDownCounter;
-    pkt.lifetimePalletsDetected = sramStats->payload.lifetimePalletsDetected;
-    pkt.totalUptimeMinutes = sramStats->payload.totalUptimeMinutes;
-    pkt.motorStallCount = sramStats->payload.motorStallCount;
-    pkt.lifterOverloadCount = sramStats->payload.lifterOverloadCount;
-    pkt.crashCount = sramStats->payload.crashCount;
-    pkt.watchdogResets = sramStats->payload.watchdogResets;
-    pkt.lowBatteryEvents = sramStats->payload.lowBatteryEvents;
-
-    FrameHeader* header = (FrameHeader*)localTxBuffer;
-    header->sync1 = PROTOCOL_SYNC_1_V2;
-    header->sync2 = PROTOCOL_SYNC_2_V2;
-    header->length = sizeof(StatsPacket);
-    header->targetID = TARGET_ID_NONE;
-    static uint8_t seqCounter = 0;
-    header->seq = seqCounter++;
-    header->msgID = MSG_STATS;
-
-    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
-
-    uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
-
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
-}
-
 // Инициация устройств
 void setup() {
   pinMode(GREEN_LED, OUTPUT);
   pinMode(BOARD_LED, OUTPUT);
-  pinMode(BUMPER_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(WHITE_LED, OUTPUT);
   pinMode(ZOOMER, OUTPUT);
@@ -628,19 +344,19 @@ void setup() {
   pinMode(DATCHIK_R2, INPUT_PULLUP);
   pinMode(DL_UP, INPUT_PULLUP);
   pinMode(DL_DOWN, INPUT_PULLUP);
-  pinMode(BUMPER_F, INPUT);
-  pinMode(BUMPER_R, INPUT);
+  pinMode(BUMPER_F1, INPUT);
+  pinMode(BUMPER_F2, INPUT);
+  pinMode(BUMPER_R1, INPUT);
+  pinMode(BUMPER_R2, INPUT);
   pinMode(CHANNEL, INPUT);
 
-  pinMode(RST, INPUT);
-  pinMode(BOOT, INPUT);
-
-  attachInterrupt(BUMPER_F, crash, FALLING);
-  attachInterrupt(BUMPER_R, crash, FALLING);
+  attachInterrupt(BUMPER_F1, crash, FALLING);
+  attachInterrupt(BUMPER_F2, crash, FALLING);
+  attachInterrupt(BUMPER_R1, crash, FALLING);
+  attachInterrupt(BUMPER_R2, crash, FALLING);
 
   digitalWrite(GREEN_LED, HIGH);
   digitalWrite(BOARD_LED, HIGH);
-  digitalWrite(BUMPER_LED, HIGH);
   digitalWrite(RED_LED, LOW);
   digitalWrite(WHITE_LED, LOW);
   digitalWrite(ZOOMER, LOW);
@@ -648,15 +364,12 @@ void setup() {
   pinMode(RS485, INPUT_PULLDOWN);
   // digitalWrite(LORA, HIGH);
 
-  Serial.begin(115200);               // USBшный UART порт
-  delay(2000);
 
+  SerialDisplay.begin(230400, SERIAL_8E1);
+  SerialRS485.begin(57600);
+  SerialLora.begin(57600);
 
-  Serial1.begin(230400, SERIAL_8E1);  // UART1 порт на пинах РА9 РА10, на экранчик (LILYGO-S3)
-  Serial2.begin(57600);               // UART2 for radio module (single-baud policy)
-  Serial3.begin(9600);                // UART3 порт на пинах РD9 РD8, RS485 батареи
-
-  while (!Serial1) {}
+  while (!SerialDisplay) {}
 
   initStatsSRAM();
 
@@ -723,7 +436,6 @@ void setup() {
     read_BatteryCharge();
   }
   if (!batteryCharge) batteryCharge = newBC;
-  update_Sensors();
 
   makeLog(LOG_INFO, "Initialize RTC date and time.");
   delay(50);
@@ -751,132 +463,7 @@ void setup() {
   IWatchdog.begin(10000000);
 }
 
-void SystemYield() {
-  uint32_t currentMillis = millis();
-  IWatchdog.reload();
-
-#if CONNECTION_LOGS
-  if (linkDiagLastYieldMs != 0) {
-    uint32_t gap = currentMillis - linkDiagLastYieldMs;
-    if (gap > linkDiag.loopJitterMaxMs) linkDiag.loopJitterMaxMs = gap;
-    if (gap > 20) linkDiag.loopGapOver20Ms++;
-  }
-  linkDiagLastYieldMs = currentMillis;
-#endif
-  
-  static uint32_t timerTelemetry = 0;
-  static uint32_t timerSensors = 0;
-  static uint32_t timerStats = 0;
-  static uint32_t timerUptime = 0;
-
-  if (currentMillis - timerTelemetry >= 300) {
-    if (Serial1.availableForWrite() >= (int)(sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2U)) {
-      timerTelemetry = currentMillis;
-      sendTelemetryPacket(&Serial1);
-    }
-  }
-  if (currentMillis - timerSensors >= 500) {
-    if (Serial1.availableForWrite() >= (int)(sizeof(SensorPacket) + sizeof(FrameHeader) + 2U)) {
-      timerSensors = currentMillis;
-      sendSensorPacket(&Serial1);
-    }
-  }
-  if (currentMillis - timerStats >= 5000) {
-    if (Serial1.availableForWrite() >= (int)(sizeof(StatsPacket) + sizeof(FrameHeader) + 2U)) {
-      timerStats = currentMillis;
-      sendStatsPacket(&Serial1);
-    }
-  }
-  if (currentMillis - timerUptime >= 60000) {
-      timerUptime = currentMillis;
-      STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
-  }
-
-  uint8_t cmdDisp = pollSerial(Serial1, parserDisplay, false);
-  uint8_t cmdRad  = pollSerial(Serial2, parserRadio, true);
-
-#if CONNECTION_LOGS
-  uint32_t radioReplyAvgUs = linkDiag.radioReplyCount ? (linkDiag.radioReplyUsSum / linkDiag.radioReplyCount) : 0;
-  uint32_t displayReplyAvgUs = linkDiag.displayReplyCount ? (linkDiag.displayReplyUsSum / linkDiag.displayReplyCount) : 0;
-
-  LOG_RATE_LIMITED(LOG_INFO, 10000,
-      "diag side=shuttle rr=%lu rc=%lu rd=%lu rt=%lu rrp=%lu rrp_avg_us=%lu rrp_max_us=%lu dr=%lu dc=%lu dd=%lu dt=%lu drp=%lu drp_avg_us=%lu drp_max_us=%lu loop_max_ms=%lu loop_gap20=%lu man_gap_max_ms=%lu",
-      (unsigned long)linkDiag.radioRxValid,
-      (unsigned long)linkDiag.radioRxCrcFail,
-      (unsigned long)linkDiag.radioRxDropTarget,
-      (unsigned long)linkDiag.radioTxFrames,
-      (unsigned long)linkDiag.radioReplyCount,
-      (unsigned long)radioReplyAvgUs,
-      (unsigned long)linkDiag.radioReplyUsMax,
-      (unsigned long)linkDiag.displayRxValid,
-      (unsigned long)linkDiag.displayRxCrcFail,
-      (unsigned long)linkDiag.displayRxDropTarget,
-      (unsigned long)linkDiag.displayTxFrames,
-      (unsigned long)linkDiag.displayReplyCount,
-      (unsigned long)displayReplyAvgUs,
-      (unsigned long)linkDiag.displayReplyUsMax,
-      (unsigned long)linkDiag.loopJitterMaxMs,
-      (unsigned long)linkDiag.loopGapOver20Ms,
-      (unsigned long)linkDiag.manualRadioGapMaxMs);
-#endif
-
-  if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
-      cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
-      if (lastManualRadioCmdTime != 0) {
-          DIAG_ONLY(
-              uint32_t gap = currentMillis - lastManualRadioCmdTime;
-              if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
-          );
-      }
-      lastManualRadioCmdTime = currentMillis;
-  }
-  
-  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
-      if (manualControlFromRadio && (currentMillis - lastManualRadioCmdTime > 800)) {
-          status = CMD_STOP_MANUAL;
-          makeLog(LOG_WARN, "Connection drop timeout!");
-          motor_Stop();
-      }
-  }
-
-  if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
-      status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
-      manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
-      pendingDisplayManualModeBypass = false;
-      motor_Stop();
-  }
-  else if (cmdRad != NO_NEW_CMD) {
-      if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
-          status = cmdRad;
-          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN) {
-              manualControlFromRadio = true;
-              lastManualRadioCmdTime = currentMillis;
-              pendingDisplayManualModeBypass = false;
-          }
-      }
-  } 
-  else if (cmdDisp != NO_NEW_CMD) {
-      if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
-          status = cmdDisp;
-          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
-              manualControlFromRadio = false;
-              pendingDisplayManualModeBypass = true;
-          }
-      }
-  }
-
-  if (status == CMD_FIRMWARE_UPDATE) {
-      motor_Stop();
-      jumpToBootloader();
-  } else if (status == CMD_SYSTEM_RESET) {
-      makeLog(LOG_INFO, "Reboot system by external command...");
-      delay(20);
-      HAL_NVIC_SystemReset();
-  }
-}
-
 // Основной цикл
-
 void loop() {
   SystemYield();
 
@@ -935,7 +522,6 @@ void loop() {
         count = millis();
         SystemYield();
         if (reportCounter == 10) {
-          update_Sensors();
           reportCounter = 0;
         }
         send_Cmd();
@@ -1033,7 +619,7 @@ void motor_Speed(int spd) {
   cracked_int_t hexSpeed;
   CAN_TX_msg.id = (100);
   CAN_TX_msg.len = 4;
-  uint8_t accel = 30;
+  uint8_t accel = 18;
   if (spd >= 10 && spd - oldSpeed >= 10) spd = oldSpeed + 10;
   if (spd > 100) spd = 100;
   if (spd <= 100 && spd >= 0) {
@@ -1083,7 +669,7 @@ void motor_Speed(int spd) {
         Can1.write(CAN_TX_msg);
         set_Position();
         count = millis();
-        if (lifterUp) accel = 20 + i * 30 / steps;
+        if (lifterUp) accel = 10 + i * 20 / steps;
         while (millis() - count < accel) {
           SystemYield();
           get_Distance();
@@ -1385,11 +971,11 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         header->targetID != TARGET_ID_BROADCAST && 
         header->targetID != shuttleNum) {
         DIAG_ONLY(
-            if (replyPort == &Serial2) linkDiag.radioRxDropTarget++;
-            else if (replyPort == &Serial1) linkDiag.displayRxDropTarget++;
+            if (replyPort == &SerialLora) linkDiag.radioRxDropTarget++;
+            else if (replyPort == &SerialDisplay) linkDiag.displayRxDropTarget++;
         );
         
-        // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &Serial2) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
+        // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &SerialLora) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
         return NO_NEW_CMD;
     }
 
@@ -1618,10 +1204,6 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
     return lastCmd;
 }
 
-
-
-
-
 // Выполнение команд с пульта ДУ
 void run_Cmd() {
   if (status == CMD_MOVE_LEFT_MAN) {
@@ -1751,12 +1333,7 @@ void run_Cmd() {
 
 // Ответы на запросы от пульта или сетевого клиента
 void send_Cmd() {
-  sendTelemetryPacket(&Serial1);
-}
-
-void update_Sensors() {
-  angle = as5600.readAngle();
-  detect_Pallete();
+  sendTelemetryPacket(&SerialDisplay);
 }
 
 // Получение данных с датчиков обраружения паллет
@@ -1810,6 +1387,7 @@ void detect_Pallete() {
 
 // Опрос всех сенсоров расстояния
 void get_Distance() {
+  if (millis() - countSensor < 8) return;
   static uint16_t fault = 0;
   static uint8_t filterCount = 0;
   static uint8_t err[4] = {0};
@@ -2139,8 +1717,8 @@ void blink_Error() {
         
         makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
         
-        sendTelemetryPacket(&Serial1);
-        sendTelemetryPacket(&Serial2);
+        sendTelemetryPacket(&SerialDisplay);
+        sendTelemetryPacket(&SerialLora);
     }
     else if (debuger == 10) {
       debuger = 0;    
@@ -2169,15 +1747,15 @@ void stop_Before_Pallete_F() {
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
   otstup += chnlOffset;
-  if (distance[3] <= 900) {
+  if (distance[3] <= 1000) {
     count = millis();
-    while (distance[3] >= 550 && distance[1] > otstup) {
+    while (distance[3] >= 900 && distance[1] > otstup) {
       int spd = (distance[3] - 200) / 20;
       if (spd > distance[1] / 23) spd = distance[1] / 23;
       if (spd - oldSpeed > 3) spd = oldSpeed + 3;
       if (spd < 5) spd = 5;
       motor_Speed(spd);
-      blink_Work();
+      SystemYield();
       if (shouldAbortLoop()) {
         status = CMD_STOP;
         motor_Stop();
@@ -2197,7 +1775,6 @@ void stop_Before_Pallete_F() {
     while (i < 4) {  // Фиксируем несколько измерений расстояния  до паллета
       while (millis() - count < 100) {
         SystemYield();
-        blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
           status = CMD_STOP;
@@ -2207,12 +1784,12 @@ void stop_Before_Pallete_F() {
       }
       count = millis();
       
-      if (distance[3] > 250 && distance[3] < 550) {
+      if (distance[3] > 600 && distance[3] < 900) {
         makeLog(LOG_DEBUG, "Distance F = %d", distance[3]);
         dist += distance[3];
         i++;
       }
-      if (distance[3] > 550) {
+      if (distance[3] > 900) {
         j++;
         if (j == 3) {
           dist = distance[3];
@@ -2223,10 +1800,10 @@ void stop_Before_Pallete_F() {
         }
       }
       int spd = (distance[3] - 200) / 20;
-      if (oldSpeed < spd && distance[3] < 700 && distance[1] > 700) motor_Speed(oldSpeed);
-      else if (distance[3] >= 700 && distance[1] > 700) moove_Before_Pallete_F();
-      else if (spd > 7 && distance[1] > 700) motor_Speed(spd);
-      else if (distance[1] <= 700 && distance[1] > 100 + chnlOffset) {
+      if (oldSpeed < spd && distance[3] < 1000 && distance[1] > 1000) motor_Speed(oldSpeed);
+      else if (distance[3] >= 1000 && distance[1] > 1000) moove_Before_Pallete_F();
+      else if (spd > 7 && distance[1] > 1000) motor_Speed(spd);
+      else if (distance[1] <= 1000 && distance[1] > 100 + chnlOffset) {
         spd = distance[1] / 23;
         if (spd < 5) spd = 5;
         else if (spd > oldSpeed) spd = oldSpeed;
@@ -2239,13 +1816,7 @@ void stop_Before_Pallete_F() {
       set_Position();
     }
     makeLog(LOG_DEBUG, "Distance F = %d", distance[3]);
-    diffP = abs(diffP - currentPosition) / 2;
-    diff = abs(diff - distance[3]) * 3 / 5;
-    if (lifterCurrent) diff = (lifterCurrent - 80) / 25;
-    else diff = 0;
-    if (diffP > 8 && shuttleLength == 800) diff += diffP - 9;
-    if (diff < 0) diff = 0;
-    makeLog(LOG_DEBUG, "Difference F =  %d | Diff by enc = %d", diff, diffP);
+    diff = abs(diff - distance[3]) * 4 / 5;
     dist = dist / 4 - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
@@ -2276,6 +1847,7 @@ void moove_Before_Pallete_F() {
     blink_Work();
     get_Distance();
     if (millis() - count > 50) {
+      count = millis();
       set_Position();
       if (distance[1] >= 1500 && distance[3] >= 1500) {
         if (lifterUp && firstPalletePosition) {
@@ -2283,37 +1855,25 @@ void moove_Before_Pallete_F() {
           else if ((currentPosition - firstPalletePosition - 600) / 30 > 40) motor_Speed((currentPosition - firstPalletePosition - 600) / 30);
           else motor_Speed(40);
         } else if (lifterUp) {
-          if (currentPosition / 50 > 80) motor_Speed(currentPosition / 50);
-          else motor_Speed(80);
-        } else if (currentPosition > 1800 || currentPosition <= 100) {
-          motor_Speed(90);
-        } else if (currentPosition > 100 && currentPosition <= 1800) {
-          int spd = currentPosition / 20;
-          if (oldSpeed && spd > oldSpeed)
-            motor_Speed(oldSpeed);
-          else motor_Speed(spd);
-        } else motor_Speed(5);
-      } else if (distance[1] >= distance[3] && distance[3] >= 750) {
-        int spd = (distance[3] - 40) / 25;
-        if (lifterUp) spd = (distance[3] - 450) / 20;
+          motor_Speed(80);
+        } else motor_Speed(90);
+      } else if (distance[1] >= distance[3] && distance[3] >= 1000) {
+        int spd = distance[3] / 25;
         if (spd > oldSpeed)
           if (oldSpeed > 20) motor_Speed(oldSpeed);
           else motor_Speed(20);
         else motor_Speed(spd);
-      } else if (distance[1] >= distance[3] && distance[3] < 750) {
+      } else if (distance[1] >= distance[3] && distance[3] < 1000) {
         findPallete = 0;
       } else if (distance[1] > 150 + chnlOffset && distance[1] <= 1500) {
-        int spd = (int)((distance[1] - 40) / 18);
-        if (lifterUp && spd > 40) {
-          if (spd > oldSpeed && oldSpeed) spd = oldSpeed;
-          else spd = 40;
-        }
+        int spd = distance[1] / 25;
+        if (lifterUp && spd > 40) if (spd > oldSpeed && oldSpeed) spd = oldSpeed; else spd = 40;
         if (spd < 6) spd = 6;
         if (spd > oldSpeed)
           if (oldSpeed > 35) motor_Speed(oldSpeed);
           else motor_Speed(oldSpeed + 5);
         else motor_Speed(spd);
-        if (distance[3] < 750) findPallete = 0;
+        if (distance[3] < 1000) findPallete = 0;
       } else if (distance[1] > 90 + chnlOffset && distance[1] <= 150 + chnlOffset) {
         motor_Speed(5);
       } else if (distance[1] <= 90 + chnlOffset) {
@@ -2323,7 +1883,6 @@ void moove_Before_Pallete_F() {
         motor_Speed(oldSpeed);
       } else motor_Speed(5);
       if (shouldAbortLoop()) return;
-      count = millis();
     }
   }
   if (distance[1] > 150) makeLog(LOG_DEBUG, "Before at %d Pos = %d", distance[3], currentPosition);
@@ -2342,9 +1901,9 @@ void stop_Before_Pallete_R() {
   uint16_t otstup = 70;
   if (lifterUp) otstup = 100;
   otstup += chnlOffset;
-  if (distance[2] <= 900) {
+  if (distance[2] <= 1000) {
     count = millis();
-    while (distance[2] >= 550 && distance[0] > otstup) {
+    while (distance[2] >= 900 && distance[0] > otstup) {
       int spd = (distance[2] - 200) / 20;
       if (spd > distance[0] / 23) spd = distance[0] / 23;
       if (spd - oldSpeed > 3) spd = oldSpeed + 3;
@@ -2382,12 +1941,12 @@ void stop_Before_Pallete_R() {
         }
       }
       count = millis();
-      if (distance[2] > 300 && distance[2] < 550) {
+      if (distance[2] > 600 && distance[2] < 900) {
         makeLog(LOG_DEBUG, "Distance R = %d", distance[2]);
         dist += distance[2];
         i++;
       }
-      if (distance[2] > 550) {
+      if (distance[2] > 900) {
         j++;
         if (j == 3) {
           dist = distance[2];
@@ -2398,10 +1957,10 @@ void stop_Before_Pallete_R() {
         }
       }
       int spd = (distance[2] - 200) / 20;
-      if (oldSpeed < spd && distance[2] < 700 && distance[0] > 700) motor_Speed(oldSpeed);
-      else if (distance[2] >= 700 && distance[0] > 700) moove_Before_Pallete_R();
-      else if (spd > 7 && distance[0] > 700) motor_Speed(spd);
-      else if (distance[0] <= 700 && distance[0] > 100 + chnlOffset) {
+      if (oldSpeed < spd && distance[2] < 1000 && distance[0] > 1000) motor_Speed(oldSpeed);
+      else if (distance[2] >= 1000 && distance[0] > 1000) moove_Before_Pallete_R();
+      else if (spd > 7 && distance[0] > 1000) motor_Speed(spd);
+      else if (distance[0] <= 1000 && distance[0] > 100 + chnlOffset) {
         spd = distance[0] / 23;
         if (spd < 5) spd = 5;
         else if (spd > oldSpeed && oldSpeed > 5) spd = oldSpeed;
@@ -2415,12 +1974,6 @@ void stop_Before_Pallete_R() {
     }
     makeLog(LOG_DEBUG, "Distance R = %d", distance[2]);
     diff = abs(diff - distance[2]) * 4 / 5;
-    diffP = abs(diffP - currentPosition) / 2;
-    if (lifterCurrent) diff = (lifterCurrent - 80) / 25;
-    else diff = 0;
-    if (diffP > 8 && shuttleLength == 800) diff += diffP - 9;
-    if (diff < 0) diff = 0;
-    makeLog(LOG_DEBUG, "Difference R =  %d | Diff by enc = %d", diff, diffP);
     dist = dist / 4 + diffPallete - interPalleteDistance - 100 - diff - mprOffset;
     if (shuttleLength == 1000 || shuttleLength == 1200) dist -= 25;
     dist *= 0.96;
@@ -2451,7 +2004,7 @@ void moove_Before_Pallete_R() {
     }
     blink_Work();
     get_Distance();
-    if (millis() - count > 50) {      
+    if (millis() - count > 50) {count = millis();
       set_Position();
       if (distance[0] >= 1500 && distance[2] >= 1500) {
         if (lifterUp && lastPallete) {
@@ -2485,27 +2038,28 @@ void moove_Before_Pallete_R() {
             motor_Speed(oldSpeed);
           } else motor_Speed(spd);
         } else motor_Speed(5);
-      } else if (distance[0] >= distance[2] && distance[2] >= 750) {
-        if ((distance[2] - 40) / 25 < oldSpeed) motor_Speed((distance[2] - 40) / 25);
-        else if (oldSpeed >= 20) motor_Speed(oldSpeed);
-        else motor_Speed(20);
-      } else if (distance[0] >= distance[2] && distance[2] < 750) {
+      } else if (distance[0] >= distance[2] && distance[2] >= 1000) {
+        int spd = distance[2] / 25;
+        if (spd > oldSpeed)
+          if (oldSpeed > 20) motor_Speed(oldSpeed);
+          else motor_Speed(20);
+        else motor_Speed(spd);
+      } else if (distance[0] >= distance[2] && distance[2] < 1000) {
         findPallete = 0;
       } else if (distance[0] > 150 + chnlOffset && distance[0] <= 1500) {
-        int spd = (int)((distance[0] - 40) / 18);
+        int spd = distance[0] / 25;
         if (lifterUp && spd > 40) spd = 40;
         if (spd < 6) spd = 6;
         if (spd > oldSpeed)
           if (oldSpeed > 35) motor_Speed(oldSpeed);
           else motor_Speed(oldSpeed + 5);
         else motor_Speed(spd);
-        if (distance[2] < 750) findPallete = 0;
+        if (distance[2] < 1000) findPallete = 0;
       } else if (distance[0] > 90 + chnlOffset && distance[0] <= 150 + chnlOffset) motor_Speed(5);
       else if (distance[0] <= 90 + chnlOffset) {
         findPallete = 0;
       } else motor_Speed(oldSpeed);
       if (shouldAbortLoop()) return;
-      count = millis();
     }
   }
   if (distance[0] > 150) makeLog(LOG_DEBUG, "Before at %d Pos = %d", distance[2], currentPosition);
@@ -2790,19 +2344,13 @@ void moove_Forward() {
     if (millis() - count > 50) {
       set_Position();
       if (currentPosition < 0) currentPosition = 0;
-      if (distance[1] >= 1500 && currentPosition < 3000 && currentPosition > 1500) {
-        speed = currentPosition / 50 + 40;
-        if (speed < 70) speed = 70;
-      } else if (distance[1] >= 1500 && currentPosition <= 1500) {
-        speed = 70;
-        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
-      } else if (distance[1] >= 1500 && (currentPosition >= 3000)) {
+      if (distance[1] >= 1500) {
         speed = 100;
       } else if (distance[1] > 90 + chnlOffset && distance[1] < 1500) {
         speed = distance[1] / 20;
-        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= 1500) speed = oldSpeed;
+        if (oldSpeed > 5 && speed > oldSpeed) speed = oldSpeed;
         if (speed < 5) speed = 5;
-        if (speed > 70) speed = 70;
+        if (speed > 80) speed = 80;
         if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
       } else if (distance[1] <= 90 + chnlOffset) {
         if ((status == CMD_LOAD || status == CMD_LONG_LOAD) && distance[1] > 80) speed = 5;
@@ -2846,20 +2394,11 @@ void moove_Reverse() {
     get_Distance();
     if (millis() - count > timingBudget + 5) {
       set_Position();
-      if (currentPosition > channelLength - shuttleLength) channelLength = currentPosition + shuttleLength;
-      if (distance[0] >= 1500 && currentPosition > channelLength - shuttleLength - 3000 && currentPosition < channelLength - shuttleLength - 1500) {
-        speed = 40 + (channelLength - shuttleLength - currentPosition) / 50;
-        if (speed < 70) speed = 70;
-      } else if (distance[0] >= 1500 && currentPosition >= channelLength - shuttleLength - 1500) {
-        speed = 70;
-        if (oldSpeed > 35 && speed > oldSpeed) speed = oldSpeed;
-      } else if (distance[0] >= 1500 && currentPosition < channelLength - shuttleLength - 3000) speed = 100;
+      if (distance[0] >= 1500) speed = 100;
       else if (distance[0] > 90 + chnlOffset && distance[0] < 1500) {
         speed = distance[0] / 20;
-        if (oldSpeed > 5 && speed > oldSpeed && currentPosition <= channelLength - shuttleLength - 100) speed = oldSpeed;
+        if (oldSpeed > 5 && speed > oldSpeed) speed = oldSpeed;
         if (speed < 5) speed = 5;
-        if (speed > 70) speed = 70;
-        if (oldSpeed > 50 && speed > oldSpeed) speed = oldSpeed;
       } else if (distance[0] <= 90 + chnlOffset) {
         speed = 0;
         startAngle = angle;
@@ -3522,7 +3061,6 @@ void pallete_Compacting_F() {
       return;
     }
     status = CMD_COMPACT_F;
-    update_Sensors();
   }
 }
 
@@ -3561,7 +3099,6 @@ void pallete_Compacting_R() {
     }
     status = CMD_COMPACT_R;
     firstPalletePosition = currentPosition;
-    update_Sensors();
   }
   firstPalletePosition = 0;
 }
@@ -3733,7 +3270,6 @@ void long_Unload() {
     }
     motor_Stop();
     lifter_Down();
-    update_Sensors();
     moove_Distance_R(shuttleLength + 500, 80, 80);
   }
   interPalleteDistance = oldInterPalleteDistance;
@@ -3965,7 +3501,6 @@ void demo_Mode() {
         motor_Stop();
         return;
       }
-      update_Sensors();
       if (distance[1] < 200) status = CMD_STOP;
     }
     if ((status == CMD_STOP && distance[1] > 200) || isErrorActive()) {
@@ -3993,7 +3528,6 @@ void demo_Mode() {
       blink_Work();
       get_Distance();
     }
-    update_Sensors();
     if (shouldAbortLoop()) return;
     while (status != CMD_STOP) {
       SystemYield();
@@ -4009,7 +3543,6 @@ void demo_Mode() {
         get_Distance();
       }
       unload_Pallete();
-      update_Sensors();
       firstPalletePosition = currentPosition;
       if (isErrorActive()) {
         motor_Stop();
@@ -4045,7 +3578,6 @@ void demo_Mode() {
       blink_Work();
       get_Distance();
     }
-    update_Sensors();
     if (shouldAbortLoop()) return;
   }
 }
@@ -4053,6 +3585,96 @@ void demo_Mode() {
 #pragma endregion
 
 #pragma region Технические функции
+
+void SystemYield() {
+  uint32_t currentMillis = millis();
+  IWatchdog.reload();
+
+  static uint32_t timerTelemetry = 0;
+  static uint32_t timerSensors = 0;
+  static uint32_t timerStats = 0;
+  static uint32_t timerUptime = 0;
+
+  if (currentMillis - timerTelemetry >= 300) {
+    if (SerialDisplay.availableForWrite() >= (int)(sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2U)) {
+      timerTelemetry = currentMillis;
+      sendTelemetryPacket(&SerialDisplay);
+    }
+  }
+  if (currentMillis - timerSensors >= 500) {
+    if (SerialDisplay.availableForWrite() >= (int)(sizeof(SensorPacket) + sizeof(FrameHeader) + 2U)) {
+      timerSensors = currentMillis;
+      sendSensorPacket(&SerialDisplay);
+    }
+  }
+  if (currentMillis - timerStats >= 5000) {
+    if (SerialDisplay.availableForWrite() >= (int)(sizeof(StatsPacket) + sizeof(FrameHeader) + 2U)) {
+      timerStats = currentMillis;
+      sendStatsPacket(&SerialDisplay);
+    }
+  }
+  if (currentMillis - timerUptime >= 60000) {
+      timerUptime = currentMillis;
+      STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
+  }
+
+  uint8_t cmdDisp = pollSerial(SerialDisplay, parserDisplay, false);
+  uint8_t cmdRad  = pollSerial(SerialLora, parserRadio, true);
+
+  if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
+      cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
+      if (lastManualRadioCmdTime != 0) {
+          DIAG_ONLY(
+              uint32_t gap = currentMillis - lastManualRadioCmdTime;
+              if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
+          );
+      }
+      lastManualRadioCmdTime = currentMillis;
+  }
+  
+  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
+      if (manualControlFromRadio && (currentMillis - lastManualRadioCmdTime > 800)) {
+          status = CMD_STOP_MANUAL;
+          makeLog(LOG_WARN, "Connection drop timeout!");
+          motor_Stop();
+      }
+  }
+
+  if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
+      status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
+      manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
+      pendingDisplayManualModeBypass = false;
+      motor_Stop();
+  }
+  else if (cmdRad != NO_NEW_CMD) {
+      if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
+          status = cmdRad;
+          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN) {
+              manualControlFromRadio = true;
+              lastManualRadioCmdTime = currentMillis;
+              pendingDisplayManualModeBypass = false;
+          }
+      }
+  } 
+  else if (cmdDisp != NO_NEW_CMD) {
+      if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
+          status = cmdDisp;
+          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
+              manualControlFromRadio = false;
+              pendingDisplayManualModeBypass = true;
+          }
+      }
+  }
+
+  if (status == CMD_FIRMWARE_UPDATE) {
+      motor_Stop();
+      jumpToBootloader();
+  } else if (status == CMD_SYSTEM_RESET) {
+      makeLog(LOG_INFO, "Reboot system by external command...");
+      delay(20);
+      HAL_NVIC_SystemReset();
+  }
+}
 
 void initStatsSRAM() {
     __HAL_RCC_PWR_CLK_ENABLE();
@@ -4354,10 +3976,10 @@ void read_EEPROM_Data() {
   eepromData.chnlOffset = chnlOffset;
 
   if (loadConfigsFromFlash()) {
-    for (uint8_t i = 0; i < 8; i++) {
+    /*for (uint8_t i = 0; i < 8; i++) {
       calibrateEncoder_F[i] = eepromData.calibrateEncoder_F[i];
       calibrateEncoder_R[i] = eepromData.calibrateEncoder_R[i];
-    }
+    }*/
     for (uint8_t i = 0; i < 3; i++) {
       calibrateSensor_F[i] = eepromData.calibrateSensor_F[i];
       calibrateSensor_R[i] = eepromData.calibrateSensor_R[i];
@@ -4389,7 +4011,7 @@ void read_EEPROM_Data() {
 
 // Считывание параметров с BMS батареи
 void read_BatteryCharge() {
-  while (Serial3.available()) Serial3.read();
+  while (SerialRS485.available()) SerialRS485.read();
   uint8_t datab[7] = { 0xDD, 0xA5, 0x03, 0x00, 0xFF, 0xFD, 0x77 };
   if (!digitalRead(RS485)) pinMode(RS485, OUTPUT);
   else {
@@ -4398,7 +4020,7 @@ void read_BatteryCharge() {
   }
   digitalWrite(RS485, HIGH);
   delay(1);
-  Serial3.write(datab, 7);
+  SerialRS485.write(datab, 7);
   delay(20);
   digitalWrite(RS485, LOW);
   delay(20);
@@ -4406,15 +4028,15 @@ void read_BatteryCharge() {
   uint8_t data = 0;
   uint8_t i = 0;
   int cnt = millis();
-  while (Serial3.available())
+  while (SerialRS485.available())
   {
     if (status == CMD_STOP) break;
-    dataRead[i] = Serial3.read();
+    dataRead[i] = SerialRS485.read();
     data = 1;
     delayMicroseconds(1750);
     i++;
     if (i > 5 && i == dataRead[3] + 6) {
-      dataRead[i] = Serial3.read();
+      dataRead[i] = SerialRS485.read();
       break;
     }
     if (millis() - cnt > 100) {
@@ -4453,7 +4075,7 @@ void read_BatteryCharge() {
       countBatt = millis();
     }
   }
-  while (Serial3.available()) Serial3.read();
+  while (SerialRS485.available()) SerialRS485.read();
   pinMode(RS485, INPUT_PULLDOWN);
   if (!isErrorActive() && (batteryCharge > 0 && batteryCharge <= minBattCharge)) {
         makeLog(LOG_ERROR, "Low battery! Emergency stop.");
@@ -4539,7 +4161,6 @@ void HardFault_Handler(void) {
     }
   }
 }
-
 
 // Служебные функции установки даты и времени
 bool isValidDateTime(int hour, int minute, int second, int day, int month, int year) {
@@ -4649,6 +4270,274 @@ void blink() {
   //digitalWrite(GREEN_LED, LOW);
   digitalWrite(BOARD_LED, LOW);
 }
+
+
+static void applyRadioConfigAtBoot() {
+  const bool shuttleAddressValid = E32Radio::isValidNodeId(shuttleNum);
+  const uint8_t radioAddress = shuttleAddressValid ? shuttleNum : E32Radio::kAddressLowUnassigned;
+  if (!shuttleAddressValid) {
+    makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
+  }
+
+  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
+  const E32Radio::LogicalConfig desiredConfig = E32Radio::makeTransparentConfig(
+    address,
+    E32Radio::kDefaultChannel433,
+    E32Radio::UartBaud::B57600,
+    E32Radio::AirDataRate::B9600,
+    E32Radio::TxPower::Dbm27,
+    E32Radio::UartParity::U8N1,
+    E32Radio::IoDriveMode::PushPull,
+    E32Radio::WakeupTime::Ms250,
+    E32Radio::Fec::On
+  );
+
+  E32Radio::EnsureOptions ensureOptions = {};
+  ensureOptions.maxAttempts = E32Radio::kDefaultEnsureAttempts;
+
+  e32Radio.init(&SerialLora,
+                LORA,
+                E32Radio::uartBaudValue(desiredConfig.uartBaud),
+                E32Radio::ConfigModeLevel::ConfigHigh, NULL);
+
+  const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
+  if (ensureResult.ok()) {
+    makeLog(LOG_INFO, "Radio cfg ok: addr=%u baud=%lu", radioAddress,
+            (unsigned long)E32Radio::uartBaudValue(desiredConfig.uartBaud));
+  } else {
+    makeLog(LOG_WARN, "Radio cfg failed(%s): addr=%u",
+            E32Radio::statusToString(ensureResult.status), radioAddress);
+  }
+}
+
+static ShuttleState mapCmdToOperation(uint8_t cmd) {
+    switch (cmd) {
+        case CMD_LOAD:            return STATE_LOAD;
+        case CMD_UNLOAD:          return STATE_UNLOAD;
+        case CMD_LONG_LOAD:       return STATE_LONG_LOAD;
+        case CMD_LONG_UNLOAD:     return STATE_LONG_UNLOAD;
+        case CMD_LONG_UNLOAD_QTY: return STATE_LONG_UNLOAD_QTY;
+        case CMD_COMPACT_F:
+        case CMD_COMPACT_R:       return STATE_COMPACT;
+        case CMD_EVACUATE_ON:     return STATE_EVACUATE;
+        case CMD_DEMO:            return STATE_DEMO;
+        case CMD_COUNT_PALLETS:   return STATE_COUNT_PALLETS;
+        case CMD_MOVE_DIST_F:     return STATE_MOVE_FWD;
+        case CMD_MOVE_DIST_R:     return STATE_MOVE_REV;
+        case CMD_LIFT_UP:         return STATE_LIFT_UP;
+        case CMD_LIFT_DOWN:       return STATE_LIFT_DOWN;
+        case CMD_HOME:            return STATE_HOME;
+        case CMD_CALIBRATE:       return STATE_CALIBRATE;
+        case CMD_MANUAL_MODE:
+        case CMD_MOVE_RIGHT_MAN:
+        case CMD_MOVE_LEFT_MAN:   return STATE_MANUAL;
+        default:                  return STATE_IDLE;
+    }
+}
+
+static inline bool isOverrideCommand(uint8_t cmd) {
+    return (cmd == CMD_STOP || 
+            cmd == CMD_STOP_MANUAL || 
+            cmd == CMD_SYSTEM_RESET || 
+            cmd == CMD_RESET_ERROR ||
+            cmd == CMD_SAVE_EEPROM ||
+            cmd == CMD_GET_CONFIG);
+}
+
+static inline bool isShuttleIdle() {
+    return (status == 0 || status == CMD_STOP);
+}
+
+static inline bool isErrorActive() {
+    return (errorCode != 0);
+}
+
+static inline bool shouldAbortLoop() {
+    return (status == CMD_STOP || status == CMD_STOP_MANUAL || isErrorActive());
+}
+
+void sendLog(LogLevel level, const char* msg, Stream* port = &SerialDisplay) {
+  uint8_t logBuffer[300];
+  uint16_t msgLen = strlen(msg);
+
+  if (msgLen > MAX_LOG_STRING_LEN - 1) {
+      msgLen = MAX_LOG_STRING_LEN - 1;
+  }
+
+  FrameHeader* header = (FrameHeader*)logBuffer;
+  header->sync1 = PROTOCOL_SYNC_1_V2;
+  header->sync2 = PROTOCOL_SYNC_2_V2;
+  header->length = 1 + msgLen + 1;
+  header->targetID = TARGET_ID_NONE;
+
+  static uint8_t seqCounter = 0;
+  header->seq = seqCounter++;
+  header->msgID = MSG_LOG;
+
+  logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
+
+  memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
+  logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0';
+
+  uint16_t totalLen = sizeof(FrameHeader) + header->length;
+  ProtocolUtils::appendCRC(logBuffer, totalLen);
+
+  port->write(logBuffer, totalLen + 2);
+}
+
+void makeLogImpl(LogLevel level, const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
+  va_end(args);
+
+  sendLog(level, logStringBuffer, &SerialDisplay);
+}
+
+static inline void countTxFrame(Stream* port) {
+#if CONNECTION_LOGS
+    if (port == &SerialLora) linkDiag.radioTxFrames++;
+    else if (port == &SerialDisplay) linkDiag.displayTxFrames++;
+#else
+    (void)port;
+#endif
+}
+
+static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
+#if CONNECTION_LOGS
+    if (port == &SerialLora) {
+        linkDiag.radioReplyCount++;
+        linkDiag.radioReplyUsSum += elapsedUs;
+        if (elapsedUs > linkDiag.radioReplyUsMax) linkDiag.radioReplyUsMax = elapsedUs;
+    } else if (port == &SerialDisplay) {
+        linkDiag.displayReplyCount++;
+        linkDiag.displayReplyUsSum += elapsedUs;
+        if (elapsedUs > linkDiag.displayReplyUsMax) linkDiag.displayReplyUsMax = elapsedUs;
+    }
+#else
+    (void)port;
+    (void)elapsedUs;
+#endif
+}
+
+void sendTelemetryPacket(Stream* port) {
+    if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
+    TelemetryPacket pkt;
+
+    pkt.errorCode = errorCode;
+    pkt.shuttleStatus = currentOperation;
+    pkt.currentPosition = currentPosition;
+    pkt.speed = speed;
+    pkt.batteryCharge = batteryCharge;
+    pkt.batteryVoltage_mV = (uint16_t)(batteryVoltage * 1000);
+    pkt.shuttleNumber = shuttleNum;
+    pkt.palleteCount = palleteCount;
+
+    pkt.stateFlags = 0;
+    if (lifterUp) pkt.stateFlags |= (1 << 0);
+    if (motorStart) pkt.stateFlags |= (1 << 1);
+    if (motorReverse) pkt.stateFlags |= (1 << 2);
+    if (inverse) pkt.stateFlags |= (1 << 3);
+    if (digitalRead(CHANNEL)) pkt.stateFlags |= (1 << 4);
+    if (fifoLifo) pkt.stateFlags |= (1 << 5);
+
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
+    header->length = sizeof(TelemetryPacket);
+    header->targetID = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_HEARTBEAT;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(TelemetryPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+
+    port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
+}
+
+void sendSensorPacket(Stream* port) {
+    if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(SensorPacket) + 2];
+    temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
+
+    SensorPacket pkt;
+    pkt.distanceF = distance[1];
+    pkt.distanceR = distance[0];
+    pkt.distancePltF = distance[3];
+    pkt.distancePltR = distance[2];
+    pkt.angle = as5600.readAngle();
+    pkt.lifterCurrent = lifterCurrent;
+    pkt.temperature_dC = (int16_t)(temp * 10);
+
+    pkt.hardwareFlags = 0;
+    if (detectPalleteF1) pkt.hardwareFlags |= (1 << 0);
+    if (detectPalleteF2) pkt.hardwareFlags |= (1 << 1);
+    if (detectPalleteR1) pkt.hardwareFlags |= (1 << 2);
+    if (detectPalleteR2) pkt.hardwareFlags |= (1 << 3);
+    if (digitalRead(BUMPER_F1)) pkt.hardwareFlags |= (1 << 4);
+    if (digitalRead(BUMPER_R1)) pkt.hardwareFlags |= (1 << 5);
+    if (!digitalRead(DL_UP)) pkt.hardwareFlags |= (1 << 6);
+    if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
+
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
+    header->length = sizeof(SensorPacket);
+    header->targetID = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_SENSORS;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(SensorPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+
+    port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
+}
+
+void sendStatsPacket(Stream* port) {
+    if (!port) return;
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(StatsPacket) + 2];
+    StatsPacket pkt;
+    pkt.totalDist = sramStats->payload.totalDist;
+    pkt.loadCounter = sramStats->payload.loadCounter;
+    pkt.unloadCounter = sramStats->payload.unloadCounter;
+    pkt.compactCounter = sramStats->payload.compactCounter;
+    pkt.liftUpCounter = sramStats->payload.liftUpCounter;
+    pkt.liftDownCounter = sramStats->payload.liftDownCounter;
+    pkt.lifetimePalletsDetected = sramStats->payload.lifetimePalletsDetected;
+    pkt.totalUptimeMinutes = sramStats->payload.totalUptimeMinutes;
+    pkt.motorStallCount = sramStats->payload.motorStallCount;
+    pkt.lifterOverloadCount = sramStats->payload.lifterOverloadCount;
+    pkt.crashCount = sramStats->payload.crashCount;
+    pkt.watchdogResets = sramStats->payload.watchdogResets;
+    pkt.lowBatteryEvents = sramStats->payload.lowBatteryEvents;
+
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
+    header->length = sizeof(StatsPacket);
+    header->targetID = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_STATS;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+
+    port->write(localTxBuffer, totalLen + 2);
+    countTxFrame(port);
+}
+
 
 #pragma endregion
 
