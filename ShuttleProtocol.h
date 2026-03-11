@@ -48,7 +48,8 @@ enum MsgID : uint8_t {
     MSG_CMD_SIMPLE       = 0x30, // Pult/Display -> Shuttle: 1-byte payload (No arguments)
     MSG_CMD_WITH_ARG     = 0x31, // Pult/Display -> Shuttle: 5-byte payload (Cmd + int32_t arg)
     MSG_SET_DATETIME     = 0x32, // Display -> Shuttle: RTC Sync (DateTimePacket)
-    MSG_ACK              = 0x33  // Shuttle -> Pult/Display: Command acknowledgment
+    MSG_ACK              = 0x33, // Shuttle -> Pult/Display: Command acknowledgment
+    MSG_BMS_EXT          = 0x34  // Reserved for future extended battery telemetry
 };
 
 // Flag placed in the MSB of msgID to suppress ACKs for volatile commands
@@ -153,6 +154,24 @@ struct TelemetryPacket {
     uint8_t  batteryCharge;    // %
     uint8_t  shuttleNumber;    
     uint8_t  palleteCount;     
+};
+
+// Reserved payload for future battery diagnostics stream (not used yet).
+struct BmsExtPacket {
+    uint16_t packVoltage_mV;
+    int16_t  packCurrent_cA;
+    uint16_t remainCapacity_cAh;
+    uint16_t nominalCapacity_cAh;
+    uint16_t cycleCount;
+    uint16_t protectionFlags;
+    uint8_t  fetStatus;
+    uint8_t  socPercent;
+    uint8_t  cellCount;
+    uint16_t cellMin_mV;
+    uint16_t cellMax_mV;
+    uint16_t cellDelta_mV;
+    uint8_t  ntcCount;
+    int16_t  ntcTemp_dC[4];
 };
 
 struct SensorPacket {
