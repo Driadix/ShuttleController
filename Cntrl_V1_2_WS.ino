@@ -46,6 +46,8 @@ void makeLogImpl(LogLevel level, const char* format, ...);
 static inline bool isValidProvisionedShuttleId(int32_t id);
 static inline bool isProvisionedShuttle();
 static inline bool isSupportedCommand(uint8_t cmd);
+static inline bool isPhysicallyStationary();
+static void scheduleBootloaderEntry();
 
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
@@ -191,6 +193,10 @@ struct EEPROMData  // Структура данных параметров дл�
 EEPROMData eepromData;
 
 volatile bool pendingEepromSave = false;
+constexpr uint32_t kBootloaderEntryGraceMs = 60;
+volatile bool pendingBootloaderEntry = false;
+volatile bool bootloaderStopDone = false;
+volatile uint32_t bootloaderEntryAtMs = 0;
 
 uint32_t lastValidRxTime = 0;
 
@@ -282,7 +288,7 @@ uint8_t detectPalleteR1;               // Флаг датчика обнаруж
 uint8_t detectPalleteR2;               // Флаг датчика обнаружения паллеты назад 2
 uint8_t palleteCount = 0;              // Количество паллет
 uint8_t motorStart = false;            // Флаг запуска двигателя движения
-uint8_t motorReverse = 0;              // Флаг реверсивного (1) или прямого (0) движения
+uint8_t motorReverse = 2;              // Флаг направления (0/1), 2 = остановлено
 uint8_t lifterUp = 0;                  // Флаг поднятой платформы
 uint8_t inverse = 0;                   // Флаг инверсии движения -сохранять-
 uint8_t longWork = 0;                  // Флаг продолжительной загрузки/выгрузки
@@ -970,8 +976,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             if (replyPort == &SerialLora) linkDiag.radioRxDropTarget++;
             else if (replyPort == &SerialDisplay) linkDiag.displayRxDropTarget++;
         );
-        
-        // LOG_RATE_LIMITED(LOG_WARN, 2000, "fail side=shuttle dir=rx reason=target_mismatch src=%s expected=%u got=%u msg=0x%02X", (replyPort == &SerialLora) ? "radio" : "display", shuttleNum, header->targetID, header->msgID);
+
+        LOG_RATE_LIMITED(LOG_WARN, 2000, "Drop tgt src=%s exp=%u got=%u msg=%02X",
+                         (replyPort == &SerialLora) ? "radio" : "display",
+                         shuttleNum,
+                         header->targetID,
+                         header->msgID);
         return NO_NEW_CMD;
     }
 
@@ -1011,6 +1021,22 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
         if (reqCmd == CMD_GET_CONFIG) {
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+            return NO_NEW_CMD;
+        }
+
+        if (reqCmd == CMD_FIRMWARE_UPDATE) {
+            if (replyPort != &SerialDisplay) {
+                sendAck(header->seq, ACK_REJECTED, replyPort);
+                return NO_NEW_CMD;
+            }
+
+            if (!isPhysicallyStationary()) {
+                sendAck(header->seq, ACK_BUSY, replyPort);
+                return NO_NEW_CMD;
+            }
+
+            sendAck(header->seq, ACK_OK, replyPort);
+            scheduleBootloaderEntry();
             return NO_NEW_CMD;
         }
 
@@ -1250,7 +1276,7 @@ uint8_t pollSerial(Stream& port, ProtocolParser& parser, bool isRadioPort) {
     (void)isRadioPort;
     uint32_t now = millis();
     uint8_t lastCmd = NO_NEW_CMD;
-    while (port.available() > 0) {
+    while (!pendingBootloaderEntry && port.available() > 0) {
         FrameHeader* header = parser.feed(port.read(), now);
         if (parser.crcError) {
             DIAG_ONLY(
@@ -3673,6 +3699,24 @@ void SystemYield() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
 
+  if (pendingBootloaderEntry) {
+    if (!bootloaderStopDone) {
+      motor_Stop();
+      SerialDisplay.flush();
+      SerialLora.flush();
+      bootloaderEntryAtMs = currentMillis;
+      bootloaderStopDone = true;
+      return;
+    }
+
+    if (currentMillis - bootloaderEntryAtMs < kBootloaderEntryGraceMs) {
+      return;
+    }
+
+    jumpToBootloader();
+    return;
+  }
+
   static uint32_t timerTelemetry = 0;
   static uint32_t timerSensors = 0;
   static uint32_t timerStats = 0;
@@ -3702,7 +3746,9 @@ void SystemYield() {
   }
 
   uint8_t cmdDisp = pollSerial(SerialDisplay, parserDisplay, false);
+  if (pendingBootloaderEntry) return;
   uint8_t cmdRad  = pollSerial(SerialLora, parserRadio, true);
+  if (pendingBootloaderEntry) return;
 
   if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
       cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
@@ -3749,10 +3795,7 @@ void SystemYield() {
       }
   }
 
-  if (status == CMD_FIRMWARE_UPDATE) {
-      motor_Stop();
-      jumpToBootloader();
-  } else if (status == CMD_SYSTEM_RESET) {
+  if (status == CMD_SYSTEM_RESET) {
       makeLog(LOG_INFO, "Reboot system by external command...");
       delay(20);
       HAL_NVIC_SystemReset();
@@ -4432,6 +4475,12 @@ static inline bool isProvisionedShuttle() {
     return isValidProvisionedShuttleId(shuttleNum);
 }
 
+static void scheduleBootloaderEntry() {
+    pendingBootloaderEntry = true;
+    bootloaderStopDone = false;
+    bootloaderEntryAtMs = millis();
+}
+
 static inline bool isSupportedCommand(uint8_t cmd) {
     switch (cmd) {
         case CMD_STOP:
@@ -4478,6 +4527,10 @@ static inline bool isShuttleIdle() {
     return (status == 0 || status == CMD_STOP);
 }
 
+static inline bool isPhysicallyStationary() {
+    return (motorStart == 0 && motorReverse == 2);
+}
+
 static inline bool isErrorActive() {
     return (errorCode != 0);
 }
@@ -4487,6 +4540,7 @@ static inline bool shouldAbortLoop() {
 }
 
 void sendLog(LogLevel level, const char* msg, Stream* port = &SerialDisplay) {
+  if (pendingBootloaderEntry) return;
   uint8_t logBuffer[300];
   uint16_t msgLen = strlen(msg);
 
@@ -4551,7 +4605,7 @@ static inline void countReplyTiming(Stream* port, uint32_t elapsedUs) {
 }
 
 void sendTelemetryPacket(Stream* port) {
-    if (!port) return;
+    if (!port || pendingBootloaderEntry) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
     TelemetryPacket pkt;
 
@@ -4591,7 +4645,7 @@ void sendTelemetryPacket(Stream* port) {
 }
 
 void sendSensorPacket(Stream* port) {
-    if (!port) return;
+    if (!port || pendingBootloaderEntry) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(SensorPacket) + 2];
     temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
 
@@ -4633,7 +4687,7 @@ void sendSensorPacket(Stream* port) {
 }
 
 void sendStatsPacket(Stream* port) {
-    if (!port) return;
+    if (!port || pendingBootloaderEntry) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(StatsPacket) + 2];
     StatsPacket pkt;
     pkt.totalDist = sramStats->payload.totalDist;
