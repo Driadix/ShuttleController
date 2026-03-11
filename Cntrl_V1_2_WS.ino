@@ -4126,15 +4126,6 @@ void read_EEPROM_Data() {
   else if (waitTime > 30000) waitTime = 30000;
 }
 
-// Считывание параметров с BMS батареи
-void read_BatteryCharge() {
-  // Legacy compatibility wrapper.
-  uint32_t now = millis();
-  batteryBms.tick(now, mapBatteryActivity());
-  batteryCharge = batteryBms.socPercent();
-  batterySafetyCheck(now);
-}
-
 static bool batteryIsMotionLikeStatus(uint8_t st) {
   switch (st) {
     case CMD_MOVE_RIGHT_MAN:
