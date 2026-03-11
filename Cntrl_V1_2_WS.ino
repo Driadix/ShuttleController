@@ -49,6 +49,9 @@ static inline bool isProvisionedShuttle();
 static inline bool isSupportedCommand(uint8_t cmd);
 static inline bool isPhysicallyStationary();
 static void scheduleBootloaderEntry();
+static E32Radio::EnsureOptions makeRadioEnsureOptions();
+static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
+static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void batterySafetyCheck(uint32_t now);
 static inline bool batteryIsHighLoad();
@@ -1076,7 +1079,6 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_SET) {
         ConfigPacket* cfg = (ConfigPacket*)payload;
-        bool shuttleIdChanged = false;
         switch (cfg->paramID) {
             case CFG_SHUTTLE_NUM: {
                 if (!isValidProvisionedShuttleId(cfg->value)) {
@@ -1084,10 +1086,22 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                     return NO_NEW_CMD;
                 }
                 uint8_t newId = (uint8_t)cfg->value;
-                shuttleIdChanged = (eepromData.shuttleNum != newId);
+                if (eepromData.shuttleNum == newId) {
+                    if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+                    return NO_NEW_CMD;
+                }
+                if (!isPhysicallyStationary()) {
+                    if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
+                    return NO_NEW_CMD;
+                }
+                if (!reapplyRadioConfigForShuttleId(newId, replyPort, header->seq, suppressAck)) {
+                    return NO_NEW_CMD;
+                }
                 eepromData.shuttleNum = newId;
                 shuttleNum = newId;
-                break;
+                pendingEepromSave = true;
+                if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+                return NO_NEW_CMD;
             }
             case CFG_INTER_PALLET: {
                 uint16_t value = (uint16_t)cfg->value;
@@ -1148,7 +1162,6 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
                 return NO_NEW_CMD;
         }
-        if (shuttleIdChanged) pendingEepromSave = true;
         if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_SYNC_PUSH) {
@@ -1160,6 +1173,15 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
 
         bool shuttleIdChanged = (eepromData.shuttleNum != fullCfg->shuttleNumber);
+        if (shuttleIdChanged) {
+            if (!isPhysicallyStationary()) {
+                if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
+                return NO_NEW_CMD;
+            }
+            if (!reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, replyPort, header->seq, suppressAck)) {
+                return NO_NEW_CMD;
+            }
+        }
         
         eepromData.interPalleteDistance = fullCfg->interPallet;
         interPalleteDistance            = fullCfg->interPallet;
@@ -4379,21 +4401,8 @@ static void applyRadioConfigAtBoot() {
     makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
   }
 
-  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
-  const E32Radio::LogicalConfig desiredConfig = E32Radio::makeTransparentConfig(
-    address,
-    E32Radio::kDefaultChannel433,
-    kRadioHostBaud,
-    E32Radio::AirDataRate::B9600,
-    E32Radio::TxPower::Dbm27,
-    E32Radio::UartParity::U8N1,
-    E32Radio::IoDriveMode::PushPull,
-    E32Radio::WakeupTime::Ms250,
-    E32Radio::Fec::On
-  );
-
-  E32Radio::EnsureOptions ensureOptions = {};
-  ensureOptions.maxAttempts = E32Radio::kDefaultEnsureAttempts;
+  const E32Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(radioAddress);
+  const E32Radio::EnsureOptions ensureOptions = makeRadioEnsureOptions();
 
   e32Radio.init(&SerialLora,
                 LORA,
@@ -4402,12 +4411,64 @@ static void applyRadioConfigAtBoot() {
 
   const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
   if (ensureResult.ok()) {
-    makeLog(LOG_INFO, "Radio cfg ok: addr=%u baud=%lu", radioAddress,
+    makeLog(LOG_INFO, "Radio ok a=%u c=%u f=%u b=%lu",
+            radioAddress,
+            desiredConfig.channel,
+            E32Radio::channelFrequencyMHz(desiredConfig.channel),
             (unsigned long)E32Radio::uartBaudValue(desiredConfig.uartBaud));
   } else {
-    makeLog(LOG_WARN, "Radio cfg failed(%s): addr=%u",
-            E32Radio::statusToString(ensureResult.status), radioAddress);
+    makeLog(LOG_WARN, "Radio fail %s a=%u c=%u f=%u",
+            E32Radio::statusToString(ensureResult.status),
+            radioAddress,
+            desiredConfig.channel,
+            E32Radio::channelFrequencyMHz(desiredConfig.channel));
   }
+}
+
+static E32Radio::EnsureOptions makeRadioEnsureOptions() {
+  E32Radio::EnsureOptions ensureOptions = {};
+  ensureOptions.maxAttempts = E32Radio::kDefaultEnsureAttempts;
+  return ensureOptions;
+}
+
+static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId) {
+  const uint8_t radioAddress = E32Radio::isValidNodeId(nodeId) ? nodeId : E32Radio::kAddressLowUnassigned;
+  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
+  return E32Radio::makeTransparentConfig(
+    address,
+    E32Radio::kDefaultChannel440,
+    kRadioHostBaud,
+    E32Radio::AirDataRate::B9600,
+    E32Radio::TxPower::Dbm27,
+    E32Radio::UartParity::U8N1,
+    E32Radio::IoDriveMode::PushPull,
+    E32Radio::WakeupTime::Ms250,
+    E32Radio::Fec::On
+  );
+}
+
+static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck) {
+  const E32Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
+  const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
+  if (ensureResult.ok()) {
+    makeLog(LOG_INFO, "Radio ID ok a=%u c=%u f=%u",
+            desiredConfig.address.addl,
+            desiredConfig.channel,
+            E32Radio::channelFrequencyMHz(desiredConfig.channel));
+    return true;
+  }
+
+  makeLog(LOG_ERROR, "Radio ID fail %s %u>%u c=%u f=%u",
+          E32Radio::statusToString(ensureResult.status),
+          shuttleNum,
+          newId,
+          desiredConfig.channel,
+          E32Radio::channelFrequencyMHz(desiredConfig.channel));
+  if (!suppressAck && replyPort == &SerialDisplay) {
+    sendAck(ackSeq, ACK_REJECTED, replyPort);
+  }
+  status = CMD_SYSTEM_RESET;
+  return false;
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd) {

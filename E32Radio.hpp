@@ -11,7 +11,7 @@ constexpr uint8_t kAddressHighDefault = 0x00;
 constexpr uint8_t kAddressLowUnassigned = 0x00;
 constexpr uint8_t kAddressNodeMin = 1;
 constexpr uint8_t kAddressNodeMax = 254;
-constexpr uint8_t kDefaultChannel433 = 0x10;
+constexpr uint8_t kDefaultChannel440 = 30;
 constexpr uint8_t kDefaultEnsureAttempts = 3;
 
 struct Address {
