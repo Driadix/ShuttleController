@@ -218,6 +218,10 @@ public:
         return diagnostics_;
     }
 
+    const Config& config() const {
+        return config_;
+    }
+
     bool isFresh(uint32_t nowMs) const {
         if (config_.staleWarnMs == 0U) return true;
         if (snapshot_.lastValidFrameMs == 0U) {
