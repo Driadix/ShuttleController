@@ -8,6 +8,7 @@
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
 #include "E32Radio.hpp"
+#include "BmsDdA5.hpp"
 
 #pragma region Макросы...
 #if defined(__GNUC__)
@@ -43,18 +44,20 @@
     } while(0)
 
 void makeLogImpl(LogLevel level, const char* format, ...);
-enum class BatteryTransactionState : uint8_t;
-enum class BatteryRequestCmd : uint8_t;
-struct BatteryServiceState;
 static inline bool isValidProvisionedShuttleId(int32_t id);
 static inline bool isProvisionedShuttle();
 static inline bool isSupportedCommand(uint8_t cmd);
 static inline bool isPhysicallyStationary();
 static void scheduleBootloaderEntry();
-static void batteryServiceInit(uint32_t now);
-static void batteryTaskTick(uint32_t now);
+static size_t batteryWriteBytes(const uint8_t* data, size_t len, void* user);
+static int batteryReadByte(void* user);
+static void batterySetDriverEnable(bool enabled, void* user);
+static BmsDdA5::ActivityHint mapBatteryActivity();
+static void batteryPollStep(uint32_t now);
+static void logBatteryEvents(uint32_t events);
 static void batterySafetyCheck(uint32_t now);
 static inline bool batteryIsHighLoad();
+static bool batteryIsMotionLikeStatus(uint8_t st);
 
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
@@ -306,74 +309,32 @@ uint8_t mooveCount = 0;                // Счетчик пробксовки п
 int8_t mprOffset = 0;                  // Смещение значения МПР
 int8_t chnlOffset = 0;                 // Смещение в конце канала
 
-enum class BatteryTransactionState : uint8_t {
-  IDLE = 0,
-  TX_SENT,
-  RX_WAIT
+struct BatteryIoContext {
+  Stream* port = 0;
+  uint8_t dePin = 0;
 };
 
-enum class BatteryRequestCmd : uint8_t {
-  BASIC_INFO = 0x03,
-  CELL_INFO = 0x04,
-  DEVICE_INFO = 0x05
-};
-
-struct BatteryServiceState {
-  BatteryTransactionState state = BatteryTransactionState::IDLE;
-  BatteryRequestCmd activeCmd = BatteryRequestCmd::BASIC_INFO;
-
-  uint8_t txFrame[7] = {0};
-  uint8_t rxFrame[64] = {0};
-  uint8_t rxLen = 0;
-  uint8_t expectedLen = 0;
-
-  uint32_t txStartedAtMs = 0;
-  uint32_t txReleaseAtMs = 0;
-  uint32_t rxTimeoutAtMs = 0;
-
-  uint32_t lastValidFrameMs = 0;
-  uint32_t lastBasicPollMs = 0;
-  uint32_t lastCellPollMs = 0;
-  uint32_t lastDevicePollMs = 0;
+struct BatteryAppState {
   uint32_t lastStaleWarnMs = 0;
-
   bool staleWarned = false;
   bool lowStopLatched = false;
   bool emergencyActionActive = false;
-  bool deviceInfoBootPending = true;
-
-  uint16_t packVoltage_mV = 0;
-  int16_t current_cA = 0;
-  uint16_t remainCapacity_cAh = 0;
-  uint16_t nominalCapacity_cAh = 0;
-  uint16_t cycleCount = 0;
-  uint16_t protectionFlags = 0;
-  uint8_t fetStatus = 0;
-  uint8_t seriesCellCount = 0;
-  uint8_t ntcCount = 0;
-  int16_t ntcTemp_dC[4] = {0, 0, 0, 0};
-
-  uint8_t cellCount = 0;
-  uint16_t cellMv[24] = {0};
-  uint16_t cellMinMv = 0;
-  uint16_t cellMaxMv = 0;
-  uint16_t cellDeltaMv = 0;
-  uint32_t cellSumMv = 0;
-
-  char deviceInfo[24] = {0};
 };
 
-BatteryServiceState batteryService;
+static BatteryIoContext batteryIoContext = { &SerialRS485, RS485 };
+static const BmsDdA5::Config batteryConfig = BmsDdA5::Config();
 
-static const uint32_t BATTERY_TX_HOLD_MS = 12U;
-static const uint32_t BATTERY_RX_TIMEOUT_MS = 140U;
-static const uint32_t BATTERY_BASIC_IDLE_MS = 1000U;
-static const uint32_t BATTERY_BASIC_ACTIVE_MS = 3000U;
-static const uint32_t BATTERY_BASIC_MOVING_MS = 60000U;
-static const uint32_t BATTERY_CELL_IDLE_MS = 30000U;
-static const uint32_t BATTERY_DEVICE_IDLE_MS = 120000U;
-static const uint32_t BATTERY_STALE_WARN_MS = 15000U;
-static const uint32_t BATTERY_STALE_REPEAT_MS = 60000U;
+static BmsDdA5::Hooks makeBatteryHooks() {
+  BmsDdA5::Hooks hooks;
+  hooks.write = batteryWriteBytes;
+  hooks.readByte = batteryReadByte;
+  hooks.setDriverEnable = batterySetDriverEnable;
+  hooks.user = &batteryIoContext;
+  return hooks;
+}
+
+static BmsDdA5::Client batteryClient(makeBatteryHooks(), batteryConfig);
+static BatteryAppState batteryAppState;
 
 int lifterCurrent = 0;                 // Ток лифтера для оценки массы поднимаемого груза
 int angle = 0;                         // Значение угла полученное от магнитного экодера
@@ -498,7 +459,8 @@ void setup() {
   makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
   delay(10);
 
-  batteryServiceInit(millis());
+  batteryClient.begin(millis());
+  batteryCharge = batteryClient.snapshot().socPercent;
 
   makeLog(LOG_INFO, "Initialize RTC date and time.");
   delay(50);
@@ -3751,7 +3713,7 @@ void SystemYield() {
   static uint32_t timerStats = 0;
   static uint32_t timerUptime = 0;
 
-  batteryTaskTick(currentMillis);
+  batteryPollStep(currentMillis);
   batterySafetyCheck(currentMillis);
 
   if (currentMillis - timerTelemetry >= 300) {
@@ -4178,24 +4140,35 @@ void read_EEPROM_Data() {
 void read_BatteryCharge() {
   // Legacy compatibility wrapper.
   uint32_t now = millis();
-  batteryTaskTick(now);
+  batteryPollStep(now);
   batterySafetyCheck(now);
 }
 
-// Battery BMS service helpers (non-blocking)
-static inline uint16_t batteryReadU16BE(const uint8_t* src) {
-  return (uint16_t)(((uint16_t)src[0] << 8) | src[1]);
+static size_t batteryWriteBytes(const uint8_t* data, size_t len, void* user) {
+  BatteryIoContext* ctx = (BatteryIoContext*)user;
+  if (!ctx || !ctx->port) return 0;
+  return ctx->port->write(data, len);
 }
 
-static void batteryBuildRequestFrame(uint8_t cmd, uint8_t* outFrame7) {
-  outFrame7[0] = 0xDD;
-  outFrame7[1] = 0xA5;
-  outFrame7[2] = cmd;
-  outFrame7[3] = 0x00;
-  uint16_t checksum = (uint16_t)(~((uint16_t)cmd) + 1U);
-  outFrame7[4] = (uint8_t)(checksum >> 8);
-  outFrame7[5] = (uint8_t)(checksum & 0xFF);
-  outFrame7[6] = 0x77;
+static int batteryReadByte(void* user) {
+  BatteryIoContext* ctx = (BatteryIoContext*)user;
+  if (!ctx || !ctx->port) return -1;
+  if (ctx->port->available() <= 0) return -1;
+  return ctx->port->read();
+}
+
+static void batterySetDriverEnable(bool enabled, void* user) {
+  BatteryIoContext* ctx = (BatteryIoContext*)user;
+  if (!ctx) return;
+
+  if (enabled) {
+    pinMode(ctx->dePin, OUTPUT);
+    digitalWrite(ctx->dePin, HIGH);
+    return;
+  }
+
+  digitalWrite(ctx->dePin, LOW);
+  pinMode(ctx->dePin, INPUT_PULLDOWN);
 }
 
 static bool batteryIsMotionLikeStatus(uint8_t st) {
@@ -4226,346 +4199,144 @@ static inline bool batteryIsHighLoad() {
   return (motorStart != 0) || batteryIsMotionLikeStatus(status);
 }
 
-static void batteryResetTransaction() {
-  digitalWrite(RS485, LOW);
-  pinMode(RS485, INPUT_PULLDOWN);
-  batteryService.state = BatteryTransactionState::IDLE;
-  batteryService.rxLen = 0;
-  batteryService.expectedLen = 0;
+static BmsDdA5::ActivityHint mapBatteryActivity() {
+  if (batteryIsHighLoad()) return BmsDdA5::ActivityHint::HighLoad;
+
+  if (currentMode == CoreOpMode::IDLE ||
+      currentMode == CoreOpMode::ERROR ||
+      isShuttleIdle()) {
+    return BmsDdA5::ActivityHint::Idle;
+  }
+
+  return BmsDdA5::ActivityHint::Active;
 }
 
-static bool batteryChecksumOk(uint8_t payloadLen, uint16_t crcRx, uint16_t* c1, uint16_t* c2, uint16_t* c3) {
-  uint16_t calc1 = 0;
-  for (uint8_t i = 1; i < (uint8_t)(4U + payloadLen); i++) calc1 += batteryService.rxFrame[i];
-  calc1 = (uint16_t)(~calc1 + 1U);
-
-  uint16_t calc2 = 0;
-  for (uint8_t i = 2; i < (uint8_t)(4U + payloadLen); i++) calc2 += batteryService.rxFrame[i];
-  calc2 = (uint16_t)(~calc2 + 1U);
-
-  uint16_t calc3 = 0;
-  for (uint8_t i = 3; i < (uint8_t)(4U + payloadLen); i++) calc3 += batteryService.rxFrame[i];
-  calc3 = (uint16_t)(~calc3 + 1U);
-
-  if (c1) *c1 = calc1;
-  if (c2) *c2 = calc2;
-  if (c3) *c3 = calc3;
-  return (crcRx == calc1 || crcRx == calc2 || crcRx == calc3);
+static void batteryPollStep(uint32_t now) {
+  uint32_t events = batteryClient.tick(now, mapBatteryActivity());
+  batteryCharge = batteryClient.snapshot().socPercent;
+  if (events != 0U) logBatteryEvents(events);
 }
 
-static void batteryParseBasicInfo(uint8_t payloadLen) {
-  if (payloadLen < 20) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT03 payload short:%u", payloadLen);
-    return;
-  }
+static void logBatteryEvents(uint32_t events) {
+  const BmsDdA5::Snapshot& snapshot = batteryClient.snapshot();
+  const BmsDdA5::Diagnostics& diagnostics = batteryClient.diagnostics();
 
-  const uint8_t* p = &batteryService.rxFrame[4];
-  const uint16_t packVoltage_mV = (uint16_t)(batteryReadU16BE(&p[0]) * 10U);
-  const int16_t packCurrent_cA = (int16_t)batteryReadU16BE(&p[2]);
-  const uint16_t remainCapacity_cAh = batteryReadU16BE(&p[4]);
-  const uint16_t nominalCapacity_cAh = batteryReadU16BE(&p[6]);
-  const uint16_t cycles = batteryReadU16BE(&p[8]);
-  const uint16_t protection = (payloadLen >= 18) ? batteryReadU16BE(&p[16]) : 0;
-  const uint8_t soc = p[19];
-  const uint8_t fet = (payloadLen >= 21) ? p[20] : 0;
-  const uint8_t seriesCells = (payloadLen >= 22) ? p[21] : 0;
-  const uint8_t ntcCount = (payloadLen >= 23) ? p[22] : 0;
-
-  if (soc <= 100) batteryCharge = soc;
-  else LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT03 bad SOC:%u", soc);
-
-  batteryService.packVoltage_mV = packVoltage_mV;
-  batteryService.current_cA = packCurrent_cA;
-  batteryService.remainCapacity_cAh = remainCapacity_cAh;
-  batteryService.nominalCapacity_cAh = nominalCapacity_cAh;
-  batteryService.cycleCount = cycles;
-  batteryService.protectionFlags = protection;
-  batteryService.fetStatus = fet;
-  batteryService.seriesCellCount = seriesCells;
-  batteryService.ntcCount = ntcCount;
-
-  for (uint8_t i = 0; i < 4; i++) batteryService.ntcTemp_dC[i] = 0;
-  uint8_t ntcToStore = ntcCount;
-  if (ntcToStore > 4) ntcToStore = 4;
-  for (uint8_t i = 0; i < ntcToStore; i++) {
-    uint8_t idx = (uint8_t)(23 + i * 2U);
-    if ((uint8_t)(idx + 1) >= payloadLen) break;
-    int16_t tRaw = (int16_t)batteryReadU16BE(&p[idx]);
-    batteryService.ntcTemp_dC[i] = (int16_t)(tRaw - 2731);
-  }
-
-  if (batteryService.cellCount > 0 && seriesCells > 0 && batteryService.cellCount != seriesCells) {
-    LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cnt 03=%u 04=%u", seriesCells, batteryService.cellCount);
-  }
-
-  LOG_RATE_LIMITED(LOG_INFO, 3000, "BAT03 mV=%u cA=%d C=%u", packVoltage_mV, packCurrent_cA, batteryCharge);
-  LOG_RATE_LIMITED(LOG_INFO, 10000, "BAT03 cAh=%u/%u Cy=%u", remainCapacity_cAh, nominalCapacity_cAh, cycles);
-  LOG_RATE_LIMITED(LOG_INFO, 10000, "BAT03 P=%04X F=%02X S=%u T=%u", protection, fet, seriesCells, ntcCount);
-}
-
-static void batteryParseCellInfo(uint8_t payloadLen) {
-  const uint8_t* p = &batteryService.rxFrame[4];
-  uint8_t cells = payloadLen / 2U;
-  if (cells > 24) cells = 24;
-
-  batteryService.cellCount = cells;
-  uint16_t vMin = 0xFFFF;
-  uint16_t vMax = 0;
-  uint32_t vSum = 0;
-  for (uint8_t i = 0; i < cells; i++) {
-    uint16_t mv = batteryReadU16BE(&p[i * 2U]);
-    batteryService.cellMv[i] = mv;
-    if (mv < vMin) vMin = mv;
-    if (mv > vMax) vMax = mv;
-    vSum += mv;
-  }
-  for (uint8_t i = cells; i < 24; i++) batteryService.cellMv[i] = 0;
-
-  if (cells == 0) {
-    batteryService.cellMinMv = 0;
-    batteryService.cellMaxMv = 0;
-    batteryService.cellDeltaMv = 0;
-    batteryService.cellSumMv = 0;
-  } else {
-    batteryService.cellMinMv = vMin;
-    batteryService.cellMaxMv = vMax;
-    batteryService.cellDeltaMv = (uint16_t)(vMax - vMin);
-    batteryService.cellSumMv = vSum;
-  }
-
-  LOG_RATE_LIMITED(LOG_INFO, 15000, "BAT04 c=%u min=%u max=%u d=%u",
-                   batteryService.cellCount, batteryService.cellMinMv,
-                   batteryService.cellMaxMv, batteryService.cellDeltaMv);
-
-  if (batteryService.packVoltage_mV > 0U && batteryService.cellSumMv > 0U) {
-    int32_t diffMv = (int32_t)batteryService.cellSumMv - (int32_t)batteryService.packVoltage_mV;
-    int32_t absDiffMv = (diffMv < 0) ? -diffMv : diffMv;
-    LOG_RATE_LIMITED(LOG_INFO, 15000, "BAT04 sum=%lu pack=%u diff=%ld",
-                     (unsigned long)batteryService.cellSumMv,
-                     batteryService.packVoltage_mV,
-                     (long)diffMv);
-    if (absDiffMv > 500) {
-      LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT sum mismatch:%ld", (long)diffMv);
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::BasicUpdated)) {
+    if (snapshot.hasCell && snapshot.seriesCellCount > 0 &&
+        snapshot.cellCount > 0 && snapshot.seriesCellCount != snapshot.cellCount) {
+      LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cnt 03=%u 04=%u",
+                       snapshot.seriesCellCount, snapshot.cellCount);
     }
+
+    LOG_RATE_LIMITED(LOG_INFO, 3000, "BAT03 mV=%u cA=%d C=%u",
+                     snapshot.packVoltage_mV, snapshot.packCurrent_cA,
+                     snapshot.socPercent);
+    LOG_RATE_LIMITED(LOG_INFO, 10000, "BAT03 cAh=%u/%u Cy=%u",
+                     snapshot.remainCapacity_cAh, snapshot.nominalCapacity_cAh,
+                     snapshot.cycleCount);
+    LOG_RATE_LIMITED(LOG_INFO, 10000, "BAT03 P=%04X F=%02X S=%u T=%u",
+                     snapshot.protectionFlags, snapshot.fetStatus,
+                     snapshot.seriesCellCount, snapshot.ntcCount);
   }
 
-  if (batteryService.cellDeltaMv > 300U) {
-    LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cell delta=%u", batteryService.cellDeltaMv);
-  }
-  if (batteryService.cellMinMv > 0U && batteryService.cellMinMv < 2500U) {
-    LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cell low=%u", batteryService.cellMinMv);
-  }
-}
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::CellUpdated)) {
+    LOG_RATE_LIMITED(LOG_INFO, 15000, "BAT04 c=%u min=%u max=%u d=%u",
+                     snapshot.cellCount, snapshot.cellMin_mV,
+                     snapshot.cellMax_mV, snapshot.cellDelta_mV);
 
-static void batteryParseDeviceInfo(uint8_t payloadLen) {
-  const uint8_t* p = &batteryService.rxFrame[4];
-  uint8_t outIdx = 0;
-  for (uint8_t i = 0; i < payloadLen && outIdx < (uint8_t)(sizeof(batteryService.deviceInfo) - 1U); i++) {
-    char ch = (char)p[i];
-    if (ch < 32 || ch > 126) ch = '.';
-    batteryService.deviceInfo[outIdx++] = ch;
-  }
-  batteryService.deviceInfo[outIdx] = '\0';
-  if (outIdx == 0) {
-    strncpy(batteryService.deviceInfo, "n/a", sizeof(batteryService.deviceInfo) - 1U);
-    batteryService.deviceInfo[sizeof(batteryService.deviceInfo) - 1U] = '\0';
-  }
-  LOG_RATE_LIMITED(LOG_INFO, 60000, "BAT05 id:%s", batteryService.deviceInfo);
-}
-
-static bool batteryProcessFrame(uint32_t now) {
-  if (batteryService.rxLen < 7) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT short n=%u", batteryService.rxLen);
-    return false;
-  }
-  if (batteryService.rxFrame[0] != 0xDD || batteryService.rxFrame[batteryService.rxLen - 1] != 0x77) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT bad h/e:%02X/%02X", batteryService.rxFrame[0], batteryService.rxFrame[batteryService.rxLen - 1]);
-    return false;
-  }
-
-  const uint8_t payloadLen = batteryService.rxFrame[3];
-  const uint8_t frameLen = (uint8_t)(payloadLen + 7U);
-  if (frameLen > batteryService.rxLen || frameLen > sizeof(batteryService.rxFrame)) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT trunc exp=%u got=%u", frameLen, batteryService.rxLen);
-    return false;
-  }
-
-  const uint8_t cmd = batteryService.rxFrame[1];
-  const uint8_t statusCode = batteryService.rxFrame[2];
-  if (cmd != (uint8_t)batteryService.activeCmd) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT cmd miss exp=%02X got=%02X", (uint8_t)batteryService.activeCmd, cmd);
-    return false;
-  }
-  if (statusCode != 0x00) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT status=%02X cmd=%02X", statusCode, cmd);
-    return false;
-  }
-
-  const uint16_t crcRx = batteryReadU16BE(&batteryService.rxFrame[4 + payloadLen]);
-  uint16_t c1 = 0, c2 = 0, c3 = 0;
-  if (!batteryChecksumOk(payloadLen, crcRx, &c1, &c2, &c3)) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT crc %04X/%04X/%04X", crcRx, c1, c2);
-    return false;
-  }
-
-  if (cmd == (uint8_t)BatteryRequestCmd::BASIC_INFO) {
-    batteryParseBasicInfo(payloadLen);
-  } else if (cmd == (uint8_t)BatteryRequestCmd::CELL_INFO) {
-    batteryParseCellInfo(payloadLen);
-  } else if (cmd == (uint8_t)BatteryRequestCmd::DEVICE_INFO) {
-    batteryParseDeviceInfo(payloadLen);
-  }
-
-  batteryService.lastValidFrameMs = now;
-  batteryService.staleWarned = false;
-  return true;
-}
-
-static void batteryStartRequest(uint8_t cmd, uint32_t now) {
-  while (SerialRS485.available()) (void)SerialRS485.read();
-
-  batteryBuildRequestFrame(cmd, batteryService.txFrame);
-  batteryService.activeCmd = (BatteryRequestCmd)cmd;
-  batteryService.rxLen = 0;
-  batteryService.expectedLen = 0;
-
-  pinMode(RS485, OUTPUT);
-  digitalWrite(RS485, HIGH);
-  size_t wr = SerialRS485.write(batteryService.txFrame, sizeof(batteryService.txFrame));
-  if (wr != sizeof(batteryService.txFrame)) {
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT tx short=%u", (uint8_t)wr);
-  }
-
-  batteryService.txStartedAtMs = now;
-  batteryService.txReleaseAtMs = now + BATTERY_TX_HOLD_MS;
-  batteryService.rxTimeoutAtMs = now + BATTERY_RX_TIMEOUT_MS;
-  batteryService.state = BatteryTransactionState::TX_SENT;
-
-  if (cmd == (uint8_t)BatteryRequestCmd::BASIC_INFO) batteryService.lastBasicPollMs = now;
-  else if (cmd == (uint8_t)BatteryRequestCmd::CELL_INFO) batteryService.lastCellPollMs = now;
-  else if (cmd == (uint8_t)BatteryRequestCmd::DEVICE_INFO) {
-    batteryService.lastDevicePollMs = now;
-    batteryService.deviceInfoBootPending = false;
-  }
-}
-
-static void batteryServiceInit(uint32_t now) {
-  memset(&batteryService, 0, sizeof(batteryService));
-  batteryService.state = BatteryTransactionState::IDLE;
-  batteryService.deviceInfoBootPending = true;
-  batteryService.lastBasicPollMs = now - BATTERY_BASIC_IDLE_MS;
-  batteryService.lastCellPollMs = now - BATTERY_CELL_IDLE_MS;
-  batteryService.lastDevicePollMs = now - BATTERY_DEVICE_IDLE_MS;
-  batteryResetTransaction();
-}
-
-static void batteryTaskTick(uint32_t now) {
-  if (batteryService.state == BatteryTransactionState::TX_SENT) {
-    if ((int32_t)(now - batteryService.txReleaseAtMs) >= 0) {
-      digitalWrite(RS485, LOW);
-      pinMode(RS485, INPUT_PULLDOWN);
-      batteryService.state = BatteryTransactionState::RX_WAIT;
-    }
-  }
-
-  if (batteryService.state == BatteryTransactionState::RX_WAIT) {
-    while (SerialRS485.available()) {
-      int16_t b = SerialRS485.read();
-      if (b < 0) break;
-      uint8_t rx = (uint8_t)b;
-      if (batteryService.rxLen == 0 && rx != 0xDD) continue;
-
-      if (batteryService.rxLen >= sizeof(batteryService.rxFrame)) {
-        LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT overflow");
-        batteryResetTransaction();
-        break;
-      }
-
-      batteryService.rxFrame[batteryService.rxLen++] = rx;
-
-      if (batteryService.rxLen >= 4 && batteryService.expectedLen == 0) {
-        batteryService.expectedLen = (uint8_t)(batteryService.rxFrame[3] + 7U);
-        if (batteryService.expectedLen > sizeof(batteryService.rxFrame)) {
-          LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT len bad:%u", batteryService.rxFrame[3]);
-          batteryResetTransaction();
-          break;
-        }
-      }
-
-      if (batteryService.expectedLen > 0 && batteryService.rxLen >= batteryService.expectedLen) {
-        (void)batteryProcessFrame(now);
-        batteryResetTransaction();
-        break;
+    if (snapshot.packVoltage_mV > 0U && snapshot.cellSum_mV > 0U) {
+      int32_t diffMv = (int32_t)snapshot.cellSum_mV - (int32_t)snapshot.packVoltage_mV;
+      int32_t absDiffMv = (diffMv < 0) ? -diffMv : diffMv;
+      LOG_RATE_LIMITED(LOG_INFO, 15000, "BAT04 sum=%lu pack=%u diff=%ld",
+                       (unsigned long)snapshot.cellSum_mV,
+                       snapshot.packVoltage_mV,
+                       (long)diffMv);
+      if (absDiffMv > 500) {
+        LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT sum mismatch:%ld", (long)diffMv);
       }
     }
 
-    if (batteryService.state == BatteryTransactionState::RX_WAIT &&
-        (int32_t)(now - batteryService.rxTimeoutAtMs) >= 0) {
-      LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT timeout cmd=%02X", (uint8_t)batteryService.activeCmd);
-      batteryResetTransaction();
+    if (snapshot.cellDelta_mV > 300U) {
+      LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cell delta=%u", snapshot.cellDelta_mV);
     }
-    return;
+    if (snapshot.cellMin_mV > 0U && snapshot.cellMin_mV < 2500U) {
+      LOG_RATE_LIMITED(LOG_WARN, 5000, "BAT cell low=%u", snapshot.cellMin_mV);
+    }
   }
 
-  if (batteryService.state != BatteryTransactionState::IDLE) return;
-
-  const bool highLoad = batteryIsHighLoad();
-  const bool idleErrorMode = (currentMode == CoreOpMode::IDLE || currentMode == CoreOpMode::ERROR || isShuttleIdle());
-  const uint32_t basicInterval = highLoad ? BATTERY_BASIC_MOVING_MS :
-    (idleErrorMode ? BATTERY_BASIC_IDLE_MS : BATTERY_BASIC_ACTIVE_MS);
-
-  if (!highLoad && (now - batteryService.lastBasicPollMs >= basicInterval)) {
-    batteryStartRequest((uint8_t)BatteryRequestCmd::BASIC_INFO, now);
-    return;
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::DeviceUpdated)) {
+    LOG_RATE_LIMITED(LOG_INFO, 60000, "BAT05 id:%s", snapshot.deviceInfo);
   }
 
-  if (!idleErrorMode || highLoad) return;
-
-  if (now - batteryService.lastCellPollMs >= BATTERY_CELL_IDLE_MS) {
-    batteryStartRequest((uint8_t)BatteryRequestCmd::CELL_INFO, now);
-    return;
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::Timeout)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT timeout cmd=%02X",
+                     (uint8_t)diagnostics.lastRequested);
   }
-
-  if (batteryService.deviceInfoBootPending || (now - batteryService.lastDevicePollMs >= BATTERY_DEVICE_IDLE_MS)) {
-    batteryStartRequest((uint8_t)BatteryRequestCmd::DEVICE_INFO, now);
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::Overflow)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT overflow");
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::BadFrame)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT bad frame");
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::BadChecksum)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT crc");
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::BadStatus)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT status cmd=%02X",
+                     (uint8_t)diagnostics.lastRequested);
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::CommandMismatch)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT cmd miss");
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::LengthError)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT len bad");
+  }
+  if (BmsDdA5::hasEvent(events, BmsDdA5::Event::TxShort)) {
+    LOG_RATE_LIMITED(LOG_WARN, 2000, "BAT tx short");
   }
 }
 
 static void batterySafetyCheck(uint32_t now) {
-  if (batteryService.lastValidFrameMs == 0) {
-    if (now >= BATTERY_STALE_WARN_MS &&
-        (!batteryService.staleWarned || (now - batteryService.lastStaleWarnMs >= BATTERY_STALE_REPEAT_MS))) {
+  const BmsDdA5::Snapshot& snapshot = batteryClient.snapshot();
+  const bool fresh = batteryClient.isFresh(now);
+
+  if (fresh) {
+    batteryAppState.staleWarned = false;
+  } else if (snapshot.lastValidFrameMs == 0U) {
+    if (now >= batteryConfig.staleWarnMs &&
+        (!batteryAppState.staleWarned ||
+         (now - batteryAppState.lastStaleWarnMs >= batteryConfig.staleRepeatMs))) {
       makeLog(LOG_WARN, "BAT no valid frame");
-      batteryService.staleWarned = true;
-      batteryService.lastStaleWarnMs = now;
+      batteryAppState.staleWarned = true;
+      batteryAppState.lastStaleWarnMs = now;
     }
   } else {
-    uint32_t staleAge = now - batteryService.lastValidFrameMs;
-    if (staleAge >= BATTERY_STALE_WARN_MS) {
-      if (!batteryService.staleWarned || (now - batteryService.lastStaleWarnMs >= BATTERY_STALE_REPEAT_MS)) {
-        makeLog(LOG_WARN, "BAT stale: %lus", staleAge / 1000U);
-        batteryService.staleWarned = true;
-        batteryService.lastStaleWarnMs = now;
-      }
+    uint32_t staleAge = now - snapshot.lastValidFrameMs;
+    if (staleAge >= batteryConfig.staleWarnMs &&
+        (!batteryAppState.staleWarned ||
+         (now - batteryAppState.lastStaleWarnMs >= batteryConfig.staleRepeatMs))) {
+      makeLog(LOG_WARN, "BAT stale: %lus", staleAge / 1000U);
+      batteryAppState.staleWarned = true;
+      batteryAppState.lastStaleWarnMs = now;
     }
   }
 
   if (batteryCharge > minBattCharge) {
-    batteryService.lowStopLatched = false;
+    batteryAppState.lowStopLatched = false;
     return;
   }
 
-  if (batteryCharge == 0 || batteryService.lowStopLatched || batteryService.emergencyActionActive) return;
+  if (batteryCharge == 0 || batteryAppState.lowStopLatched || batteryAppState.emergencyActionActive) return;
 
-  batteryService.lowStopLatched = true;
-  batteryService.emergencyActionActive = true;
+  batteryAppState.lowStopLatched = true;
+  batteryAppState.emergencyActionActive = true;
   makeLog(LOG_ERROR, "Low battery! Emergency stop.");
   lifter_Down();
   moove_Forward();
   setFault(FAULT_LOW_BATTERY);
   STATS_ATOMIC_UPDATE(sramStats->payload.lowBatteryEvents++);
   status = CMD_STOP;
-  batteryService.emergencyActionActive = false;
+  batteryAppState.emergencyActionActive = false;
 }
 
 // Обработка срабатывания бампера
@@ -4962,7 +4733,7 @@ void sendTelemetryPacket(Stream* port) {
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;
     pkt.batteryCharge = batteryCharge;
-    pkt.batteryVoltage_mV = batteryService.packVoltage_mV;
+    pkt.batteryVoltage_mV = batteryClient.snapshot().packVoltage_mV;
     pkt.shuttleNumber = shuttleNum;
     pkt.palleteCount = palleteCount;
 
