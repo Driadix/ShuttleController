@@ -520,11 +520,17 @@ void loop() {
             send_Cmd(); 
 
             if (status == CMD_MANUAL_MODE || pendingDisplayManualModeBypass) {
-                if (pendingDisplayManualModeBypass) {
+                const bool bypassedFromDisplay = pendingDisplayManualModeBypass;
+                touchManualSession();
+                currentOperation = STATE_MANUAL;
+                if (bypassedFromDisplay) {
                     makeLog(LOG_INFO, "Manual mode bypass from display command: 0x%02X", status);
                 }
+                makeLog(LOG_INFO, "Manual enter cmd=%02X src=%s", status,
+                        bypassedFromDisplay ? "display" : "direct");
                 pendingDisplayManualModeBypass = false;
                 currentMode = CoreOpMode::MANUAL;
+                send_Cmd();
             } else {
                 currentMode = CoreOpMode::AUTO_EXEC;
             }
@@ -565,8 +571,16 @@ void loop() {
     case CoreOpMode::MANUAL: {
       if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); }
       else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
+      else if (status == CMD_STOP_MANUAL) {
+        touchManualSession();
+        status = CMD_MANUAL_MODE;
+        currentOperation = STATE_MANUAL;
+        makeLog(LOG_INFO, "Manual stop -> ready");
+        send_Cmd();
+      }
       else if (status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
         currentOperation = (status == CMD_LIFT_UP) ? STATE_LIFT_UP : STATE_LIFT_DOWN;
+        makeLog(LOG_INFO, "Manual lift start dir=%s", status == CMD_LIFT_UP ? "up" : "down");
         send_Cmd();
         touchManualSession();
         if (status == CMD_LIFT_UP) {
@@ -578,7 +592,10 @@ void loop() {
           touchManualSession();
           status = CMD_MANUAL_MODE;
           currentOperation = STATE_MANUAL;
+          makeLog(LOG_INFO, "Manual lift done -> ready");
           send_Cmd();
+        } else {
+          makeLog(LOG_WARN, "Manual lift abort status=%02X", status);
         }
       }
       else if (status == CMD_LOAD) { currentOperation = STATE_LOAD; run_Cmd(); }
@@ -587,6 +604,7 @@ void loop() {
       else if (status == CMD_LONG_UNLOAD) { currentOperation = STATE_LONG_UNLOAD; run_Cmd(); }
 
       if (millis() - lastManualRadioCmdTime > 5000) {
+          makeLog(LOG_WARN, "Manual session timeout -> idle");
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
           status = CMD_STOP; 
@@ -603,6 +621,7 @@ void loop() {
       }
       
       if (status == CMD_STOP) {
+          makeLog(LOG_INFO, "Manual exit -> idle");
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
       }
@@ -1065,6 +1084,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
 
         if (!isProvisionedShuttle()) {
+            if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) || isLiftCommand(reqCmd)) {
+                makeLog(LOG_WARN, "Manual reject cmd=%02X reason=not_prov", reqCmd);
+            }
             if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
@@ -1072,11 +1094,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         bool inChannel = digitalRead(CHANNEL);
 
         if (isErrorActive() && !isOverrideCommand(reqCmd)) {
+            if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) || isLiftCommand(reqCmd)) {
+                makeLog(LOG_WARN, "Manual reject cmd=%02X reason=error", reqCmd);
+            }
             if (!suppressAck) sendAck(header->seq, ACK_ERROR_STATE, replyPort);
             return NO_NEW_CMD;
         }
 
         if (!inChannel && !isOutOfChannelExemptCommand(reqCmd)) {
+            if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) || isLiftCommand(reqCmd)) {
+                makeLog(LOG_WARN, "Manual reject cmd=%02X reason=channel", reqCmd);
+            }
             if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
@@ -1091,6 +1119,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             }
             return reqCmd;
         } else {
+            if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) || isLiftCommand(reqCmd)) {
+                makeLog(LOG_WARN, "Manual reject cmd=%02X reason=busy", reqCmd);
+            }
             if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
             return NO_NEW_CMD;
         }
@@ -3798,6 +3829,10 @@ void SystemYield() {
       status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
       manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
       pendingDisplayManualModeBypass = false;
+      if (status == CMD_STOP_MANUAL) {
+          touchManualSession();
+          makeLog(LOG_INFO, "Manual stop cmd src=%s", cmdRad == CMD_STOP_MANUAL ? "radio" : "display");
+      }
       motor_Stop();
   }
   else if (cmdRad != NO_NEW_CMD) {
