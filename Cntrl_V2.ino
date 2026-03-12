@@ -47,12 +47,17 @@ void makeLogImpl(LogLevel level, const char* format, ...);
 static inline bool isValidProvisionedShuttleId(int32_t id);
 static inline bool isProvisionedShuttle();
 static inline bool isSupportedCommand(uint8_t cmd);
+static inline bool isManualMoveCommand(uint8_t cmd);
 static inline bool isContinuousManualCommand(uint8_t cmd);
 static inline bool isLiftCommand(uint8_t cmd);
 static inline bool isOutOfChannelExemptCommand(uint8_t cmd);
 static inline bool canAcceptCommandNow(uint8_t cmd);
 static inline bool isPhysicallyStationary();
 static inline void touchManualSession();
+static inline void beginManualMoveTracking(uint8_t cmd, bool fromRadio, uint32_t now);
+static inline void refreshManualMoveTracking(uint8_t cmd, bool fromRadio, uint32_t now);
+static inline void clearManualMoveTracking();
+static inline bool shouldStopProvisionalManualMove(uint8_t cmd, uint32_t now);
 static void scheduleBootloaderEntry();
 static E32Radio::EnsureOptions makeRadioEnsureOptions();
 static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
@@ -138,6 +143,9 @@ struct ConfigPageHeader {
 #define SerialDisplay Serial1
 
 constexpr uint8_t NO_NEW_CMD = 0xFF;
+constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
+constexpr uint32_t kManualContinuationWindowMs = 250;
+constexpr uint32_t kManualRadioStreamTimeoutMs = 1500;
 
 #pragma endregion
 
@@ -147,7 +155,11 @@ char logStringBuffer[256];
 
 enum class CoreOpMode { IDLE, AUTO_EXEC, MANUAL, ERROR };
 CoreOpMode currentMode = CoreOpMode::IDLE;
-uint32_t lastManualRadioCmdTime = 0;
+uint32_t lastManualSessionActivityTime = 0;
+uint32_t lastManualRadioStreamCmdTime = 0;
+uint32_t manualMoveStartedMs = 0;
+uint8_t manualTrackedMoveCmd = NO_NEW_CMD;
+bool manualContinuousControl = false;
 bool manualControlFromRadio = false;
 bool pendingDisplayManualModeBypass = false;
 
@@ -521,6 +533,9 @@ void loop() {
 
             if (status == CMD_MANUAL_MODE || pendingDisplayManualModeBypass) {
                 const bool bypassedFromDisplay = pendingDisplayManualModeBypass;
+                if (status == CMD_MANUAL_MODE) {
+                    clearManualMoveTracking();
+                }
                 touchManualSession();
                 currentOperation = STATE_MANUAL;
                 if (bypassedFromDisplay) {
@@ -572,6 +587,7 @@ void loop() {
       if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); }
       else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
       else if (status == CMD_STOP_MANUAL) {
+        clearManualMoveTracking();
         touchManualSession();
         status = CMD_MANUAL_MODE;
         currentOperation = STATE_MANUAL;
@@ -603,7 +619,8 @@ void loop() {
       else if (status == CMD_LONG_LOAD) { currentOperation = STATE_LONG_LOAD; run_Cmd(); }
       else if (status == CMD_LONG_UNLOAD) { currentOperation = STATE_LONG_UNLOAD; run_Cmd(); }
 
-      if (millis() - lastManualRadioCmdTime > 5000) {
+      if (millis() - lastManualSessionActivityTime > kManualSessionIdleTimeoutMs) {
+          clearManualMoveTracking();
           makeLog(LOG_WARN, "Manual session timeout -> idle");
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
@@ -621,6 +638,7 @@ void loop() {
       }
       
       if (status == CMD_STOP) {
+          clearManualMoveTracking();
           makeLog(LOG_INFO, "Manual exit -> idle");
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
@@ -629,6 +647,7 @@ void loop() {
     }
     case CoreOpMode::ERROR: {
       currentOperation = STATE_ERROR;
+      clearManualMoveTracking();
       motor_Force_Stop();
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
@@ -3542,7 +3561,6 @@ void moove_Right() {
   int cnt = millis();
   get_Distance();
   
-  lastManualRadioCmdTime = millis();
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку 
@@ -3550,6 +3568,17 @@ void moove_Right() {
     if (shouldAbortLoop()) {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
+      return;
+    }
+    if (status != CMD_MOVE_RIGHT_MAN) {
+      motor_Stop();
+      return;
+    }
+    if (shouldStopProvisionalManualMove(CMD_MOVE_RIGHT_MAN, millis())) {
+      clearManualMoveTracking();
+      status = CMD_MANUAL_MODE;
+      currentOperation = STATE_MANUAL;
+      motor_Stop();
       return;
     }
 
@@ -3572,12 +3601,6 @@ void moove_Right() {
       set_Position();
     }
  
-    if (manualControlFromRadio && (millis() - lastManualRadioCmdTime > 800)) {
-      motor_Stop();
-      moove = 0;
-      makeLog(LOG_WARN, "Radio link timeout. Halting."); 
-      return;
-    }
   }
   motor_Stop();
   oldSpeed = 0;
@@ -3592,7 +3615,6 @@ void moove_Left() {
   motor_Start_Forward();
   int cnt = millis();
   get_Distance();
-  lastManualRadioCmdTime = millis();
   motor_Speed(manualCount);
 
   while (moove) {  // Едем пока держат кнопку
@@ -3601,6 +3623,17 @@ void moove_Left() {
       motor_Stop(); 
       makeLog(LOG_INFO, "Manual stop requested."); 
       return; 
+    }
+    if (status != CMD_MOVE_LEFT_MAN) {
+      motor_Stop();
+      return;
+    }
+    if (shouldStopProvisionalManualMove(CMD_MOVE_LEFT_MAN, millis())) {
+      clearManualMoveTracking();
+      status = CMD_MANUAL_MODE;
+      currentOperation = STATE_MANUAL;
+      motor_Stop();
+      return;
     }
     blink_Work();
     get_Distance();
@@ -3620,12 +3653,6 @@ void moove_Left() {
       }
       set_Position();
     } 
-    if (manualControlFromRadio && (millis() - lastManualRadioCmdTime > 800)) {
-      motor_Stop();
-      moove = 0;
-      makeLog(LOG_WARN, "Radio link timeout. Halting.");
-      return;
-    }
   }
   motor_Stop();
   oldSpeed = 0;
@@ -3807,27 +3834,18 @@ void SystemYield() {
   uint8_t cmdRad  = pollSerial(SerialLora, parserRadio, true);
   if (pendingBootloaderEntry) return;
 
-  if (isContinuousManualCommand(cmdRad) || cmdRad == CMD_STOP) {
-      if (lastManualRadioCmdTime != 0) {
+  if (isManualMoveCommand(cmdRad) || cmdRad == CMD_STOP_MANUAL) {
+      if (lastManualRadioStreamCmdTime != 0) {
           DIAG_ONLY(
-              uint32_t gap = currentMillis - lastManualRadioCmdTime;
+              uint32_t gap = currentMillis - lastManualRadioStreamCmdTime;
               if (gap > linkDiag.manualRadioGapMaxMs) linkDiag.manualRadioGapMaxMs = gap;
           );
-      }
-      lastManualRadioCmdTime = currentMillis;
-  }
-  
-  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN) {
-      if (manualControlFromRadio && (currentMillis - lastManualRadioCmdTime > 800)) {
-          status = CMD_STOP_MANUAL;
-          makeLog(LOG_WARN, "Connection drop timeout!");
-          motor_Stop();
       }
   }
 
   if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL) {
       status = (cmdRad == CMD_STOP_MANUAL || cmdDisp == CMD_STOP_MANUAL) ? CMD_STOP_MANUAL : CMD_STOP;
-      manualControlFromRadio = (cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL);
+      clearManualMoveTracking();
       pendingDisplayManualModeBypass = false;
       if (status == CMD_STOP_MANUAL) {
           touchManualSession();
@@ -3837,32 +3855,58 @@ void SystemYield() {
   }
   else if (cmdRad != NO_NEW_CMD) {
       if (canAcceptCommandNow(cmdRad)) {
-          status = cmdRad;
+          if (currentMode == CoreOpMode::MANUAL && cmdRad == CMD_MANUAL_MODE) {
+              clearManualMoveTracking();
+              pendingDisplayManualModeBypass = false;
+              status = CMD_STOP;
+          } else {
+              status = cmdRad;
+          }
           if (currentMode == CoreOpMode::MANUAL &&
-              (isContinuousManualCommand(cmdRad) || isLiftCommand(cmdRad))) {
+              (isManualMoveCommand(cmdRad) || isLiftCommand(cmdRad) || cmdRad == CMD_STOP_MANUAL)) {
               touchManualSession();
           }
-          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN) {
-              manualControlFromRadio = true;
-              lastManualRadioCmdTime = currentMillis;
+          if (isManualMoveCommand(cmdRad)) {
+              refreshManualMoveTracking(cmdRad, true, currentMillis);
               pendingDisplayManualModeBypass = false;
+          } else if (isLiftCommand(cmdRad)) {
+              clearManualMoveTracking();
           }
       }
   } 
   else if (cmdDisp != NO_NEW_CMD) {
       if (canAcceptCommandNow(cmdDisp)) {
-          status = cmdDisp;
+          if (currentMode == CoreOpMode::MANUAL && cmdDisp == CMD_MANUAL_MODE) {
+              clearManualMoveTracking();
+              pendingDisplayManualModeBypass = false;
+              status = CMD_STOP;
+          } else {
+              status = cmdDisp;
+          }
           if (currentMode == CoreOpMode::MANUAL &&
-              (isContinuousManualCommand(cmdDisp) || isLiftCommand(cmdDisp))) {
+              (isManualMoveCommand(cmdDisp) || isLiftCommand(cmdDisp) || cmdDisp == CMD_STOP_MANUAL)) {
               touchManualSession();
           }
-          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN) {
-              manualControlFromRadio = false;
+          if (isManualMoveCommand(cmdDisp)) {
+              refreshManualMoveTracking(cmdDisp, false, currentMillis);
               if (currentMode != CoreOpMode::MANUAL) {
                   pendingDisplayManualModeBypass = true;
               }
+          } else if (isLiftCommand(cmdDisp)) {
+              clearManualMoveTracking();
           }
       }
+  }
+
+  if ((status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN) &&
+      manualContinuousControl &&
+      manualControlFromRadio &&
+      lastManualRadioStreamCmdTime != 0 &&
+      currentMillis - lastManualRadioStreamCmdTime > kManualRadioStreamTimeoutMs) {
+      status = CMD_STOP_MANUAL;
+      clearManualMoveTracking();
+      makeLog(LOG_WARN, "Connection drop timeout!");
+      motor_Stop();
   }
 
   if (status == CMD_SYSTEM_RESET) {
@@ -4624,10 +4668,12 @@ static inline bool isSupportedCommand(uint8_t cmd) {
     }
 }
 
+static inline bool isManualMoveCommand(uint8_t cmd) {
+    return (cmd == CMD_MOVE_RIGHT_MAN || cmd == CMD_MOVE_LEFT_MAN);
+}
+
 static inline bool isContinuousManualCommand(uint8_t cmd) {
-    return (cmd == CMD_MOVE_RIGHT_MAN ||
-            cmd == CMD_MOVE_LEFT_MAN ||
-            cmd == CMD_STOP_MANUAL);
+    return (isManualMoveCommand(cmd) || cmd == CMD_STOP_MANUAL);
 }
 
 static inline bool isLiftCommand(uint8_t cmd) {
@@ -4660,8 +4706,8 @@ static inline bool canAcceptCommandNow(uint8_t cmd) {
     }
 
     if (currentMode == CoreOpMode::MANUAL) {
-        return (cmd == CMD_MOVE_RIGHT_MAN ||
-                cmd == CMD_MOVE_LEFT_MAN ||
+        return (cmd == CMD_MANUAL_MODE ||
+                isManualMoveCommand(cmd) ||
                 isLiftCommand(cmd));
     }
 
@@ -4673,7 +4719,45 @@ static inline bool isPhysicallyStationary() {
 }
 
 static inline void touchManualSession() {
-    lastManualRadioCmdTime = millis();
+    lastManualSessionActivityTime = millis();
+}
+
+static inline void beginManualMoveTracking(uint8_t cmd, bool fromRadio, uint32_t now) {
+    manualTrackedMoveCmd = cmd;
+    manualMoveStartedMs = now;
+    lastManualRadioStreamCmdTime = fromRadio ? now : 0;
+    manualContinuousControl = false;
+    manualControlFromRadio = false;
+}
+
+static inline void refreshManualMoveTracking(uint8_t cmd, bool fromRadio, uint32_t now) {
+    if (manualTrackedMoveCmd != cmd || manualMoveStartedMs == 0) {
+        beginManualMoveTracking(cmd, fromRadio, now);
+        return;
+    }
+
+    if (!manualContinuousControl && now - manualMoveStartedMs <= kManualContinuationWindowMs) {
+        manualContinuousControl = true;
+    }
+    if (fromRadio) {
+        lastManualRadioStreamCmdTime = now;
+        manualControlFromRadio = manualContinuousControl;
+    }
+}
+
+static inline void clearManualMoveTracking() {
+    manualTrackedMoveCmd = NO_NEW_CMD;
+    manualMoveStartedMs = 0;
+    lastManualRadioStreamCmdTime = 0;
+    manualContinuousControl = false;
+    manualControlFromRadio = false;
+}
+
+static inline bool shouldStopProvisionalManualMove(uint8_t cmd, uint32_t now) {
+    return (manualTrackedMoveCmd == cmd &&
+            !manualContinuousControl &&
+            manualMoveStartedMs != 0 &&
+            now - manualMoveStartedMs > kManualContinuationWindowMs);
 }
 
 static inline bool isErrorActive() {
