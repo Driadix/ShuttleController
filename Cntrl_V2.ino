@@ -51,7 +51,7 @@ static inline bool isManualMoveCommand(uint8_t cmd);
 static inline bool isContinuousManualCommand(uint8_t cmd);
 static inline bool isLiftCommand(uint8_t cmd);
 static inline bool isOutOfChannelExemptCommand(uint8_t cmd);
-static inline bool canAcceptCommandNow(uint8_t cmd);
+static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio);
 static inline bool isPhysicallyStationary();
 static inline void touchManualSession();
 static inline void beginManualMoveTracking(uint8_t cmd, bool fromRadio, uint32_t now);
@@ -145,7 +145,7 @@ struct ConfigPageHeader {
 constexpr uint8_t NO_NEW_CMD = 0xFF;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualContinuationWindowMs = 250;
-constexpr uint32_t kManualRadioStreamTimeoutMs = 1500;
+constexpr uint32_t kManualRadioStreamTimeoutMs = 700;
 
 #pragma endregion
 
@@ -1128,7 +1128,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             return NO_NEW_CMD;
         }
 
-        if (canAcceptCommandNow(reqCmd)) {
+        if (canAcceptCommandNow(reqCmd, replyPort == &SerialLora)) {
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
 
             if (realMsgID == MSG_CMD_WITH_ARG) {
@@ -3854,7 +3854,7 @@ void SystemYield() {
       motor_Stop();
   }
   else if (cmdRad != NO_NEW_CMD) {
-      if (canAcceptCommandNow(cmdRad)) {
+      if (canAcceptCommandNow(cmdRad, true)) {
           if (currentMode == CoreOpMode::MANUAL && cmdRad == CMD_MANUAL_MODE) {
               clearManualMoveTracking();
               pendingDisplayManualModeBypass = false;
@@ -3875,7 +3875,7 @@ void SystemYield() {
       }
   } 
   else if (cmdDisp != NO_NEW_CMD) {
-      if (canAcceptCommandNow(cmdDisp)) {
+      if (canAcceptCommandNow(cmdDisp, false)) {
           if (currentMode == CoreOpMode::MANUAL && cmdDisp == CMD_MANUAL_MODE) {
               clearManualMoveTracking();
               pendingDisplayManualModeBypass = false;
@@ -4700,18 +4700,30 @@ static inline bool isShuttleIdle() {
     return (status == 0 || status == CMD_STOP);
 }
 
-static inline bool canAcceptCommandNow(uint8_t cmd) {
-    if (isShuttleIdle() || isOverrideCommand(cmd)) {
+static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio) {
+    if (isOverrideCommand(cmd)) {
         return true;
     }
 
-    if (currentMode == CoreOpMode::MANUAL) {
-        return (cmd == CMD_MANUAL_MODE ||
-                isManualMoveCommand(cmd) ||
-                isLiftCommand(cmd));
+    if (isManualMoveCommand(cmd)) {
+        if (currentMode == CoreOpMode::MANUAL) {
+            return true;
+        }
+
+        // Only the wired display is allowed to bypass directly into manual
+        // from idle by issuing a movement command.
+        return (!fromRadio && isShuttleIdle());
     }
 
-    return false;
+    if (isLiftCommand(cmd)) {
+        return (currentMode == CoreOpMode::MANUAL);
+    }
+
+    if (cmd == CMD_MANUAL_MODE) {
+        return (isShuttleIdle() || currentMode == CoreOpMode::MANUAL);
+    }
+
+    return isShuttleIdle();
 }
 
 static inline bool isPhysicallyStationary() {
