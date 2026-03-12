@@ -59,7 +59,9 @@ static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void batterySafetyCheck(uint32_t now);
+static void batterySafetyReset(uint32_t now);
 static inline bool batteryIsHighLoad();
+static inline bool batteryLowFaultLatched();
 static bool batteryIsMotionLikeStatus(uint8_t st);
 
 #define STATS_MAGIC_WORD 0xAA55BEEF
@@ -315,12 +317,14 @@ int8_t chnlOffset = 0;                 // Смещение в конце кан�
 struct BatterySafetyState {
   bool lowStopLatched = false;
   bool emergencyActionActive = false;
+  uint32_t requireFreshBasicAfterMs = 0;
 };
 
 static BmsDdA5::Config makeBatteryPollConfig() {
   BmsDdA5::Config cfg;
   cfg.basicIdleMs = 1000U;
   cfg.basicActiveMs = 5000U;
+  cfg.lowBatteryBasicMs = 300000U;
   cfg.cellIdleMs = 60000U;
   cfg.deviceIdleMs = 600000U;
   return cfg;
@@ -612,6 +616,7 @@ void loop() {
       
       if (status == CMD_RESET_ERROR) {
         errorCode = 0;
+        batterySafetyReset(millis());
         status = 0;
         currentOperation = STATE_IDLE;
         digitalWrite(RED_LED, LOW);
@@ -1858,10 +1863,6 @@ void blink_Error() {
   else if (errCounter == 14) {
     debuger++;    
     if (debuger == 1) {
-        if ((errorCode & (1 << 11)) && batteryCharge > minBattCharge) {
-            errorCode &= ~(1 << 11);
-        }
-        
         makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
         
         sendTelemetryPacket(&SerialDisplay);
@@ -4204,7 +4205,12 @@ static inline bool batteryIsHighLoad() {
   return (motorStart != 0) || batteryIsMotionLikeStatus(status);
 }
 
+static inline bool batteryLowFaultLatched() {
+  return batterySafetyState.lowStopLatched || ((errorCode & FAULT_LOW_BATTERY) != 0);
+}
+
 static BmsDdA5::ActivityHint mapBatteryActivity() {
+  if (batteryLowFaultLatched()) return BmsDdA5::ActivityHint::LowBatteryFault;
   if (batteryIsHighLoad()) return BmsDdA5::ActivityHint::HighLoad;
 
   if (currentMode == CoreOpMode::IDLE ||
@@ -4217,24 +4223,37 @@ static BmsDdA5::ActivityHint mapBatteryActivity() {
 }
 
 static void batterySafetyCheck(uint32_t now) {
-  (void)now;
+  if (batterySafetyState.lowStopLatched || batterySafetyState.emergencyActionActive) return;
+  if (!batteryBms.hasFreshBasic(now)) return;
 
-  if (batteryCharge > minBattCharge) {
-    batterySafetyState.lowStopLatched = false;
+  const BmsDdA5::Snapshot& snapshot = batteryBms.snapshot();
+  if (batterySafetyState.requireFreshBasicAfterMs != 0U &&
+      static_cast<int32_t>(snapshot.lastBasicUpdateMs - batterySafetyState.requireFreshBasicAfterMs) < 0) {
     return;
   }
+  batterySafetyState.requireFreshBasicAfterMs = 0U;
 
-  if (batteryCharge == 0 || batterySafetyState.lowStopLatched || batterySafetyState.emergencyActionActive) return;
+  if (snapshot.socPercent > minBattCharge) return;
 
   batterySafetyState.lowStopLatched = true;
   batterySafetyState.emergencyActionActive = true;
-  makeLog(LOG_ERROR, "Low battery! Emergency stop.");
+  makeLog(LOG_ERROR, "Low batt stop soc=%u V=%u prot=%04X",
+          snapshot.socPercent,
+          snapshot.packVoltage_mV,
+          snapshot.protectionFlags);
   lifter_Down();
   moove_Forward();
   setFault(FAULT_LOW_BATTERY);
   STATS_ATOMIC_UPDATE(sramStats->payload.lowBatteryEvents++);
   status = CMD_STOP;
   batterySafetyState.emergencyActionActive = false;
+}
+
+static void batterySafetyReset(uint32_t now) {
+  batterySafetyState.lowStopLatched = false;
+  batterySafetyState.emergencyActionActive = false;
+  batterySafetyState.requireFreshBasicAfterMs = now;
+  (void)batteryBms.requestNow(BmsDdA5::RequestKind::BasicInfo, now);
 }
 
 // Обработка срабатывания бампера

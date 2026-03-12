@@ -9,7 +9,8 @@ namespace BmsDdA5 {
 enum class ActivityHint : uint8_t {
     Idle = 0,
     Active,
-    HighLoad
+    HighLoad,
+    LowBatteryFault
 };
 
 enum class RequestKind : uint8_t {
@@ -59,6 +60,7 @@ struct Config {
     uint32_t basicIdleMs = 1000U;
     uint32_t basicActiveMs = 3000U;
     uint32_t basicHighLoadMs = 60000U;
+    uint32_t lowBatteryBasicMs = 300000U;
     uint32_t cellIdleMs = 30000U;
     uint32_t deviceIdleMs = 120000U;
     uint32_t staleWarnMs = 15000U;
@@ -127,6 +129,7 @@ public:
 
     uint32_t tick(uint32_t nowMs, ActivityHint activity) {
         uint32_t events = 0U;
+        currentActivity_ = activity;
 
         if (state_ == TransportState::TxSent) {
             if (timeReached(nowMs, txReleaseAtMs_)) {
@@ -181,6 +184,17 @@ public:
             return events;
         }
 
+        if (activity == ActivityHint::LowBatteryFault) {
+            if (elapsedSince(nowMs, lastBasicPollMs_) >= config_.lowBatteryBasicMs) {
+                startRequest(RequestKind::BasicInfo, nowMs, &events);
+                events |= updateFreshness(nowMs);
+                return events;
+            }
+
+            events |= updateFreshness(nowMs);
+            return events;
+        }
+
         if (activity != ActivityHint::HighLoad) {
             const uint32_t basicInterval =
                 (activity == ActivityHint::Idle) ? config_.basicIdleMs : config_.basicActiveMs;
@@ -223,11 +237,18 @@ public:
     }
 
     bool isFresh(uint32_t nowMs) const {
-        if (config_.staleWarnMs == 0U) return true;
+        const uint32_t freshnessWindow = freshnessWindowMs();
+        if (freshnessWindow == 0U) return true;
         if (snapshot_.lastValidFrameMs == 0U) {
-            return nowMs < config_.staleWarnMs;
+            return nowMs < freshnessWindow;
         }
-        return elapsedSince(nowMs, snapshot_.lastValidFrameMs) < config_.staleWarnMs;
+        return elapsedSince(nowMs, snapshot_.lastValidFrameMs) < freshnessWindow;
+    }
+
+    bool hasFreshBasic(uint32_t nowMs) const {
+        if (snapshot_.lastBasicUpdateMs == 0U) return false;
+        if (config_.staleWarnMs == 0U) return true;
+        return elapsedSince(nowMs, snapshot_.lastBasicUpdateMs) < config_.staleWarnMs;
     }
 
     bool isTransactionActive() const {
@@ -282,6 +303,7 @@ private:
 
     bool deviceInfoBootPending_;
     bool freshState_;
+    ActivityHint currentActivity_;
 
     static Config sanitizeConfig(const Config& input) {
         Config output = input;
@@ -333,6 +355,7 @@ private:
 
         deviceInfoBootPending_ = true;
         snapshot_.deviceInfo[0] = '\0';
+        currentActivity_ = ActivityHint::Idle;
 
         if (applyDriverState) {
             setDriverEnable(false);
@@ -377,6 +400,17 @@ private:
         state_ = TransportState::Idle;
         rxLen_ = 0U;
         expectedLen_ = 0U;
+    }
+
+    uint32_t freshnessWindowMs() const {
+        if (config_.staleWarnMs == 0U) return 0U;
+
+        if (currentActivity_ != ActivityHint::LowBatteryFault) {
+            return config_.staleWarnMs;
+        }
+
+        const uint32_t lowBatteryWindow = config_.lowBatteryBasicMs + config_.rxTimeoutMs;
+        return (lowBatteryWindow > config_.staleWarnMs) ? lowBatteryWindow : config_.staleWarnMs;
     }
 
     void recordCounter(Event eventValue) {

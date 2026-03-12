@@ -14,7 +14,7 @@ struct WarnConfig {
   uint32_t sumMismatchMs = 5000U;
   uint32_t cellDeltaMs = 60000U;
   uint32_t cellLowMs = 60000U;
-  uint32_t transportMs = 2000U;
+  uint32_t transportMs = 30000U;
   uint16_t sumMismatchAbs_mV = 500U;
   uint16_t cellDeltaWarn_mV = 300U;
   uint16_t cellLowWarn_mV = 2500U;
@@ -59,6 +59,10 @@ public:
 
   uint16_t packVoltage_mV() const {
     return client_.snapshot().packVoltage_mV;
+  }
+
+  bool hasFreshBasic(uint32_t nowMs) const {
+    return client_.hasFreshBasic(nowMs);
   }
 
   bool isFresh(uint32_t nowMs) const {
