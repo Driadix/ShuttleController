@@ -47,7 +47,12 @@ void makeLogImpl(LogLevel level, const char* format, ...);
 static inline bool isValidProvisionedShuttleId(int32_t id);
 static inline bool isProvisionedShuttle();
 static inline bool isSupportedCommand(uint8_t cmd);
+static inline bool isContinuousManualCommand(uint8_t cmd);
+static inline bool isLiftCommand(uint8_t cmd);
+static inline bool isOutOfChannelExemptCommand(uint8_t cmd);
+static inline bool canAcceptCommandNow(uint8_t cmd);
 static inline bool isPhysicallyStationary();
+static inline void touchManualSession();
 static void scheduleBootloaderEntry();
 static E32Radio::EnsureOptions makeRadioEnsureOptions();
 static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
@@ -501,7 +506,7 @@ void loop() {
         delay(5); inChannel = digitalRead(CHANNEL) && inChannel;
         delay(5); inChannel = digitalRead(CHANNEL) && inChannel;
 
-        if (!inChannel && (status != CMD_SAVE_EEPROM && status != CMD_GET_CONFIG && status != CMD_RESET_ERROR)) {
+        if (!inChannel && !isOutOfChannelExemptCommand(status)) {
             makeLog(LOG_WARN, "Command 0x%02X rejected: Shuttle not in channel", status);
             status = 0;
         } else {
@@ -556,8 +561,22 @@ void loop() {
     case CoreOpMode::MANUAL: {
       if (status == CMD_MOVE_RIGHT_MAN) { moove_Right(); }
       else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
-      else if (status == CMD_LIFT_UP) { lifter_Up(); }
-      else if (status == CMD_LIFT_DOWN) { lifter_Down(); }
+      else if (status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
+        currentOperation = (status == CMD_LIFT_UP) ? STATE_LIFT_UP : STATE_LIFT_DOWN;
+        send_Cmd();
+        touchManualSession();
+        if (status == CMD_LIFT_UP) {
+          lifter_Up();
+        } else {
+          lifter_Down();
+        }
+        if (!shouldAbortLoop()) {
+          touchManualSession();
+          status = CMD_MANUAL_MODE;
+          currentOperation = STATE_MANUAL;
+          send_Cmd();
+        }
+      }
       else if (status == CMD_LOAD) { currentOperation = STATE_LOAD; run_Cmd(); }
       else if (status == CMD_UNLOAD) { currentOperation = STATE_UNLOAD; run_Cmd(); }
       else if (status == CMD_LONG_LOAD) { currentOperation = STATE_LONG_LOAD; run_Cmd(); }
@@ -1052,12 +1071,12 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
             return NO_NEW_CMD;
         }
 
-        if (!inChannel && reqCmd != CMD_SAVE_EEPROM && reqCmd != CMD_GET_CONFIG && reqCmd != CMD_RESET_ERROR) {
+        if (!inChannel && !isOutOfChannelExemptCommand(reqCmd)) {
             if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
 
-        if (isShuttleIdle() || isOverrideCommand(reqCmd)) {
+        if (canAcceptCommandNow(reqCmd)) {
             if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
 
             if (realMsgID == MSG_CMD_WITH_ARG) {
@@ -3756,8 +3775,7 @@ void SystemYield() {
   uint8_t cmdRad  = pollSerial(SerialLora, parserRadio, true);
   if (pendingBootloaderEntry) return;
 
-  if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN ||
-      cmdRad == CMD_STOP_MANUAL || cmdRad == CMD_STOP) {
+  if (isContinuousManualCommand(cmdRad) || cmdRad == CMD_STOP) {
       if (lastManualRadioCmdTime != 0) {
           DIAG_ONLY(
               uint32_t gap = currentMillis - lastManualRadioCmdTime;
@@ -3767,7 +3785,7 @@ void SystemYield() {
       lastManualRadioCmdTime = currentMillis;
   }
   
-  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN || status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
+  if (status == CMD_MOVE_RIGHT_MAN || status == CMD_MOVE_LEFT_MAN) {
       if (manualControlFromRadio && (currentMillis - lastManualRadioCmdTime > 800)) {
           status = CMD_STOP_MANUAL;
           makeLog(LOG_WARN, "Connection drop timeout!");
@@ -3782,9 +3800,13 @@ void SystemYield() {
       motor_Stop();
   }
   else if (cmdRad != NO_NEW_CMD) {
-      if (isShuttleIdle() || isOverrideCommand(cmdRad)) {
+      if (canAcceptCommandNow(cmdRad)) {
           status = cmdRad;
-          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN || cmdRad == CMD_LIFT_UP || cmdRad == CMD_LIFT_DOWN) {
+          if (currentMode == CoreOpMode::MANUAL &&
+              (isContinuousManualCommand(cmdRad) || isLiftCommand(cmdRad))) {
+              touchManualSession();
+          }
+          if (cmdRad == CMD_MOVE_RIGHT_MAN || cmdRad == CMD_MOVE_LEFT_MAN) {
               manualControlFromRadio = true;
               lastManualRadioCmdTime = currentMillis;
               pendingDisplayManualModeBypass = false;
@@ -3792,11 +3814,17 @@ void SystemYield() {
       }
   } 
   else if (cmdDisp != NO_NEW_CMD) {
-      if (isShuttleIdle() || isOverrideCommand(cmdDisp)) {
+      if (canAcceptCommandNow(cmdDisp)) {
           status = cmdDisp;
-          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN || cmdDisp == CMD_LIFT_UP || cmdDisp == CMD_LIFT_DOWN) {
+          if (currentMode == CoreOpMode::MANUAL &&
+              (isContinuousManualCommand(cmdDisp) || isLiftCommand(cmdDisp))) {
+              touchManualSession();
+          }
+          if (cmdDisp == CMD_MOVE_RIGHT_MAN || cmdDisp == CMD_MOVE_LEFT_MAN) {
               manualControlFromRadio = false;
-              pendingDisplayManualModeBypass = true;
+              if (currentMode != CoreOpMode::MANUAL) {
+                  pendingDisplayManualModeBypass = true;
+              }
           }
       }
   }
@@ -4542,6 +4570,23 @@ static inline bool isSupportedCommand(uint8_t cmd) {
     }
 }
 
+static inline bool isContinuousManualCommand(uint8_t cmd) {
+    return (cmd == CMD_MOVE_RIGHT_MAN ||
+            cmd == CMD_MOVE_LEFT_MAN ||
+            cmd == CMD_STOP_MANUAL);
+}
+
+static inline bool isLiftCommand(uint8_t cmd) {
+    return (cmd == CMD_LIFT_UP || cmd == CMD_LIFT_DOWN);
+}
+
+static inline bool isOutOfChannelExemptCommand(uint8_t cmd) {
+    return (cmd == CMD_SAVE_EEPROM ||
+            cmd == CMD_GET_CONFIG ||
+            cmd == CMD_RESET_ERROR ||
+            isLiftCommand(cmd));
+}
+
 static inline bool isOverrideCommand(uint8_t cmd) {
     return (cmd == CMD_STOP || 
             cmd == CMD_STOP_MANUAL || 
@@ -4555,8 +4600,26 @@ static inline bool isShuttleIdle() {
     return (status == 0 || status == CMD_STOP);
 }
 
+static inline bool canAcceptCommandNow(uint8_t cmd) {
+    if (isShuttleIdle() || isOverrideCommand(cmd)) {
+        return true;
+    }
+
+    if (currentMode == CoreOpMode::MANUAL) {
+        return (cmd == CMD_MOVE_RIGHT_MAN ||
+                cmd == CMD_MOVE_LEFT_MAN ||
+                isLiftCommand(cmd));
+    }
+
+    return false;
+}
+
 static inline bool isPhysicallyStationary() {
     return (motorStart == 0 && motorReverse == 2);
+}
+
+static inline void touchManualSession() {
+    lastManualRadioCmdTime = millis();
 }
 
 static inline bool isErrorActive() {
