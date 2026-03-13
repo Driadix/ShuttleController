@@ -2568,6 +2568,7 @@ void moove_Forward() {
     get_Distance();
     if (millis() - count > 50) {
       set_Position();
+      detect_Pallete();
       if (currentPosition < 0) currentPosition = 0;
       if (distance[1] >= 1500) {
         speed = 100;
@@ -2619,6 +2620,7 @@ void moove_Reverse() {
     get_Distance();
     if (millis() - count > timingBudget + 5) {
       set_Position();
+      detect_Pallete();
       if (distance[0] >= 1500) speed = 100;
       else if (distance[0] > 90 + chnlOffset && distance[0] < 1500) {
         speed = distance[0] / 20;
