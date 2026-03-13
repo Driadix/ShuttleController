@@ -582,7 +582,7 @@ void loop() {
       else if (status == CMD_MOVE_LEFT_MAN) { moove_Left(); }
       else if (status == CMD_MOVE_DIST_R || status == CMD_MOVE_DIST_F) {
         clearManualRadioHold();
-        currentOperation = mapCmdToOperation(status);
+        currentOperation = STATE_MANUAL;
         makeLog(LOG_INFO, "Manual step start dir=%s dist=%ld",
                 status == CMD_MOVE_DIST_F ? "forward" : "reverse",
                 (long)mooveDistance);
@@ -614,7 +614,7 @@ void loop() {
       }
       else if (status == CMD_LIFT_UP || status == CMD_LIFT_DOWN) {
         clearManualRadioHold();
-        currentOperation = (status == CMD_LIFT_UP) ? STATE_LIFT_UP : STATE_LIFT_DOWN;
+        currentOperation = STATE_MANUAL;
         makeLog(LOG_INFO, "Manual lift start dir=%s", status == CMD_LIFT_UP ? "up" : "down");
         send_Cmd();
         touchManualSession();
@@ -727,7 +727,7 @@ void motor_Speed(int spd) {
           blink_Work();
           get_Distance();
           if (shouldAbortLoop()) {
-            status = CMD_STOP;
+            preserveManualStopOnAbort();
             motor_Stop();
             return;
           } 
@@ -759,7 +759,7 @@ void motor_Speed(int spd) {
           SystemYield();
           get_Distance();
           if (shouldAbortLoop()) {
-            status = CMD_STOP;
+            preserveManualStopOnAbort();
             motor_Stop();
             return;
           }
@@ -901,7 +901,7 @@ void lifter_Up() {
     while (millis() - cnt < 30) {
       SystemYield();
       if (shouldAbortLoop()) {
-        status = CMD_STOP;
+        preserveManualStopOnAbort();
         return;
       }
     }
@@ -914,7 +914,7 @@ void lifter_Up() {
   while (digitalRead(DL_UP)) {
     SystemYield();
     if (shouldAbortLoop()) {
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       return;
     }
     if (millis() - cnt > (uint32_t)lifterDelay) {
@@ -969,7 +969,7 @@ void lifter_Down() {
     while (millis() - cnt < 30) {
       SystemYield();
       if (shouldAbortLoop()) {
-        status = CMD_STOP;
+        preserveManualStopOnAbort();
         return;
       }
     }
@@ -982,7 +982,7 @@ void lifter_Down() {
   while (digitalRead(DL_DOWN)) {
     SystemYield();
     if (shouldAbortLoop()) {
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       return;
     }
     if (millis() - cnt > (uint32_t)lifterDelay) {
@@ -1982,7 +1982,7 @@ void stop_Before_Pallete_F() {
       motor_Speed(spd);
       SystemYield();
       if (shouldAbortLoop()) {
-        status = CMD_STOP;
+        preserveManualStopOnAbort();
         motor_Stop();
         return;
       }
@@ -2002,7 +2002,7 @@ void stop_Before_Pallete_F() {
         SystemYield();
         get_Distance();
         if (shouldAbortLoop()) {
-          status = CMD_STOP;
+          preserveManualStopOnAbort();
           motor_Stop();
           return;
         }
@@ -2139,7 +2139,7 @@ void stop_Before_Pallete_R() {
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
-          status = CMD_STOP;
+          preserveManualStopOnAbort();
           motor_Stop();
           return;
         }
@@ -2160,7 +2160,7 @@ void stop_Before_Pallete_R() {
         blink_Work();
         get_Distance();
         if (shouldAbortLoop()) {
-          status = CMD_STOP;
+          preserveManualStopOnAbort();
           motor_Stop();
           return;
         }
@@ -2328,7 +2328,7 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   while (moove) {  // Двигаемся до конца заданного расстояния
     SystemYield();
     if (shouldAbortLoop()) {  // Проверка на стоп и ошибки
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       motor_Stop();
       return;
     }
@@ -2453,7 +2453,7 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
   while (moove) {
     SystemYield();
     if (shouldAbortLoop()) {
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       motor_Stop();
       return;
     }
@@ -2560,7 +2560,7 @@ void moove_Forward() {
   while (moove) {
     SystemYield();
     if (shouldAbortLoop()) {
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       motor_Stop();
       return;
     }
@@ -2611,7 +2611,7 @@ void moove_Reverse() {
   while (moove) {
     SystemYield();
     if (shouldAbortLoop()) {
-      status = CMD_STOP;
+      preserveManualStopOnAbort();
       motor_Stop();
       return;
     }
@@ -2703,7 +2703,7 @@ void unload_Pallete() {
           SystemYield();
           blink_Work();
           if (shouldAbortLoop()) {
-            status = CMD_STOP;
+            preserveManualStopOnAbort();
             motor_Stop();
             return;
           }
@@ -2962,7 +2962,7 @@ void load_Pallete() {
             SystemYield();
             blink_Work();
             if (shouldAbortLoop()) {
-              status = CMD_STOP;
+              preserveManualStopOnAbort();
               motor_Stop();
               return;
             }
@@ -3019,7 +3019,7 @@ void load_Pallete() {
     while (mv) {
       SystemYield();
       if (shouldAbortLoop()) {
-        status = CMD_STOP;
+        preserveManualStopOnAbort();
         motor_Stop();
         return;
       }
@@ -3210,7 +3210,7 @@ void pallete_Counting_F() {
         SystemYield();
         blink_Work();
         if (shouldAbortLoop()) {
-          status = CMD_STOP;
+          preserveManualStopOnAbort();
           motor_Stop();
           return;
         }
@@ -3367,7 +3367,7 @@ void long_Load() {
       while (wait) {
         SystemYield();
         if (shouldAbortLoop()) {
-          status = CMD_STOP;
+          preserveManualStopOnAbort();
           return;
         }
         blink_Work();
@@ -3378,7 +3378,7 @@ void long_Load() {
           while (millis() - count < 10000) {
             SystemYield();
             if (shouldAbortLoop()) {
-              status = CMD_STOP;
+              preserveManualStopOnAbort();
               get_Distance();
               return;
             }
@@ -3411,7 +3411,7 @@ void long_Load() {
     while (wait) {
       SystemYield();
       if (shouldAbortLoop()) {
-        status = CMD_STOP;
+        preserveManualStopOnAbort();
         return;
       }
       blink_Work();
@@ -3422,7 +3422,7 @@ void long_Load() {
         while (millis() - count < 10000) {
           SystemYield();
           if (shouldAbortLoop()) {
-            status = CMD_STOP;
+            preserveManualStopOnAbort();
             return;
           }
           blink_Work();
@@ -4293,16 +4293,6 @@ static bool batteryIsMotionLikeStatus(uint8_t st) {
     case CMD_MOVE_DIST_F:
     case CMD_LIFT_UP:
     case CMD_LIFT_DOWN:
-    case CMD_LOAD:
-    case CMD_UNLOAD:
-    case CMD_LONG_LOAD:
-    case CMD_LONG_UNLOAD:
-    case CMD_LONG_UNLOAD_QTY:
-    case CMD_COMPACT_F:
-    case CMD_COMPACT_R:
-    case CMD_COUNT_PALLETS:
-    case CMD_DEMO:
-    case CMD_HOME:
       return true;
     default:
       return false;
@@ -4753,7 +4743,7 @@ static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio) {
     }
 
     if (isLiftCommand(cmd)) {
-        return (currentMode == CoreOpMode::MANUAL);
+        return (currentMode == CoreOpMode::MANUAL || (currentMode == CoreOpMode::IDLE && isShuttleIdle()));
     }
 
     if (cmd == CMD_MANUAL_MODE) {
@@ -4785,6 +4775,12 @@ static inline void refreshManualRadioHoldWatchdog(uint32_t now) {
 static inline void clearManualRadioHold() {
     manualRadioHoldActive = false;
     manualRadioHoldLastHeartbeatMs = 0;
+}
+
+static inline void preserveManualStopOnAbort() {
+    if (status != CMD_STOP_MANUAL) {
+        status = CMD_STOP;
+    }
 }
 
 static inline bool isErrorActive() {
