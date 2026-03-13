@@ -8,15 +8,23 @@
 namespace E32Radio {
 
 constexpr uint8_t kAddressHighDefault = 0x00;
+constexpr uint8_t kAddressHighShuttle = 0x01;
+constexpr uint8_t kAddressHighRemote = 0x02;
 constexpr uint8_t kAddressLowUnassigned = 0x00;
 constexpr uint8_t kAddressNodeMin = 1;
-constexpr uint8_t kAddressNodeMax = 254;
+constexpr uint8_t kAddressNodeMax = 32;
 constexpr uint8_t kDefaultChannel440 = 30;
 constexpr uint8_t kDefaultEnsureAttempts = 3;
 
 struct Address {
     uint8_t addh;
     uint8_t addl;
+};
+
+struct FixedRoute {
+    uint8_t addh;
+    uint8_t addl;
+    uint8_t channel;
 };
 
 enum class ConfigModeLevel : uint8_t {
@@ -161,6 +169,31 @@ inline Address addressFromNodeId(uint8_t nodeId, uint8_t addh = kAddressHighDefa
 
 inline bool isValidNodeId(uint8_t nodeId) {
     return nodeId >= kAddressNodeMin && nodeId <= kAddressNodeMax;
+}
+
+inline bool isUnassignedOrValidNodeId(uint8_t nodeId) {
+    return nodeId == kAddressLowUnassigned || isValidNodeId(nodeId);
+}
+
+inline Address shuttleAddressFromNodeId(uint8_t nodeId) {
+    return addressFromNodeId(nodeId, kAddressHighShuttle);
+}
+
+inline Address remoteAddressFromNodeId(uint8_t nodeId) {
+    return addressFromNodeId(nodeId, kAddressHighRemote);
+}
+
+inline FixedRoute fixedRouteFromAddress(Address address, uint8_t channel) {
+    FixedRoute route = {address.addh, address.addl, channel};
+    return route;
+}
+
+inline FixedRoute fixedRouteToShuttle(uint8_t shuttleId, uint8_t channel = kDefaultChannel440) {
+    return fixedRouteFromAddress(shuttleAddressFromNodeId(shuttleId), channel);
+}
+
+inline FixedRoute fixedRouteToRemote(uint8_t shuttleId, uint8_t channel = kDefaultChannel440) {
+    return fixedRouteFromAddress(remoteAddressFromNodeId(shuttleId), channel);
 }
 
 inline bool isValidChannel(uint8_t channel) {

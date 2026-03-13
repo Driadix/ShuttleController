@@ -62,6 +62,12 @@ static void scheduleBootloaderEntry();
 static E32Radio::EnsureOptions makeRadioEnsureOptions();
 static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck);
+static inline int transportAvailableForWrite(Stream* port);
+static size_t writeTransportPayload(Stream* port, const uint8_t* buffer, uint16_t length, const E32Radio::FixedRoute* fixedRoute = NULL);
+static void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute = NULL);
+static void sendTelemetryPacket(Stream* port);
+static void sendSensorPacket(Stream* port);
+static void sendStatsPacket(Stream* port);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void batterySafetyCheck(uint32_t now);
 static void batterySafetyReset(uint32_t now);
@@ -1027,7 +1033,59 @@ enum ParseState {
     STATE_READ_CRC
 };
 
-void sendAck(uint8_t seq, AckResult result, Stream* port) {
+static inline bool buildRemoteRouteForShuttleId(uint8_t shuttleId, E32Radio::FixedRoute* outRoute) {
+    if (!outRoute || !E32Radio::isValidNodeId(shuttleId)) {
+        return false;
+    }
+
+    *outRoute = E32Radio::fixedRouteToRemote(shuttleId, E32Radio::kDefaultChannel440);
+    return true;
+}
+
+static inline int transportAvailableForWrite(Stream* port) {
+    if (!port) {
+        return 0;
+    }
+
+    const int available = port->availableForWrite();
+    if (port != &SerialLora) {
+        return available;
+    }
+
+    return (available > 3) ? (available - 3) : 0;
+}
+
+static size_t writeTransportPayload(Stream* port, const uint8_t* buffer, uint16_t length, const E32Radio::FixedRoute* fixedRoute) {
+    if (!port || !buffer || length == 0) {
+        return 0;
+    }
+    if (transportAvailableForWrite(port) < length) {
+        return 0;
+    }
+
+    if (port != &SerialLora) {
+        return port->write(buffer, length);
+    }
+
+    E32Radio::FixedRoute route = {0, 0, 0};
+    const E32Radio::FixedRoute* routeToUse = fixedRoute;
+    if (routeToUse == NULL) {
+        if (!buildRemoteRouteForShuttleId(shuttleNum, &route)) {
+            return 0;
+        }
+        routeToUse = &route;
+    }
+
+    const uint8_t routeHeader[3] = {routeToUse->addh, routeToUse->addl, routeToUse->channel};
+    const size_t routeWritten = port->write(routeHeader, sizeof(routeHeader));
+    const size_t payloadWritten = port->write(buffer, length);
+    if (routeWritten != sizeof(routeHeader) || payloadWritten != length) {
+        return 0;
+    }
+    return length;
+}
+
+void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute) {
     if (!port) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(AckPacket) + 2];
     AckPacket pkt;
@@ -1047,8 +1105,9 @@ void sendAck(uint8_t seq, AckResult result, Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute) == totalLen + 2) {
+        countTxFrame(port);
+    }
 }
 
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
@@ -1195,13 +1254,22 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                     if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
                     return NO_NEW_CMD;
                 }
+                E32Radio::FixedRoute ackRoute = {0, 0, 0};
+                const E32Radio::FixedRoute* ackRoutePtr = NULL;
+                if (replyPort == &SerialLora) {
+                    const uint8_t oldReplyId =
+                        E32Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                    if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute)) {
+                        ackRoutePtr = &ackRoute;
+                    }
+                }
                 if (!reapplyRadioConfigForShuttleId(newId, replyPort, header->seq, suppressAck)) {
                     return NO_NEW_CMD;
                 }
                 eepromData.shuttleNum = newId;
                 shuttleNum = newId;
                 pendingEepromSave = true;
-                if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+                if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
                 return NO_NEW_CMD;
             }
             case CFG_INTER_PALLET: {
@@ -1274,10 +1342,19 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
 
         bool shuttleIdChanged = (eepromData.shuttleNum != fullCfg->shuttleNumber);
+        E32Radio::FixedRoute ackRoute = {0, 0, 0};
+        const E32Radio::FixedRoute* ackRoutePtr = NULL;
         if (shuttleIdChanged) {
             if (!isPhysicallyStationary()) {
                 if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
                 return NO_NEW_CMD;
+            }
+            if (replyPort == &SerialLora) {
+                const uint8_t oldReplyId =
+                    E32Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute)) {
+                    ackRoutePtr = &ackRoute;
+                }
             }
             if (!reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, replyPort, header->seq, suppressAck)) {
                 return NO_NEW_CMD;
@@ -1307,7 +1384,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         if (shuttleIdChanged) pendingEepromSave = true;
         
-        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
         return NO_NEW_CMD;
 
     } else if (realMsgID == MSG_CONFIG_SYNC_REQ) {
@@ -1338,8 +1415,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
         ProtocolUtils::appendCRC(localTxBuffer, totalLen);
         
-        if (replyPort->availableForWrite() >= totalLen + 2) {
-            replyPort->write(localTxBuffer, totalLen + 2);
+        if (transportAvailableForWrite(replyPort) >= totalLen + 2 &&
+            writeTransportPayload(replyPort, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
             countTxFrame(replyPort);
             countReplyTiming(replyPort, micros() - startUs);
         }
@@ -1379,8 +1456,8 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         uint16_t totalLen = sizeof(FrameHeader) + repHeader->length;
         ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-        if (replyPort->availableForWrite() >= totalLen + 2) {
-          replyPort->write(localTxBuffer, totalLen + 2);
+        if (transportAvailableForWrite(replyPort) >= totalLen + 2 &&
+            writeTransportPayload(replyPort, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
           countTxFrame(replyPort);
           countReplyTiming(replyPort, micros() - startUs);
         } else {
@@ -4580,12 +4657,11 @@ static E32Radio::EnsureOptions makeRadioEnsureOptions() {
 
 static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId) {
   const uint8_t radioAddress = E32Radio::isValidNodeId(nodeId) ? nodeId : E32Radio::kAddressLowUnassigned;
-  const E32Radio::Address address = E32Radio::addressFromNodeId(radioAddress, E32Radio::kAddressHighDefault);
-  return E32Radio::makeTransparentConfig(
-    address,
+  return E32Radio::makeFixedConfig(
+    E32Radio::shuttleAddressFromNodeId(radioAddress),
     E32Radio::kDefaultChannel440,
     kRadioHostBaud,
-    E32Radio::AirDataRate::B9600,
+    E32Radio::AirDataRate::B19200,
     E32Radio::TxPower::Dbm27,
     E32Radio::UartParity::U8N1,
     E32Radio::IoDriveMode::PushPull,
@@ -4643,7 +4719,7 @@ static ShuttleState mapCmdToOperation(uint8_t cmd) {
 }
 
 static inline bool isValidProvisionedShuttleId(int32_t id) {
-    return (id >= 1 && id <= 254);
+    return (id >= E32Radio::kAddressNodeMin && id <= E32Radio::kAddressNodeMax);
 }
 
 static inline bool isProvisionedShuttle() {
@@ -4820,7 +4896,7 @@ void sendLog(LogLevel level, const char* msg, Stream* port = &SerialDisplay) {
   uint16_t totalLen = sizeof(FrameHeader) + header->length;
   ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-  port->write(logBuffer, totalLen + 2);
+  writeTransportPayload(port, logBuffer, totalLen + 2, NULL);
 }
 
 void makeLogImpl(LogLevel level, const char* format, ...) {
@@ -4894,8 +4970,9 @@ void sendTelemetryPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
+        countTxFrame(port);
+    }
 }
 
 void sendSensorPacket(Stream* port) {
@@ -4936,8 +5013,9 @@ void sendSensorPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
+        countTxFrame(port);
+    }
 }
 
 void sendStatsPacket(Stream* port) {
@@ -4972,8 +5050,9 @@ void sendStatsPacket(Stream* port) {
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    port->write(localTxBuffer, totalLen + 2);
-    countTxFrame(port);
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
+        countTxFrame(port);
+    }
 }
 
 
