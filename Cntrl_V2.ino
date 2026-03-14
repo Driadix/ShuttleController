@@ -4994,8 +4994,8 @@ void sendSensorPacket(Stream* port) {
     if (detectPalleteF2) pkt.hardwareFlags |= (1 << 1);
     if (detectPalleteR1) pkt.hardwareFlags |= (1 << 2);
     if (detectPalleteR2) pkt.hardwareFlags |= (1 << 3);
-    if (digitalRead(BUMPER_F1)) pkt.hardwareFlags |= (1 << 4);
-    if (digitalRead(BUMPER_R1)) pkt.hardwareFlags |= (1 << 5);
+    if (digitalRead(BUMPER_F1) || digitalRead(BUMPER_F2)) pkt.hardwareFlags |= (1 << 4);
+    if (digitalRead(BUMPER_R1) || digitalRead(BUMPER_R2)) pkt.hardwareFlags |= (1 << 5);
     if (!digitalRead(DL_UP)) pkt.hardwareFlags |= (1 << 6);
     if (!digitalRead(DL_DOWN)) pkt.hardwareFlags |= (1 << 7);
 
