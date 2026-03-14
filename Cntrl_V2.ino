@@ -235,6 +235,8 @@ volatile uint32_t bootloaderEntryAtMs = 0;
 
 
 uint16_t errorCode = 0;                // Битмап ошибок
+uint16_t warningCode = 0;              // Битмап предупреждений
+uint32_t warningTimeouts[16] = { 0 };
 
 #if CONNECTION_LOGS
 struct LinkDiagCounters {
@@ -273,12 +275,69 @@ enum ShuttleFault : uint16_t {
     FAULT_MOVE_TIMEOUT     = (1 << 13)  // 0x2000
 };
 
+enum ShuttleWarning : uint16_t {
+    WARN_NONE              = 0x0000,
+    WARN_PALLET_NOT_FOUND  = (1 << 0),  // 0x0001: expected pallet missing
+    WARN_CHANNEL_FULL      = (1 << 1),  // 0x0002: load requested into full channel
+    WARN_NOT_IN_CHANNEL    = (1 << 2),  // 0x0004: command rejected outside channel
+    WARN_PALLET_SIZE_ERROR = (1 << 3),  // 0x0008: abnormal pallet dimensions
+    WARN_END_OF_CHANNEL    = (1 << 4),  // 0x0010: manual move reached channel end
+    WARN_MANUAL_TIMEOUT    = (1 << 5),  // 0x0020: manual session timeout
+    WARN_I2C_RECOVERY      = (1 << 6),  // 0x0040: TOF I2C recovery started
+    WARN_OBSTACLE_AHEAD    = (1 << 7)   // 0x0080: unexpected obstacle in path
+};
+
 void setFault(ShuttleFault fault) {
     errorCode |= fault;
 }
 
 void clearFault(ShuttleFault fault) {
     errorCode &= ~fault;
+}
+
+void setWarning(ShuttleWarning warn, uint32_t timeoutMs = 5000) {
+    const uint16_t warnBits = (uint16_t)warn;
+    warningCode |= warnBits;
+
+    for (uint8_t i = 0; i < 16; i++) {
+        const uint16_t bit = (uint16_t)(1U << i);
+        if ((warnBits & bit) == 0) continue;
+        warningTimeouts[i] = (timeoutMs > 0) ? (millis() + timeoutMs) : 0;
+    }
+}
+
+void clearWarning(ShuttleWarning warn) {
+    const uint16_t warnBits = (uint16_t)warn;
+    warningCode &= (uint16_t)(~warnBits);
+
+    for (uint8_t i = 0; i < 16; i++) {
+        const uint16_t bit = (uint16_t)(1U << i);
+        if ((warnBits & bit) != 0) {
+            warningTimeouts[i] = 0;
+        }
+    }
+}
+
+void clearAllWarnings() {
+    warningCode = 0;
+    for (uint8_t i = 0; i < 16; i++) {
+        warningTimeouts[i] = 0;
+    }
+}
+
+void processWarnings() {
+    if (warningCode == 0) return;
+
+    const uint32_t now = millis();
+    for (uint8_t i = 0; i < 16; i++) {
+        const uint16_t bit = (uint16_t)(1U << i);
+        if ((warningCode & bit) == 0 || warningTimeouts[i] == 0) continue;
+
+        if ((int32_t)(now - warningTimeouts[i]) >= 0) {
+            warningCode &= (uint16_t)(~bit);
+            warningTimeouts[i] = 0;
+        }
+    }
 }
 
 AS5600 as5600;  // Магнитный энкодер на свободном колесе
@@ -365,6 +424,7 @@ static void recoverTofI2cBus() {
   lastRecoveryMs = now;
 
   LOG_RATE_LIMITED(LOG_WARN, 2000, "TOF I2C recovery");
+  setWarning(WARN_I2C_RECOVERY, 3000);
 
 #if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
   Wire.end();
@@ -581,6 +641,7 @@ void loop() {
 
         if (!inChannel && !isOutOfChannelExemptCommand(status)) {
             makeLog(LOG_WARN, "Command 0x%02X rejected: Shuttle not in channel", status);
+            setWarning(WARN_NOT_IN_CHANNEL, 5000);
             status = 0;
         } else {
             currentOperation = mapCmdToOperation(status);
@@ -704,6 +765,7 @@ void loop() {
           clearManualRadioHold();
           pendingDisplayManualModeBypass = false;
           makeLog(LOG_WARN, "Manual session timeout -> idle");
+          setWarning(WARN_MANUAL_TIMEOUT, 5000);
           currentOperation = STATE_IDLE;
           currentMode = CoreOpMode::IDLE;
           status = CMD_STOP; 
@@ -739,6 +801,7 @@ void loop() {
       
       if (status == CMD_RESET_ERROR) {
         errorCode = 0;
+        clearAllWarnings();
         batterySafetyReset(millis());
         status = 0;
         currentOperation = STATE_IDLE;
@@ -1267,6 +1330,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 isManualDistanceCommand(reqCmd) || isLiftCommand(reqCmd)) {
                 makeLog(LOG_WARN, "Manual reject cmd=%02X reason=channel", reqCmd);
             }
+            setWarning(WARN_NOT_IN_CHANNEL, 5000);
             if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
             return NO_NEW_CMD;
         }
@@ -2866,6 +2930,7 @@ void unload_Pallete() {
         motor_Stop();
         makeLog(LOG_ERROR, "Pallete error in BB...");
         blink_Warning();
+        setWarning(WARN_PALLET_SIZE_ERROR, 5000);
         moove_Forward();
         status = CMD_STOP;
         return;
@@ -2882,6 +2947,7 @@ void unload_Pallete() {
         makeLog(LOG_ERROR, "Pallete error...");
         motor_Stop();
         blink_Warning();
+        setWarning(WARN_OBSTACLE_AHEAD, 5000);
         if (fifoLifo) fifoLifo_Inverse();
         return;
       }
@@ -2900,6 +2966,7 @@ void unload_Pallete() {
   if (distance[3] < 900) {  // Проверка что поддон есть куда везти
     lifter_Down();
     blink_Warning();
+    setWarning(WARN_PALLET_NOT_FOUND, 5000);
     moove_Forward();
     status = CMD_STOP;
     return;
@@ -3046,6 +3113,7 @@ void load_Pallete() {
   lifter_Down();
   if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) { // Проверка что канал не забит
     blink_Warning();
+    setWarning(WARN_CHANNEL_FULL, 5000);
     status = CMD_STOP;
     return;
   }
@@ -3126,6 +3194,7 @@ void load_Pallete() {
           motor_Stop();
           makeLog(LOG_ERROR, "Pallete error in BB... PLenght = %d", palleteLenght);
           blink_Warning();
+          setWarning(WARN_PALLET_SIZE_ERROR, 5000);
           moove_Forward();
           status = CMD_STOP;
           return;
@@ -3147,6 +3216,7 @@ void load_Pallete() {
           makeLog(LOG_ERROR, "Pallete error...");
           motor_Stop();
           blink_Warning();
+          setWarning(WARN_OBSTACLE_AHEAD, 5000);
           return;
         }
         count = millis();
@@ -3155,6 +3225,7 @@ void load_Pallete() {
   } else if ((detectPalleteF1 || detectPalleteF2 || detectPalleteR1 || detectPalleteR2) && distance[1] < 300 + chnlOffset && distance[2] <= interPalleteDistance + 600) {
     motor_Stop();
     blink_Warning();
+    setWarning(WARN_OBSTACLE_AHEAD, 5000);
     status = CMD_STOP;
     return;
   } else if ((detectPalleteR1 || detectPalleteR2) && !(detectPalleteF1 || detectPalleteF2)) {
@@ -3175,6 +3246,7 @@ void load_Pallete() {
     if (distance[3] < 500 && distance[3] < distance[1]) {
       motor_Stop();
       blink_Warning();
+      setWarning(WARN_OBSTACLE_AHEAD, 5000);
       status = CMD_STOP;
       return;
     }
@@ -3258,6 +3330,7 @@ void single_Load() {
   if ((detectPalleteF1 && detectPalleteF2 && shuttleLength != 800) || (detectPalleteF1 && detectPalleteF2 && detectPalleteR1 && detectPalleteR2)) load_Pallete();
   else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
     blink_Warning();
+    setWarning(WARN_PALLET_SIZE_ERROR, 5000);
   }
   else {
     motor_Start_Reverse();
@@ -3284,9 +3357,11 @@ void single_Load() {
       load_Pallete();
     } else if (detectPalleteF1 && detectPalleteF2 && shuttleLength == 800) {
       blink_Warning();
+      setWarning(WARN_PALLET_SIZE_ERROR, 5000);
     } else {
       blink_Warning();
       makeLog(LOG_ERROR, "Single load fail...");
+      setWarning(WARN_PALLET_NOT_FOUND, 5000);
     }
   }
   moove_Forward();
@@ -3503,6 +3578,7 @@ void long_Load() {
     motor_Stop();
     if (!(detectPalleteF1 && detectPalleteF2)) {
       blink_Warning();
+      setWarning(WARN_PALLET_NOT_FOUND, 5000);
       uint8_t wait = 1;
       moove_Distance_R(shuttleLength + 100, 60, 30);
       motor_Stop();
@@ -3538,6 +3614,7 @@ void long_Load() {
     load_Pallete();
     if (lastPalletePosition && lastPalletePosition < shuttleLength * 2) {
       blink_Warning();
+      setWarning(WARN_CHANNEL_FULL, 5000);
       status = 0;
       return;
     }
@@ -3766,6 +3843,7 @@ void moove_Right() {
           status = CMD_MANUAL_MODE;
           currentOperation = STATE_MANUAL;
           makeLog(LOG_INFO, "Manual reverse stopped by sensor");
+          setWarning(WARN_END_OF_CHANNEL, 3000);
           oldSpeed = 0;
           return;
         }
@@ -3821,6 +3899,7 @@ void moove_Left() {
           status = CMD_MANUAL_MODE;
           currentOperation = STATE_MANUAL;
           makeLog(LOG_INFO, "Manual forward stopped by sensor");
+          setWarning(WARN_END_OF_CHANNEL, 3000);
           oldSpeed = 0;
           return;
         }
@@ -3952,6 +4031,7 @@ void demo_Mode() {
 void SystemYield() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
+  processWarnings();
 
   if (pendingBootloaderEntry) {
     if (!bootloaderStopDone) {
@@ -5004,6 +5084,7 @@ void sendTelemetryPacket(Stream* port) {
     TelemetryPacket pkt;
 
     pkt.errorCode = errorCode;
+    pkt.warningCode = warningCode;
     pkt.shuttleStatus = currentOperation;
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;

@@ -146,6 +146,7 @@ enum ShuttleState : uint8_t {
 
 struct TelemetryPacket {
     uint16_t errorCode;        
+    uint16_t warningCode;
     uint16_t currentPosition;  // mm
     uint16_t speed;
     uint16_t batteryVoltage_mV;// 12500 = 12.5V
