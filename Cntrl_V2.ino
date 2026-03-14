@@ -71,6 +71,8 @@ static void sendStatsPacket(Stream* port);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void batterySafetyCheck(uint32_t now);
 static void batterySafetyReset(uint32_t now);
+static void initTofI2cBus();
+static void recoverTofI2cBus();
 static inline bool batteryIsHighLoad();
 static inline bool batteryLowFaultLatched();
 static bool batteryIsMotionLikeStatus(uint8_t st);
@@ -137,6 +139,8 @@ struct ConfigPageHeader {
 #define BUMPER_R1 PA6    // Пин бампера назад
 #define BUMPER_R2 PC5    // Пин бампера назад
 #define CHANNEL PB5      // Пин датчика канала
+#define TOF_I2C_SDA PB11
+#define TOF_I2C_SCL PB10
 
 #define FLASH_SECTOR_SIZE 4 * 1024  // 16 kb
 #define EEPROM_PAGE_SIZE 512
@@ -151,6 +155,7 @@ struct ConfigPageHeader {
 constexpr uint8_t NO_NEW_CMD = 0xFF;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs = 3000;
+constexpr uint32_t kTofI2cClockHz = 400000U;
 
 #pragma endregion
 
@@ -337,10 +342,62 @@ static BmsDdA5::Config makeBatteryPollConfig() {
   BmsDdA5::Config cfg;
   cfg.basicIdleMs = 1000U;
   cfg.basicActiveMs = 5000U;
-  cfg.lowBatteryBasicMs = 300000U;
+  cfg.lowBatteryBasicMs = 5000U;
   cfg.cellIdleMs = 60000U;
-  cfg.deviceIdleMs = 600000U;
+  cfg.deviceIdleMs = 60000U;
   return cfg;
+}
+
+static void initTofI2cBus() {
+  Wire.setSDA(TOF_I2C_SDA);
+  Wire.setSCL(TOF_I2C_SCL);
+  Wire.begin();
+  Wire.setClock(kTofI2cClockHz);
+}
+
+static void recoverTofI2cBus() {
+  static uint32_t lastRecoveryMs = 0;
+  uint32_t now = millis();
+
+  if (now - lastRecoveryMs < 250U) return;
+  lastRecoveryMs = now;
+
+  LOG_RATE_LIMITED(LOG_WARN, 2000, "TOF I2C recovery");
+
+#if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
+  Wire.end();
+#endif
+
+  pinMode(TOF_I2C_SDA, INPUT_PULLUP);
+#if defined(OUTPUT_OPEN_DRAIN)
+  pinMode(TOF_I2C_SCL, OUTPUT_OPEN_DRAIN);
+#else
+  pinMode(TOF_I2C_SCL, OUTPUT);
+#endif
+  digitalWrite(TOF_I2C_SCL, HIGH);
+  delayMicroseconds(10);
+
+  for (uint8_t i = 0; i < 16 && digitalRead(TOF_I2C_SDA) == LOW; ++i) {
+    digitalWrite(TOF_I2C_SCL, LOW);
+    delayMicroseconds(10);
+    digitalWrite(TOF_I2C_SCL, HIGH);
+    delayMicroseconds(10);
+  }
+
+#if defined(OUTPUT_OPEN_DRAIN)
+  pinMode(TOF_I2C_SDA, OUTPUT_OPEN_DRAIN);
+#else
+  pinMode(TOF_I2C_SDA, OUTPUT);
+#endif
+  digitalWrite(TOF_I2C_SDA, LOW);
+  delayMicroseconds(10);
+  digitalWrite(TOF_I2C_SCL, HIGH);
+  delayMicroseconds(10);
+  pinMode(TOF_I2C_SDA, INPUT_PULLUP);
+  pinMode(TOF_I2C_SCL, INPUT_PULLUP);
+  delayMicroseconds(10);
+
+  initTofI2cBus();
 }
 
 static BmsDdA5Firmware::Adapter batteryBms(
@@ -448,10 +505,7 @@ void setup() {
   CAN_TX_msg.flags.extended = 1;
   CAN_RX_msg.flags.extended = 1;
 
-  Wire.setSDA(PB11);
-  Wire.setSCL(PB10);
-  Wire.begin();
-  Wire.setClock(400000);
+  initTofI2cBus();
 
   // Инициируем магнитный энкодер
   as5600.begin(4);
@@ -675,7 +729,9 @@ void loop() {
     case CoreOpMode::ERROR: {
       currentOperation = STATE_ERROR;
       clearManualRadioHold();
-      motor_Force_Stop();
+      if (!isPhysicallyStationary()) {
+        motor_Force_Stop();
+      }
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
       
@@ -1706,6 +1762,10 @@ void get_Distance() {
       else if (currentSensor == 1) setFault(FAULT_TOF_CH_R);
       else if (currentSensor == 2) setFault(FAULT_TOF_PAL_F);
       else if (currentSensor == 3) setFault(FAULT_TOF_PAL_R);
+
+      if (err[0] >= 7 && err[1] >= 7 && err[2] >= 7 && err[3] >= 7) {
+        recoverTofI2cBus();
+      }
     }
 
     if (err[currentSensor] == 7) { 
@@ -2011,7 +2071,9 @@ void blink_Error() {
     digitalWrite(GREEN_LED, LOW);
     errCounter++;
     SystemYield();
-    motor_Stop();
+    if (!isPhysicallyStationary()) {
+      motor_Stop();
+    }
     Can1.read(CAN_RX_msg);
   }
   else if (errCounter == 14) {
