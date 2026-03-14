@@ -281,6 +281,29 @@ struct AckPacket {
 
 #pragma pack(pop)
 
+class AlertUtils {
+public:
+    static inline bool hasFault(uint16_t currentCode, ShuttleFault fault) {
+        return (currentCode & static_cast<uint16_t>(fault)) != 0;
+    }
+
+    static inline bool hasWarning(uint16_t currentCode, ShuttleWarning warning) {
+        return (currentCode & static_cast<uint16_t>(warning)) != 0;
+    }
+
+    template <typename AlertEnum>
+    static uint8_t extractActiveAlerts(uint16_t bitmask, AlertEnum* outArray, uint8_t maxItems) {
+        uint8_t count = 0;
+        for (uint8_t i = 0; i < 16 && count < maxItems; i++) {
+            uint16_t currentBit = (1U << i);
+            if (bitmask & currentBit) {
+                outArray[count++] = static_cast<AlertEnum>(currentBit);
+            }
+        }
+        return count;
+    }
+};
+
 class ProtocolUtils {
 public:
     static inline uint16_t updateCRC16(uint16_t crc, uint8_t byte) {

@@ -7,6 +7,7 @@
 #include <IWatchdog.h>
 #include <STM32RTC.h>
 #include "ShuttleProtocol.h"
+#include "AlertManager.h"
 #include "E32Radio.hpp"
 #include "BmsDdA5FirmwareAdapter.hpp"
 
@@ -234,9 +235,7 @@ volatile bool bootloaderStopDone = false;
 volatile uint32_t bootloaderEntryAtMs = 0;
 
 
-uint16_t errorCode = 0;                // Битмап ошибок
-uint16_t warningCode = 0;              // Битмап предупреждений
-uint32_t warningTimeouts[16] = { 0 };
+AlertManager alertMan;
 
 #if CONNECTION_LOGS
 struct LinkDiagCounters {
@@ -263,57 +262,25 @@ uint32_t linkDiagLastYieldMs = 0;
 #endif
 
 void setFault(ShuttleFault fault) {
-    errorCode |= fault;
+    alertMan.setFault(fault);
 }
 
 void clearFault(ShuttleFault fault) {
-    errorCode &= ~fault;
+    alertMan.clearFault(fault);
 }
 
 void setWarning(ShuttleWarning warn, uint32_t timeoutMs = 5000) {
-    const uint16_t warnBits = (uint16_t)warn;
-    warningCode |= warnBits;
-
-    for (uint8_t i = 0; i < 16; i++) {
-        const uint16_t bit = (uint16_t)(1U << i);
-        if ((warnBits & bit) == 0) continue;
-        warningTimeouts[i] = (timeoutMs > 0) ? (millis() + timeoutMs) : 0;
-    }
+    alertMan.setWarning(warn, timeoutMs, millis());
 }
 
 void clearWarning(ShuttleWarning warn) {
-    const uint16_t warnBits = (uint16_t)warn;
-    warningCode &= (uint16_t)(~warnBits);
-
-    for (uint8_t i = 0; i < 16; i++) {
-        const uint16_t bit = (uint16_t)(1U << i);
-        if ((warnBits & bit) != 0) {
-            warningTimeouts[i] = 0;
-        }
-    }
+    alertMan.clearWarning(warn);
 }
 
 void clearAllWarnings() {
-    warningCode = 0;
-    for (uint8_t i = 0; i < 16; i++) {
-        warningTimeouts[i] = 0;
-    }
+    alertMan.clearAllWarnings();
 }
 
-void processWarnings() {
-    if (warningCode == 0) return;
-
-    const uint32_t now = millis();
-    for (uint8_t i = 0; i < 16; i++) {
-        const uint16_t bit = (uint16_t)(1U << i);
-        if ((warningCode & bit) == 0 || warningTimeouts[i] == 0) continue;
-
-        if ((int32_t)(now - warningTimeouts[i]) >= 0) {
-            warningCode &= (uint16_t)(~bit);
-            warningTimeouts[i] = 0;
-        }
-    }
-}
 
 AS5600 as5600;  // Магнитный энкодер на свободном колесе
 uint8_t status = 0;                                                                                                                                                                                                                                                  // Командный статус
@@ -775,8 +742,8 @@ void loop() {
       blink_Error();
       
       if (status == CMD_RESET_ERROR) {
-        errorCode = 0;
-        clearAllWarnings();
+        alertMan.clearAllFaults();
+        alertMan.clearAllWarnings();
         batterySafetyReset(millis());
         status = 0;
         currentOperation = STATE_IDLE;
@@ -2120,7 +2087,7 @@ void blink_Error() {
   else if (errCounter == 14) {
     debuger++;    
     if (debuger == 1) {
-        makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", errorCode);
+        makeLog(LOG_ERROR, "Shuttle ERROR! Code: %04X", alertMan.getErrorCode());
         
         sendTelemetryPacket(&SerialDisplay);
         sendTelemetryPacket(&SerialLora);
@@ -4006,7 +3973,7 @@ void demo_Mode() {
 void SystemYield() {
   uint32_t currentMillis = millis();
   IWatchdog.reload();
-  processWarnings();
+  alertMan.processTimeouts(currentMillis);
 
   if (pendingBootloaderEntry) {
     if (!bootloaderStopDone) {
@@ -4502,7 +4469,7 @@ static inline bool batteryIsHighLoad() {
 }
 
 static inline bool batteryLowFaultLatched() {
-  return batterySafetyState.lowStopLatched || ((errorCode & FAULT_LOW_BATTERY) != 0);
+  return batterySafetyState.lowStopLatched || ((alertMan.getErrorCode() & FAULT_LOW_BATTERY) != 0);
 }
 
 static BmsDdA5::ActivityHint mapBatteryActivity() {
@@ -4981,7 +4948,7 @@ static inline void preserveManualStopOnAbort() {
 }
 
 static inline bool isErrorActive() {
-    return (errorCode != 0);
+    return (alertMan.getErrorCode() != 0);
 }
 
 static inline bool shouldAbortLoop() {
@@ -5058,8 +5025,8 @@ void sendTelemetryPacket(Stream* port) {
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
     TelemetryPacket pkt;
 
-    pkt.errorCode = errorCode;
-    pkt.warningCode = warningCode;
+    pkt.errorCode = alertMan.getErrorCode();
+    pkt.warningCode = alertMan.getWarningCode();
     pkt.shuttleStatus = currentOperation;
     pkt.currentPosition = currentPosition;
     pkt.speed = speed;
