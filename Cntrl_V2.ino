@@ -345,6 +345,8 @@ static BmsDdA5::Config makeBatteryPollConfig() {
   cfg.lowBatteryBasicMs = 5000U;
   cfg.cellIdleMs = 60000U;
   cfg.deviceIdleMs = 60000U;
+
+  cfg.staleWarnMs = 300000U;
   return cfg;
 }
 
