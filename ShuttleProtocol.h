@@ -144,6 +144,31 @@ enum ShuttleState : uint8_t {
     STATE_CALIBRATE       = 18
 };
 
+enum ShuttleFault : uint16_t {
+    FAULT_NONE             = 0x0000,
+    FAULT_TOF_CH_F         = (1 << 1),
+    FAULT_TOF_CH_R         = (1 << 2),
+    FAULT_TOF_PAL_F        = (1 << 3),
+    FAULT_TOF_PAL_R        = (1 << 4),
+    FAULT_LIFTER_TIMEOUT   = (1 << 9),
+    FAULT_MOTOR_STALL      = (1 << 10),
+    FAULT_LOW_BATTERY      = (1 << 11),
+    FAULT_CRASH_BUMPER     = (1 << 12),
+    FAULT_MOVE_TIMEOUT     = (1 << 13)
+};
+
+enum ShuttleWarning : uint16_t {
+    WARN_NONE              = 0x0000,
+    WARN_PALLET_NOT_FOUND  = (1 << 0),
+    WARN_CHANNEL_FULL      = (1 << 1),
+    WARN_NOT_IN_CHANNEL    = (1 << 2),
+    WARN_PALLET_SIZE_ERROR = (1 << 3),
+    WARN_END_OF_CHANNEL    = (1 << 4),
+    WARN_MANUAL_TIMEOUT    = (1 << 5),
+    WARN_I2C_RECOVERY      = (1 << 6),
+    WARN_OBSTACLE_AHEAD    = (1 << 7)
+};
+
 struct TelemetryPacket {
     uint16_t errorCode;        
     uint16_t warningCode;
