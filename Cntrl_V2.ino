@@ -262,31 +262,6 @@ LinkDiagCounters linkDiag = {};
 uint32_t linkDiagLastYieldMs = 0;
 #endif
 
-enum ShuttleFault : uint16_t {
-    FAULT_NONE             = 0x0000,
-    FAULT_TOF_CH_F         = (1 << 1),  // 0x0002
-    FAULT_TOF_CH_R         = (1 << 2),  // 0x0004
-    FAULT_TOF_PAL_F        = (1 << 3),  // 0x0008
-    FAULT_TOF_PAL_R        = (1 << 4),  // 0x0010
-    FAULT_LIFTER_TIMEOUT   = (1 << 9),  // 0x0200
-    FAULT_MOTOR_STALL      = (1 << 10), // 0x0400
-    FAULT_LOW_BATTERY      = (1 << 11), // 0x0800
-    FAULT_CRASH_BUMPER     = (1 << 12), // 0x1000
-    FAULT_MOVE_TIMEOUT     = (1 << 13)  // 0x2000
-};
-
-enum ShuttleWarning : uint16_t {
-    WARN_NONE              = 0x0000,
-    WARN_PALLET_NOT_FOUND  = (1 << 0),  // 0x0001
-    WARN_CHANNEL_FULL      = (1 << 1),  // 0x0002
-    WARN_NOT_IN_CHANNEL    = (1 << 2),  // 0x0004
-    WARN_PALLET_SIZE_ERROR = (1 << 3),  // 0x0008
-    WARN_END_OF_CHANNEL    = (1 << 4),  // 0x0010
-    WARN_MANUAL_TIMEOUT    = (1 << 5),  // 0x0020
-    WARN_I2C_RECOVERY      = (1 << 6),  // 0x0040
-    WARN_OBSTACLE_AHEAD    = (1 << 7)   // 0x0080
-};
-
 void setFault(ShuttleFault fault) {
     errorCode |= fault;
 }
