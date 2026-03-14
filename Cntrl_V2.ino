@@ -277,14 +277,14 @@ enum ShuttleFault : uint16_t {
 
 enum ShuttleWarning : uint16_t {
     WARN_NONE              = 0x0000,
-    WARN_PALLET_NOT_FOUND  = (1 << 0),  // 0x0001: expected pallet missing
-    WARN_CHANNEL_FULL      = (1 << 1),  // 0x0002: load requested into full channel
-    WARN_NOT_IN_CHANNEL    = (1 << 2),  // 0x0004: command rejected outside channel
-    WARN_PALLET_SIZE_ERROR = (1 << 3),  // 0x0008: abnormal pallet dimensions
-    WARN_END_OF_CHANNEL    = (1 << 4),  // 0x0010: manual move reached channel end
-    WARN_MANUAL_TIMEOUT    = (1 << 5),  // 0x0020: manual session timeout
-    WARN_I2C_RECOVERY      = (1 << 6),  // 0x0040: TOF I2C recovery started
-    WARN_OBSTACLE_AHEAD    = (1 << 7)   // 0x0080: unexpected obstacle in path
+    WARN_PALLET_NOT_FOUND  = (1 << 0),  // 0x0001
+    WARN_CHANNEL_FULL      = (1 << 1),  // 0x0002
+    WARN_NOT_IN_CHANNEL    = (1 << 2),  // 0x0004
+    WARN_PALLET_SIZE_ERROR = (1 << 3),  // 0x0008
+    WARN_END_OF_CHANNEL    = (1 << 4),  // 0x0010
+    WARN_MANUAL_TIMEOUT    = (1 << 5),  // 0x0020
+    WARN_I2C_RECOVERY      = (1 << 6),  // 0x0040
+    WARN_OBSTACLE_AHEAD    = (1 << 7)   // 0x0080
 };
 
 void setFault(ShuttleFault fault) {
