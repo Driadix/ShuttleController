@@ -4523,6 +4523,7 @@ static void batterySafetyReset(uint32_t now) {
 // Обработка срабатывания бампера
 void crash() {
   setFault(FAULT_CRASH_BUMPER);
+  LOG_RATE_LIMITED(LOG_WARN, 1000, "crash encountered");
   if (!(status == CMD_STOP)) {
     motor_Force_Stop();
     status = CMD_STOP;
