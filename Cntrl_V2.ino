@@ -55,6 +55,7 @@ static inline bool isLiftCommand(uint8_t cmd);
 static inline bool isOutOfChannelExemptCommand(uint8_t cmd);
 static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio);
 static inline bool isPhysicallyStationary();
+static inline void performSystemReset();
 static inline void touchManualSession();
 static inline void beginManualRadioHold(uint32_t now);
 static inline void refreshManualRadioHoldWatchdog(uint32_t now);
@@ -741,7 +742,9 @@ void loop() {
       if (digitalRead(WHITE_LED)) digitalWrite(WHITE_LED, LOW);
       blink_Error();
       
-      if (status == CMD_RESET_ERROR) {
+      if (status == CMD_SYSTEM_RESET) {
+        performSystemReset();
+      } else if (status == CMD_RESET_ERROR) {
         alertMan.clearAllFaults();
         alertMan.clearAllWarnings();
         batterySafetyReset(millis());
@@ -4104,9 +4107,7 @@ void SystemYield() {
   }
 
   if (status == CMD_SYSTEM_RESET) {
-      makeLog(LOG_INFO, "Reboot system by external command...");
-      delay(20);
-      HAL_NVIC_SystemReset();
+      performSystemReset();
   }
 }
 
@@ -4868,7 +4869,8 @@ static inline bool isLiftCommand(uint8_t cmd) {
 }
 
 static inline bool isOutOfChannelExemptCommand(uint8_t cmd) {
-    return (cmd == CMD_SAVE_EEPROM ||
+    return (cmd == CMD_SYSTEM_RESET ||
+            cmd == CMD_SAVE_EEPROM ||
             cmd == CMD_GET_CONFIG ||
             cmd == CMD_RESET_ERROR ||
             isLiftCommand(cmd));
@@ -4919,6 +4921,12 @@ static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio) {
 
 static inline bool isPhysicallyStationary() {
     return (motorStart == 0 && motorReverse == 2);
+}
+
+static inline void performSystemReset() {
+    makeLog(LOG_INFO, "Reboot system by external command...");
+    delay(20);
+    HAL_NVIC_SystemReset();
 }
 
 static inline void touchManualSession() {
