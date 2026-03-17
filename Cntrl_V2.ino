@@ -56,6 +56,7 @@ static inline bool isOutOfChannelExemptCommand(uint8_t cmd);
 static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio);
 static inline bool isPhysicallyStationary();
 static inline void performSystemReset();
+static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now);
 static inline void touchManualSession();
 static inline void beginManualRadioHold(uint32_t now);
 static inline void refreshManualRadioHoldWatchdog(uint32_t now);
@@ -264,10 +265,6 @@ uint32_t linkDiagLastYieldMs = 0;
 
 void setFault(ShuttleFault fault) {
     alertMan.setFault(fault);
-}
-
-void clearFault(ShuttleFault fault) {
-    alertMan.clearFault(fault);
 }
 
 void setWarning(ShuttleWarning warn, uint32_t timeoutMs = 5000) {
@@ -745,13 +742,7 @@ void loop() {
       if (status == CMD_SYSTEM_RESET) {
         performSystemReset();
       } else if (status == CMD_RESET_ERROR) {
-        alertMan.clearAllFaults();
-        alertMan.clearAllWarnings();
-        batterySafetyReset(millis());
-        status = 0;
-        currentOperation = STATE_IDLE;
-        digitalWrite(RED_LED, LOW);
-        currentMode = CoreOpMode::IDLE;
+        clearLatchedAlertsAndReturnToIdle(millis());
       } else if (status == CMD_SAVE_EEPROM) {
         saveEEPROMData(eepromData);
         status = 0;
@@ -1789,10 +1780,6 @@ void get_Distance() {
   } else {
     if (err[currentSensor] > 0) {
       err[currentSensor] = 0;
-      if (currentSensor == 0) clearFault(FAULT_TOF_CH_F);
-      else if (currentSensor == 1) clearFault(FAULT_TOF_CH_R);
-      else if (currentSensor == 2) clearFault(FAULT_TOF_PAL_F);
-      else if (currentSensor == 3) clearFault(FAULT_TOF_PAL_R);
     }
   }
 
@@ -4928,6 +4915,20 @@ static inline void performSystemReset() {
     makeLog(LOG_INFO, "Reboot system by external command...");
     delay(20);
     HAL_NVIC_SystemReset();
+}
+
+static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now) {
+    // Latched hardware faults are only cleared by the explicit operator reset.
+    alertMan.clearAllFaults();
+    alertMan.clearAllWarnings();
+    batterySafetyReset(now);
+    clearManualRadioHold();
+    pendingDisplayManualModeBypass = false;
+    statusSourceRadio = false;
+    status = 0;
+    currentOperation = STATE_IDLE;
+    digitalWrite(RED_LED, LOW);
+    currentMode = CoreOpMode::IDLE;
 }
 
 static inline void touchManualSession() {
