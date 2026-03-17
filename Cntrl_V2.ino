@@ -4521,10 +4521,10 @@ static void batterySafetyReset(uint32_t now) {
 
 // Обработка срабатывания бампера
 void crash() {
+  setFault(FAULT_CRASH_BUMPER);
   if (!(status == CMD_STOP)) {
     motor_Force_Stop();
     status = CMD_STOP;
-    setFault(FAULT_CRASH_BUMPER);
     STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
     oldSpeed = 0;
   }
