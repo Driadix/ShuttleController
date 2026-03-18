@@ -67,7 +67,11 @@ static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck);
 static inline int transportAvailableForWrite(Stream* port);
 static size_t writeTransportPayload(Stream* port, const uint8_t* buffer, uint16_t length, const E32Radio::FixedRoute* fixedRoute = NULL);
+static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio);
+static void populateTelemetryPacket(TelemetryPacket* pkt, int16_t shuttleStatusOverride = -1);
 static void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute = NULL);
+static void sendTelemAck(uint8_t seq, AckResult result, Stream* port, int16_t shuttleStatusOverride = -1, const E32Radio::FixedRoute* fixedRoute = NULL);
+static void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck, int16_t shuttleStatusOverride = -1);
 static void sendTelemetryPacket(Stream* port);
 static void sendSensorPacket(Stream* port);
 static void sendStatsPacket(Stream* port);
@@ -1167,6 +1171,39 @@ void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedR
     }
 }
 
+void sendTelemAck(uint8_t seq, AckResult result, Stream* port, int16_t shuttleStatusOverride, const E32Radio::FixedRoute* fixedRoute) {
+    if (!port || pendingBootloaderEntry) return;
+
+    uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(AckTelemPacket) + 2];
+    AckTelemPacket pkt;
+    pkt.ack.refSeq = seq;
+    pkt.ack.result = result;
+    populateTelemetryPacket(&pkt.telemetry, shuttleStatusOverride);
+
+    FrameHeader* header = (FrameHeader*)localTxBuffer;
+    header->sync1 = PROTOCOL_SYNC_1_V2;
+    header->sync2 = PROTOCOL_SYNC_2_V2;
+    header->length = sizeof(AckTelemPacket);
+    header->targetID = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0;
+    header->seq = seqCounter++;
+    header->msgID = MSG_ACK_TELEM;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(AckTelemPacket));
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute) == totalLen + 2) {
+        countTxFrame(port);
+    }
+}
+
+void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck, int16_t shuttleStatusOverride) {
+    if (suppressAck) return;
+    if (useTelemAck) sendTelemAck(seq, result, port, shuttleStatusOverride);
+    else sendAck(seq, result, port);
+}
+
 uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) {
     if (header->targetID != TARGET_ID_NONE && 
         header->targetID != TARGET_ID_BROADCAST && 
@@ -1184,7 +1221,9 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         return NO_NEW_CMD;
     }
 
-    bool suppressAck = (header->msgID & MSG_FLAG_NO_ACK) != 0;
+    bool requiresNoAck = (header->msgID & MSG_FLAG_NO_ACK) != 0;
+    bool requiresTelemAck = (header->msgID & MSG_FLAG_REQ_TELEM) != 0;
+    bool useTelemAck = requiresTelemAck && replyPort == &SerialLora;
     uint8_t realMsgID = header->msgID & MSG_ID_MASK;
 
     if (realMsgID == MSG_REQ_HEARTBEAT) {
@@ -1211,17 +1250,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                          ((SimpleCmdPacket*)payload)->cmdType : ((ParamCmdPacket*)payload)->cmdType;
 
         if (!isSupportedCommand(reqCmd)) {
-            if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+            sendCommandAck(header->seq, ACK_REJECTED, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
 
         if (reqCmd == CMD_SAVE_EEPROM) {
             pendingEepromSave = true;
-            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+            sendCommandAck(header->seq, ACK_OK, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD; 
         }
         if (reqCmd == CMD_GET_CONFIG) {
-            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+            sendCommandAck(header->seq, ACK_OK, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
 
@@ -1246,7 +1285,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 isManualDistanceCommand(reqCmd) || isLiftCommand(reqCmd)) {
                 makeLog(LOG_WARN, "Manual reject cmd=%02X reason=not_prov", reqCmd);
             }
-            if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
+            sendCommandAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
 
@@ -1257,7 +1296,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 isManualDistanceCommand(reqCmd) || isLiftCommand(reqCmd)) {
                 makeLog(LOG_WARN, "Manual reject cmd=%02X reason=error", reqCmd);
             }
-            if (!suppressAck) sendAck(header->seq, ACK_ERROR_STATE, replyPort);
+            sendCommandAck(header->seq, ACK_ERROR_STATE, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
 
@@ -1267,30 +1306,34 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 makeLog(LOG_WARN, "Manual reject cmd=%02X reason=channel", reqCmd);
             }
             setWarning(WARN_NOT_IN_CHANNEL, 5000);
-            if (!suppressAck) sendAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort);
+            sendCommandAck(header->seq, ACK_BAD_ENVIRONMENT, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
 
         if (canAcceptCommandNow(reqCmd, replyPort == &SerialLora)) {
-            if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
-
             if (realMsgID == MSG_CMD_WITH_ARG) {
                 ParamCmdPacket* cmdArgs = (ParamCmdPacket*)payload;
                 if (isManualDistanceCommand(reqCmd)) mooveDistance = cmdArgs->arg;
                 else if (reqCmd == CMD_LONG_UNLOAD_QTY) UPQuant = (uint8_t)cmdArgs->arg;
             }
+
+            int16_t telemStateOverride = -1;
+            if (useTelemAck && replyPort == &SerialLora) {
+                telemStateOverride = (int16_t)predictTelemetryStateForAcceptedCommand(reqCmd, true);
+            }
+            sendCommandAck(header->seq, ACK_OK, replyPort, requiresNoAck, useTelemAck, telemStateOverride);
             return reqCmd;
         } else {
             if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) ||
                 isManualDistanceCommand(reqCmd) || isLiftCommand(reqCmd)) {
                 makeLog(LOG_WARN, "Manual reject cmd=%02X reason=busy", reqCmd);
             }
-            if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
+            sendCommandAck(header->seq, ACK_BUSY, replyPort, requiresNoAck, useTelemAck);
             return NO_NEW_CMD;
         }
     } else if (realMsgID == MSG_SET_DATETIME) {
         DateTimePacket* dt = (DateTimePacket*)payload;
-        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+        if (!requiresNoAck) sendAck(header->seq, ACK_OK, replyPort);
 
         rtc.setTime(dt->hour, dt->minute, dt->second);
         rtc.setDate(getWeekDay(dt->day, dt->month, dt->year + 2000), dt->day, dt->month, dt->year);
@@ -1300,16 +1343,16 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         switch (cfg->paramID) {
             case CFG_SHUTTLE_NUM: {
                 if (!isValidProvisionedShuttleId(cfg->value)) {
-                    if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+                    if (!requiresNoAck) sendAck(header->seq, ACK_REJECTED, replyPort);
                     return NO_NEW_CMD;
                 }
                 uint8_t newId = (uint8_t)cfg->value;
                 if (eepromData.shuttleNum == newId) {
-                    if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+                    if (!requiresNoAck) sendAck(header->seq, ACK_OK, replyPort);
                     return NO_NEW_CMD;
                 }
                 if (!isPhysicallyStationary()) {
-                    if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
+                    if (!requiresNoAck) sendAck(header->seq, ACK_BUSY, replyPort);
                     return NO_NEW_CMD;
                 }
                 E32Radio::FixedRoute ackRoute = {0, 0, 0};
@@ -1321,13 +1364,13 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                         ackRoutePtr = &ackRoute;
                     }
                 }
-                if (!reapplyRadioConfigForShuttleId(newId, replyPort, header->seq, suppressAck)) {
+                if (!reapplyRadioConfigForShuttleId(newId, replyPort, header->seq, requiresNoAck)) {
                     return NO_NEW_CMD;
                 }
                 eepromData.shuttleNum = newId;
                 shuttleNum = newId;
                 pendingEepromSave = true;
-                if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
+                if (!requiresNoAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
                 return NO_NEW_CMD;
             }
             case CFG_INTER_PALLET: {
@@ -1386,16 +1429,16 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                 inverse = (uint8_t)cfg->value;
                 break;
             default:
-                if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+                if (!requiresNoAck) sendAck(header->seq, ACK_REJECTED, replyPort);
                 return NO_NEW_CMD;
         }
-        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort);
+        if (!requiresNoAck) sendAck(header->seq, ACK_OK, replyPort);
         return NO_NEW_CMD;
     } else if (realMsgID == MSG_CONFIG_SYNC_PUSH) {
         FullConfigPacket* fullCfg = (FullConfigPacket*)payload;
 
         if (!isValidProvisionedShuttleId(fullCfg->shuttleNumber)) {
-            if (!suppressAck) sendAck(header->seq, ACK_REJECTED, replyPort);
+            if (!requiresNoAck) sendAck(header->seq, ACK_REJECTED, replyPort);
             return NO_NEW_CMD;
         }
 
@@ -1404,7 +1447,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         const E32Radio::FixedRoute* ackRoutePtr = NULL;
         if (shuttleIdChanged) {
             if (!isPhysicallyStationary()) {
-                if (!suppressAck) sendAck(header->seq, ACK_BUSY, replyPort);
+                if (!requiresNoAck) sendAck(header->seq, ACK_BUSY, replyPort);
                 return NO_NEW_CMD;
             }
             if (replyPort == &SerialLora) {
@@ -1414,7 +1457,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
                     ackRoutePtr = &ackRoute;
                 }
             }
-            if (!reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, replyPort, header->seq, suppressAck)) {
+            if (!reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, replyPort, header->seq, requiresNoAck)) {
                 return NO_NEW_CMD;
             }
         }
@@ -1442,7 +1485,7 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
 
         if (shuttleIdChanged) pendingEepromSave = true;
         
-        if (!suppressAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
+        if (!requiresNoAck) sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
         return NO_NEW_CMD;
 
     } else if (realMsgID == MSG_CONFIG_SYNC_REQ) {
@@ -4793,6 +4836,25 @@ static ShuttleState mapCmdToOperation(uint8_t cmd) {
     }
 }
 
+static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio) {
+    if (cmd == CMD_MANUAL_MODE) {
+        if (currentMode == CoreOpMode::MANUAL && fromRadio) {
+            return STATE_IDLE;
+        }
+        return STATE_MANUAL;
+    }
+
+    if (currentMode == CoreOpMode::MANUAL) {
+        if (isContinuousManualCommand(cmd) ||
+            isManualDistanceCommand(cmd) ||
+            isLiftCommand(cmd)) {
+            return STATE_MANUAL;
+        }
+    }
+
+    return mapCmdToOperation(cmd);
+}
+
 static inline bool isValidProvisionedShuttleId(int32_t id) {
     return (id >= E32Radio::kAddressNodeMin && id <= E32Radio::kAddressNodeMax);
 }
@@ -5034,24 +5096,7 @@ void sendTelemetryPacket(Stream* port) {
     if (!port || pendingBootloaderEntry) return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(TelemetryPacket) + 2];
     TelemetryPacket pkt;
-
-    pkt.errorCode = alertMan.getErrorCode();
-    pkt.warningCode = alertMan.getWarningCode();
-    pkt.shuttleStatus = currentOperation;
-    pkt.currentPosition = currentPosition;
-    pkt.speed = speed;
-    pkt.batteryCharge = batteryCharge;
-    pkt.batteryVoltage_mV = batteryBms.packVoltage_mV();
-    pkt.shuttleNumber = shuttleNum;
-    pkt.palleteCount = palleteCount;
-
-    pkt.stateFlags = 0;
-    if (lifterUp) pkt.stateFlags |= (1 << 0);
-    if (motorStart) pkt.stateFlags |= (1 << 1);
-    if (motorReverse) pkt.stateFlags |= (1 << 2);
-    if (inverse) pkt.stateFlags |= (1 << 3);
-    if (digitalRead(CHANNEL)) pkt.stateFlags |= (1 << 4);
-    if (fifoLifo) pkt.stateFlags |= (1 << 5);
+    populateTelemetryPacket(&pkt);
 
     FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
@@ -5070,6 +5115,29 @@ void sendTelemetryPacket(Stream* port) {
     if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2) {
         countTxFrame(port);
     }
+}
+
+void populateTelemetryPacket(TelemetryPacket* pkt, int16_t shuttleStatusOverride) {
+    if (!pkt) return;
+
+    pkt->errorCode = alertMan.getErrorCode();
+    pkt->warningCode = alertMan.getWarningCode();
+    pkt->shuttleStatus = (shuttleStatusOverride >= 0) ?
+        (ShuttleState)shuttleStatusOverride : currentOperation;
+    pkt->currentPosition = currentPosition;
+    pkt->speed = speed;
+    pkt->batteryCharge = batteryCharge;
+    pkt->batteryVoltage_mV = batteryBms.packVoltage_mV();
+    pkt->shuttleNumber = shuttleNum;
+    pkt->palleteCount = palleteCount;
+
+    pkt->stateFlags = 0;
+    if (lifterUp) pkt->stateFlags |= (1 << 0);
+    if (motorStart) pkt->stateFlags |= (1 << 1);
+    if (motorReverse) pkt->stateFlags |= (1 << 2);
+    if (inverse) pkt->stateFlags |= (1 << 3);
+    if (digitalRead(CHANNEL)) pkt->stateFlags |= (1 << 4);
+    if (fifoLifo) pkt->stateFlags |= (1 << 5);
 }
 
 void sendSensorPacket(Stream* port) {
