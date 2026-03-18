@@ -67,10 +67,11 @@ static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream* replyPort, uint8_t ackSeq, bool suppressAck);
 static inline int transportAvailableForWrite(Stream* port);
 static size_t writeTransportPayload(Stream* port, const uint8_t* buffer, uint16_t length, const E32Radio::FixedRoute* fixedRoute = NULL);
-static void populateTelemetryPacket(TelemetryPacket* pkt);
+static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio);
+static void populateTelemetryPacket(TelemetryPacket* pkt, int16_t shuttleStatusOverride = -1);
 static void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute = NULL);
-static void sendTelemAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute = NULL);
-static void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck);
+static void sendTelemAck(uint8_t seq, AckResult result, Stream* port, int16_t shuttleStatusOverride = -1, const E32Radio::FixedRoute* fixedRoute = NULL);
+static void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck, int16_t shuttleStatusOverride = -1);
 static void sendTelemetryPacket(Stream* port);
 static void sendSensorPacket(Stream* port);
 static void sendStatsPacket(Stream* port);
@@ -1170,14 +1171,14 @@ void sendAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedR
     }
 }
 
-void sendTelemAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::FixedRoute* fixedRoute) {
+void sendTelemAck(uint8_t seq, AckResult result, Stream* port, int16_t shuttleStatusOverride, const E32Radio::FixedRoute* fixedRoute) {
     if (!port || pendingBootloaderEntry) return;
 
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(AckTelemPacket) + 2];
     AckTelemPacket pkt;
     pkt.ack.refSeq = seq;
     pkt.ack.result = result;
-    populateTelemetryPacket(&pkt.telemetry);
+    populateTelemetryPacket(&pkt.telemetry, shuttleStatusOverride);
 
     FrameHeader* header = (FrameHeader*)localTxBuffer;
     header->sync1 = PROTOCOL_SYNC_1_V2;
@@ -1197,9 +1198,9 @@ void sendTelemAck(uint8_t seq, AckResult result, Stream* port, const E32Radio::F
     }
 }
 
-void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck) {
+void sendCommandAck(uint8_t seq, AckResult result, Stream* port, bool suppressAck, bool useTelemAck, int16_t shuttleStatusOverride) {
     if (suppressAck) return;
-    if (useTelemAck) sendTelemAck(seq, result, port);
+    if (useTelemAck) sendTelemAck(seq, result, port, shuttleStatusOverride);
     else sendAck(seq, result, port);
 }
 
@@ -1310,13 +1311,17 @@ uint8_t processPacket(FrameHeader* header, uint8_t* payload, Stream* replyPort) 
         }
 
         if (canAcceptCommandNow(reqCmd, replyPort == &SerialLora)) {
-            sendCommandAck(header->seq, ACK_OK, replyPort, requiresNoAck, useTelemAck);
-
             if (realMsgID == MSG_CMD_WITH_ARG) {
                 ParamCmdPacket* cmdArgs = (ParamCmdPacket*)payload;
                 if (isManualDistanceCommand(reqCmd)) mooveDistance = cmdArgs->arg;
                 else if (reqCmd == CMD_LONG_UNLOAD_QTY) UPQuant = (uint8_t)cmdArgs->arg;
             }
+
+            int16_t telemStateOverride = -1;
+            if (useTelemAck && replyPort == &SerialLora) {
+                telemStateOverride = (int16_t)predictTelemetryStateForAcceptedCommand(reqCmd, true);
+            }
+            sendCommandAck(header->seq, ACK_OK, replyPort, requiresNoAck, useTelemAck, telemStateOverride);
             return reqCmd;
         } else {
             if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) ||
@@ -4831,6 +4836,25 @@ static ShuttleState mapCmdToOperation(uint8_t cmd) {
     }
 }
 
+static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio) {
+    if (cmd == CMD_MANUAL_MODE) {
+        if (currentMode == CoreOpMode::MANUAL && fromRadio) {
+            return STATE_IDLE;
+        }
+        return STATE_MANUAL;
+    }
+
+    if (currentMode == CoreOpMode::MANUAL) {
+        if (isContinuousManualCommand(cmd) ||
+            isManualDistanceCommand(cmd) ||
+            isLiftCommand(cmd)) {
+            return STATE_MANUAL;
+        }
+    }
+
+    return mapCmdToOperation(cmd);
+}
+
 static inline bool isValidProvisionedShuttleId(int32_t id) {
     return (id >= E32Radio::kAddressNodeMin && id <= E32Radio::kAddressNodeMax);
 }
@@ -5093,12 +5117,13 @@ void sendTelemetryPacket(Stream* port) {
     }
 }
 
-void populateTelemetryPacket(TelemetryPacket* pkt) {
+void populateTelemetryPacket(TelemetryPacket* pkt, int16_t shuttleStatusOverride) {
     if (!pkt) return;
 
     pkt->errorCode = alertMan.getErrorCode();
     pkt->warningCode = alertMan.getWarningCode();
-    pkt->shuttleStatus = currentOperation;
+    pkt->shuttleStatus = (shuttleStatusOverride >= 0) ?
+        (ShuttleState)shuttleStatusOverride : currentOperation;
     pkt->currentPosition = currentPosition;
     pkt->speed = speed;
     pkt->batteryCharge = batteryCharge;
