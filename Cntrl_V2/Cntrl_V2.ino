@@ -84,6 +84,54 @@ static inline bool batteryIsHighLoad();
 static inline bool batteryLowFaultLatched();
 static bool batteryIsMotionLikeStatus(uint8_t st);
 
+static inline void preserveManualStopOnAbort();
+static inline bool shouldAbortLoop();
+static inline bool isErrorActive();
+static inline bool isOverrideCommand(uint8_t cmd);
+static inline void countTxFrame(Stream* port);
+static inline void countReplyTiming(Stream* port, uint32_t elapsedUs);
+static inline bool isShuttleIdle();
+
+void motor_Stop();
+void motor_Speed(int spd);
+void moove_Before_Pallete_F();
+void moove_Before_Pallete_R();
+void stop_Before_Pallete_F();
+void stop_Before_Pallete_R();
+void moove_Distance_F(int dist, int maxSpeed, int minSpeed);
+void moove_Distance_F(int dist);
+void moove_Distance_R(int dist, int maxSpeed, int minSpeed);
+void moove_Distance_R(int dist);
+void moove_Forward();
+void moove_Reverse();
+void moove_Right();
+void moove_Left();
+
+// Operations
+void lifter_Down();
+void lifter_Up();
+void lifter_Stop();
+void load_Pallete();
+void unload_Pallete();
+void single_Load();
+void long_Load();
+void long_Unload();
+void long_Unload(uint8_t num);
+void pallete_Compacting_F();
+void pallete_Compacting_R();
+void pallete_Counting_F();
+void demo_Mode();
+
+// System
+void run_Cmd();
+void send_Cmd();
+void get_Distance();
+void detect_Pallete();
+void set_Position();
+void blink_Work();
+void blink_Warning();
+void blink_Error();
+
 #define STATS_MAGIC_WORD 0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
 
