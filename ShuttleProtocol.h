@@ -49,13 +49,16 @@ enum MsgID : uint8_t {
     MSG_CMD_WITH_ARG     = 0x31, // Pult/Display -> Shuttle: 5-byte payload (Cmd + int32_t arg)
     MSG_SET_DATETIME     = 0x32, // Display -> Shuttle: RTC Sync (DateTimePacket)
     MSG_ACK              = 0x33, // Shuttle -> Pult/Display: Command acknowledgment
-    MSG_BMS_EXT          = 0x34  // Reserved for future extended battery telemetry
+    MSG_BMS_EXT          = 0x34, // Reserved for future extended battery telemetry
+    MSG_ACK_TELEM        = 0x35  // Shuttle -> Pult: Compound ACK + Telemetry
 };
 
 // Flag placed in the MSB of msgID to suppress ACKs for volatile commands
-constexpr uint8_t MSG_FLAG_NO_ACK  = 0x80; 
-// Mask to extract the real MsgID
-constexpr uint8_t MSG_ID_MASK      = 0x7F; 
+constexpr uint8_t MSG_FLAG_NO_ACK    = 0x80;
+// Flag to instruct the Shuttle to append telemetry to the ACK
+constexpr uint8_t MSG_FLAG_REQ_TELEM = 0x40;
+// Mask to extract the real MsgID (masks out both top flag bits)
+constexpr uint8_t MSG_ID_MASK        = 0x3F;
 
 enum LogLevel : uint8_t {
     LOG_INFO = 0, 
@@ -277,6 +280,12 @@ struct LogPacket {
 struct AckPacket {
     uint8_t  refSeq;  // Sequence number of the command being ACK'd
     AckResult result; // Reason code for the ACK response
+};
+
+// Used with MSG_ACK_TELEM (18 bytes total: 2 AckPacket + 16 TelemetryPacket)
+struct AckTelemPacket {
+    AckPacket      ack;       // 2 bytes
+    TelemetryPacket telemetry; // 16 bytes
 };
 
 #pragma pack(pop)
