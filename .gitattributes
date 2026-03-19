@@ -1,0 +1,9 @@
+# Автоматически нормализовать окончания строк
+* text=auto
+
+# Жестко зафиксировать LF для всех файлов с кодом
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf
+*.ino text eol=lf
+*.sh text eol=lf
