@@ -17,11 +17,15 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Устанавливаем инструменты (в Ubuntu они ставятся за 3 секунды через apt)
+      # 2. Устанавливаем инструменты
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck clang-format
+          sudo apt-get install -y cppcheck clang-format-17
+          # Делаем clang-format-17 версией по умолчанию
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-17 100
+          # Выводим версию для дебага
+          clang-format --version
 
       # 3. Даем права на выполнение нашим скриптам
       - name: Make scripts executable
