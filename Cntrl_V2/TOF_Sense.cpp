@@ -35,15 +35,16 @@ void TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data)
     // Парсинг данных
     tof_data->interface_mode = read_buf[TOF_ADDR_MODE] & 0x07;
     tof_data->id             = read_buf[TOF_ADDR_ID];
-    tof_data->uart_baudrate  = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE]);
-    tof_data->system_time = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME]);
-    tof_data->dis = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_DIS + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_DIS + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_DIS + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_DIS]);
+    tof_data->uart_baudrate =
+        (uint32_t)(((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 3] << 24) |
+                   ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 2] << 16) |
+                   ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE]);
+    tof_data->system_time =
+        (uint32_t)(((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 3] << 24) |
+                   ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 2] << 16) |
+                   ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME]);
+    tof_data->dis = (uint32_t)(((uint32_t)read_buf[TOF_ADDR_DIS + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_DIS + 2] << 16) |
+                               ((uint32_t)read_buf[TOF_ADDR_DIS + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_DIS]);
     tof_data->dis_status =
         (uint16_t)((uint16_t)read_buf[TOF_ADDR_DIS_STATUS] | ((uint16_t)read_buf[TOF_ADDR_DIS_STATUS + 1] << 8));
     tof_data->signal_strength =

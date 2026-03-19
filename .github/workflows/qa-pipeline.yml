@@ -10,27 +10,35 @@ on:
 jobs:
   static-analysis:
     name: Code Quality (Format & Cppcheck)
-    runs-on: ubuntu-latest # Используем стандартный Linux-контейнер (быстро и дешево)
+    runs-on: ubuntu-latest
 
     steps:
       # 1. Скачиваем код из репозитория
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Устанавливаем инструменты (в Ubuntu они ставятся за 3 секунды через apt)
+      # 2. Устанавливаем инструменты
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck clang-format
+          sudo apt-get install -y cppcheck clang-format-18
 
-      # 3. Даем права на выполнение нашим скриптам
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+
+      # 3. Выводим версии для дебага (чтобы всегда видеть это в логах GitHub/Gitea)
+      - name: Verify Tool Versions
+        run: |
+          clang-format --version
+          cppcheck --version
+
+      # 4. Даем права на выполнение нашим скриптам
       - name: Make scripts executable
         run: chmod +x *.sh
 
-      # 4. Проверяем форматирование
+      # 5. Проверяем форматирование
       - name: Enforce Code Style
         run: ./check_format.sh
 
-      # 5. Ищем логические ошибки и утечки памяти
+      # 6. Ищем логические ошибки и утечки памяти
       - name: Run Cppcheck
         run: ./run_cppcheck.sh
