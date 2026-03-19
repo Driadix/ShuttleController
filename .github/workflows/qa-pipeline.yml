@@ -1,0 +1,36 @@
+name: Firmware QA Pipeline
+
+# Запускаем пайплайн при пуше в main и при создании Pull Request
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  static-analysis:
+    name: Code Quality (Format & Cppcheck)
+    runs-on: ubuntu-latest # Используем стандартный Linux-контейнер (быстро и дешево)
+
+    steps:
+      # 1. Скачиваем код из репозитория
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Устанавливаем инструменты (в Ubuntu они ставятся за 3 секунды через apt)
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang-format
+
+      # 3. Даем права на выполнение нашим скриптам
+      - name: Make scripts executable
+        run: chmod +x *.sh
+
+      # 4. Проверяем форматирование
+      - name: Enforce Code Style
+        run: ./check_format.sh
+
+      # 5. Ищем логические ошибки и утечки памяти
+      - name: Run Cppcheck
+        run: ./run_cppcheck.sh
