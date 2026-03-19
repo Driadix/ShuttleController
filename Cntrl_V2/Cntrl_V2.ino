@@ -85,13 +85,13 @@ static void         sendAck(uint8_t seq, AckResult result, Stream *port, const E
 static void         sendTelemAck(
             uint8_t                     seq,
             AckResult                   result,
-            Stream                     *port,
+            Stream *                    port,
             int16_t                     shuttleStatusOverride = -1,
             const E32Radio::FixedRoute *fixedRoute            = NULL);
 static void sendCommandAck(
     uint8_t   seq,
     AckResult result,
-    Stream   *port,
+    Stream *  port,
     bool      suppressAck,
     bool      useTelemAck,
     int16_t   shuttleStatusOverride = -1);
@@ -196,30 +196,30 @@ struct ConfigPageHeader
     uint8_t  reserved[1];
     uint16_t crc16;
 };
-#define MEDIAN(a, b, c) ((a) + (b) + (c) - min(min(a, b), c) - max(max(a, b), c))
+#define MEDIAN(a, b, c) ((a) + (b) + (c)-min(min(a, b), c) - max(max(a, b), c))
 
 #pragma endregion
 
 #pragma region Пины и дефайны...
 
 #define DL_UP       PC13 // Пин датчика положения лифтера в поднятом состоянии
-#define DL_DOWN     PB4  // Пин датчика положения лифтера в опущенном состоянии
-#define DATCHIK_F1  PA5  // Пин датчика 1 обнаружения паллета вперед
-#define DATCHIK_F2  PC4  // Пин датчика 2 обнаружения паллета вперед
-#define DATCHIK_R1  PB6  // Пин датчика 1 обнаружения паллета назад
-#define DATCHIK_R2  PD2  // Пин датчика 2 обнаружения паллета назад
-#define GREEN_LED   PC1  // Пин зеленого светодиода
-#define BOARD_LED   PA1  // Пин светодиода на плате
-#define RED_LED     PC3  // Пин красного светодиода ошибки
-#define WHITE_LED   PC2  // Пин белого светодиода работы
-#define ZOOMER      PA0  // Зумер
+#define DL_DOWN     PB4 // Пин датчика положения лифтера в опущенном состоянии
+#define DATCHIK_F1  PA5 // Пин датчика 1 обнаружения паллета вперед
+#define DATCHIK_F2  PC4 // Пин датчика 2 обнаружения паллета вперед
+#define DATCHIK_R1  PB6 // Пин датчика 1 обнаружения паллета назад
+#define DATCHIK_R2  PD2 // Пин датчика 2 обнаружения паллета назад
+#define GREEN_LED   PC1 // Пин зеленого светодиода
+#define BOARD_LED   PA1 // Пин светодиода на плате
+#define RED_LED     PC3 // Пин красного светодиода ошибки
+#define WHITE_LED   PC2 // Пин белого светодиода работы
+#define ZOOMER      PA0 // Зумер
 #define LORA        PB15 // Пин включения радиомодуля
 #define RS485       PB13 // Пин передачи шины RS485
-#define BUMPER_F1   PB7  // Пин бампера вперед
-#define BUMPER_F2   PB3  // Пин бампера вперед
-#define BUMPER_R1   PA6  // Пин бампера назад
-#define BUMPER_R2   PC5  // Пин бампера назад
-#define CHANNEL     PB5  // Пин датчика канала
+#define BUMPER_F1   PB7 // Пин бампера вперед
+#define BUMPER_F2   PB3 // Пин бампера вперед
+#define BUMPER_R1   PA6 // Пин бампера назад
+#define BUMPER_R2   PC5 // Пин бампера назад
+#define CHANNEL     PB5 // Пин датчика канала
 #define TOF_I2C_SDA PB11
 #define TOF_I2C_SCL PB10
 
@@ -383,26 +383,26 @@ uint8_t calibrateEncoder_R[8] = {
 uint8_t calibrateSensor_F[3] = { 100, 100, 100 }; // Массив калибровки канального сенсора расстояния вперед -сохранять-
 uint8_t calibrateSensor_R[3] = { 100, 100, 100 }; // Массив калибровки канального сенсора расстояния назад -сохранять-
 
-uint8_t  counter              = 0;        // Счетчик для красивых морганий в рабочем режиме
-uint8_t  debuger              = 0;        // Счетчик для дебагера
-uint8_t  sensorOff            = 0;        // Флаг отключения сенсоров в ручном режиме
-uint8_t  lastPallete          = 0;        // Флаг позиции последнего паллета
-uint8_t  minBattCharge        = 20;       // Минимальный заряд батареи
-uint8_t  endOfChannel         = 0;        // Флаг концов канала
-int      blinkTime            = 80;       // Время квантования красивых морганий -сохранять-
-int      waitTime             = 15000;    // Время ожидания при выгрузке
-int      count                = millis(); // Счетчик времени общего назначения
-int      count2               = count;    // Счетчик времени общего назначения
-int      countSensor          = count;    // Счетчик времени опроса датчиков
-int      countMoove           = count;    // Счетчик времени обновления передачи скорости по Can шине
-uint16_t speed                = 0;        // Скорость движения в канале в %
-uint16_t maxSpeed             = 96;       // Максимальное значение скорости (от 0 до 100 %) -сохранять-
-uint16_t minSpeed             = 3;        // Минимальное значение скорости (лаг для АЦП) -сохранять-
-uint16_t oldSpeed             = 0;        // Запомненная cкорость движения в канале для плавного разгона и торможения
-uint16_t distance[8]          = { 0 };    // Значения от сенсоров расстояния и датчиков положения
-uint16_t palletePosition[16]  = { 0 };    // Массив расстояний до паллет в канале
-uint16_t mooveDistance        = 0;    // Значение дистанции для перемещения шаттла по команде движения на заданное расстояние
-uint16_t interPalleteDistance = 100;  // Значение дистанции между паллетами -сохранять-
+uint8_t counter       = 0;        // Счетчик для красивых морганий в рабочем режиме
+uint8_t debuger       = 0;        // Счетчик для дебагера
+uint8_t sensorOff     = 0;        // Флаг отключения сенсоров в ручном режиме
+uint8_t lastPallete   = 0;        // Флаг позиции последнего паллета
+uint8_t minBattCharge = 20;       // Минимальный заряд батареи
+uint8_t endOfChannel  = 0;        // Флаг концов канала
+int     blinkTime     = 80;       // Время квантования красивых морганий -сохранять-
+int     waitTime      = 15000;    // Время ожидания при выгрузке
+int     count         = millis(); // Счетчик времени общего назначения
+int     count2        = count;    // Счетчик времени общего назначения
+int     countSensor   = count;    // Счетчик времени опроса датчиков
+int countMoove = count; // Счетчик времени обновления передачи скорости по Can шине
+uint16_t speed    = 0;  // Скорость движения в канале в %
+uint16_t maxSpeed = 96; // Максимальное значение скорости (от 0 до 100 %) -сохранять-
+uint16_t minSpeed = 3; // Минимальное значение скорости (лаг для АЦП) -сохранять-
+uint16_t oldSpeed = 0; // Запомненная cкорость движения в канале для плавного разгона и торможения
+uint16_t distance[8] = { 0 }; // Значения от сенсоров расстояния и датчиков положения
+uint16_t palletePosition[16]  = { 0 }; // Массив расстояний до паллет в канале
+uint16_t mooveDistance        = 0; // Значение дистанции для перемещения шаттла по команде движения на заданное расстояние
+uint16_t interPalleteDistance = 100; // Значение дистанции между паллетами -сохранять-
 uint16_t shuttleLength        = 1000; // Длинна шаттла (максимальная ширина паллета которые шаттл может перевозить)
 uint8_t  detectPalleteF1;             // Флаг датчика обнаружения паллеты вперед 1
 uint8_t  detectPalleteF2;             // Флаг датчика обнаружения паллеты вперед 2
@@ -504,21 +504,21 @@ static void recoverTofI2cBus()
 static BmsDdA5Firmware::Adapter batteryBms(SerialRS485, RS485, makeLogImpl, makeBatteryPollConfig());
 static BatterySafetyState       batterySafetyState;
 
-int      lifterCurrent        = 0;    // Ток лифтера для оценки массы поднимаемого груза
-int      angle                = 0;    // Значение угла полученное от магнитного экодера
-int      oldAngle             = 0;    // Промежуточное значение угла для расчетов
-int      startAngle           = 0;    // Промежуточное значение угла для расчетов
-int      turnCount            = 0;    // Счетчик оборотов колеса
-int      channelLength        = 0;    // Расчетная длинна канала
-int      currentPosition      = 0;    // Текущая позиция шаттла
-int      oldPosition          = 0;    // Позиция для определения останова шаттла
-int      lastPalletePosition  = 0;    // Позиция последнего паллета после загрузки
-int      firstPalletePosition = 0;    // Позиция первого паллета при уплотнении вперед
+int      lifterCurrent       = 0; // Ток лифтера для оценки массы поднимаемого груза
+int      angle               = 0; // Значение угла полученное от магнитного экодера
+int      oldAngle            = 0; // Промежуточное значение угла для расчетов
+int      startAngle          = 0; // Промежуточное значение угла для расчетов
+int      turnCount           = 0; // Счетчик оборотов колеса
+int      channelLength       = 0; // Расчетная длинна канала
+int      currentPosition     = 0; // Текущая позиция шаттла
+int      oldPosition         = 0; // Позиция для определения останова шаттла
+int      lastPalletePosition = 0; // Позиция последнего паллета после загрузки
+int      firstPalletePosition = 0; // Позиция первого паллета при уплотнении вперед
 int      lifter_Speed         = 3700; // Скорость двигателя лифтера -сохранять-
 int      lifterDelay          = 3800; // Задержка лифтера
-int      oldChannelDistanse   = 0;    // Канальная дистанция для фильтрации фантомных срабатываний
-int      oldPalleteDistanse   = 0;    // Паллетная дистанция для фильтрации фантомных срабатываний
-uint32_t timingBudget         = 40;   // Время измерения датчиками
+int      oldChannelDistanse = 0; // Канальная дистанция для фильтрации фантомных срабатываний
+int      oldPalleteDistanse = 0; // Паллетная дистанция для фильтрации фантомных срабатываний
+uint32_t timingBudget = 40; // Время измерения датчиками
 
 float temp    = 0;   // Температура чипа
 float weelDia = 100; // Диаметр колеса
@@ -1494,7 +1494,7 @@ void sendAck(uint8_t seq, AckResult result, Stream *port, const E32Radio::FixedR
 void sendTelemAck(
     uint8_t                     seq,
     AckResult                   result,
-    Stream                     *port,
+    Stream *                    port,
     int16_t                     shuttleStatusOverride,
     const E32Radio::FixedRoute *fixedRoute)
 {
@@ -1529,7 +1529,7 @@ void sendTelemAck(
 void sendCommandAck(
     uint8_t   seq,
     AckResult result,
-    Stream   *port,
+    Stream *  port,
     bool      suppressAck,
     bool      useTelemAck,
     int16_t   shuttleStatusOverride)
@@ -1546,9 +1546,8 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
 {
     if (header->targetID != TARGET_ID_NONE && header->targetID != TARGET_ID_BROADCAST && header->targetID != shuttleNum)
     {
-        DIAG_ONLY(
-            if (replyPort == &SerialLora) linkDiag.radioRxDropTarget++;
-            else if (replyPort == &SerialDisplay) linkDiag.displayRxDropTarget++;);
+        DIAG_ONLY(if (replyPort == &SerialLora) linkDiag.radioRxDropTarget++;
+                  else if (replyPort == &SerialDisplay) linkDiag.displayRxDropTarget++;);
 
         LOG_RATE_LIMITED(
             LOG_WARN,
@@ -5983,7 +5982,7 @@ void HardFault_Handler(void)
         uint32_t lr;
         uint32_t pc;
         uint32_t psr;
-    } *stack_ptr; // Указатель на текущее значение стека(SP)
+    } * stack_ptr; // Указатель на текущее значение стека(SP)
 
     asm("TST lr, #4 \n"         // Тестируем 3ий бит указателя стека(побитовое И)
         "ITE EQ \n"             // Значение указателя стека имеет бит 3?
