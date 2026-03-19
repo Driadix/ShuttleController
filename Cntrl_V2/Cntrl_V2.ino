@@ -2532,7 +2532,7 @@ void moove_Distance_F(int dist) {
 // Движение вперед на заданное расстояние
 void moove_Distance_F(int dist, int maxSpeed, int minSpeed) {
   get_Distance();
-  if (distance[0] < 70) {
+  if (distance[1] < 70) {
     makeLog(LOG_WARN, "End of channel F, can't moove... ");
     return;
   }
@@ -2657,7 +2657,7 @@ void moove_Distance_R(int dist) {
 // Движение назад на заданное расстояние
 void moove_Distance_R(int dist, int maxSpeed, int minSpeed) {
   get_Distance();
-  if (distance[1] < 70) {
+  if (distance[0] < 70) {
     makeLog(LOG_WARN, "End of channel R, can't moove... ");
     return;
   }
