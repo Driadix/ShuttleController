@@ -4828,7 +4828,7 @@ static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId) {
     E32Radio::kDefaultChannel440,
     kRadioHostBaud,
     E32Radio::AirDataRate::B4800,
-    E32Radio::TxPower::Dbm30,
+    E32Radio::TxPower::Dbm27,
     E32Radio::UartParity::U8N1,
     E32Radio::IoDriveMode::PushPull,
     E32Radio::WakeupTime::Ms250,
