@@ -1,7 +1,7 @@
 #include "AS5600.h"
 #include "AlertManager.h"
 #include "BmsDdA5FirmwareAdapter.hpp"
-#include "E32Radio.hpp"
+#include "E22Radio.hpp"
 #include "STM32TimerInterrupt.h"
 #include "STM32_CAN.h"
 #include "ShuttleProtocol.h"
@@ -73,21 +73,21 @@ static inline void             beginManualRadioHold(uint32_t now);
 static inline void             refreshManualRadioHoldWatchdog(uint32_t now);
 static inline void             clearManualRadioHold();
 static void                    scheduleBootloaderEntry();
-static E32Radio::EnsureOptions makeRadioEnsureOptions();
-static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
+static E22Radio::EnsureOptions makeRadioEnsureOptions();
+static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static bool       reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uint8_t ackSeq, bool suppressAck);
 static inline int transportAvailableForWrite(Stream *port);
 static size_t
-writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E32Radio::FixedRoute *fixedRoute = NULL);
+writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E22Radio::FixedRoute *fixedRoute = NULL);
 static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio);
 static void         populateTelemetryPacket(TelemetryPacket *pkt, int16_t shuttleStatusOverride = -1);
-static void         sendAck(uint8_t seq, AckResult result, Stream *port, const E32Radio::FixedRoute *fixedRoute = NULL);
+static void         sendAck(uint8_t seq, AckResult result, Stream *port, const E22Radio::FixedRoute *fixedRoute = NULL);
 static void         sendTelemAck(
             uint8_t                     seq,
             AckResult                   result,
             Stream                     *port,
             int16_t                     shuttleStatusOverride = -1,
-            const E32Radio::FixedRoute *fixedRoute            = NULL);
+            const E22Radio::FixedRoute *fixedRoute            = NULL);
 static void sendCommandAck(
     uint8_t   seq,
     AckResult result,
@@ -172,8 +172,8 @@ SecureStats *volatile sramStats = (SecureStats *)BKPSRAM_BASE_ADDR;
 
 ProtocolParser               parserRadio;
 ProtocolParser               parserDisplay;
-E32Radio::Radio              e32Radio;
-constexpr E32Radio::UartBaud kRadioHostBaud = E32Radio::UartBaud::B57600;
+E22Radio::Radio              e22Radio;
+constexpr E22Radio::UartBaud kRadioHostBaud = E22Radio::UartBaud::B57600;
 
 #define STATS_ATOMIC_UPDATE(action)                                                                                         \
     do                                                                                                                      \
@@ -213,7 +213,9 @@ struct ConfigPageHeader
 #define RED_LED     PC3  // Пин красного светодиода ошибки
 #define WHITE_LED   PC2  // Пин белого светодиода работы
 #define ZOOMER      PA0  // Зумер
-#define LORA        PB15 // Пин включения радиомодуля
+#define RADIO_E22_M0  PC0
+#define RADIO_E22_M1  PB14
+#define RADIO_E22_AUX PB15
 #define RS485       PB13 // Пин передачи шины RS485
 #define BUMPER_F1   PB7  // Пин бампера вперед
 #define BUMPER_F2   PB3  // Пин бампера вперед
@@ -256,11 +258,13 @@ uint32_t   lastManualSessionActivityTime  = 0;
 bool       pendingDisplayManualModeBypass = false;
 bool       manualRadioHoldActive          = false;
 bool       statusSourceRadio              = false;
+bool       radioAppendedRssiEnabled       = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
 
 HardwareSerial Serial1(PA10, PA9); // Порт для экранцика LilyGo
 HardwareSerial Serial2(PA3, PA2);  // Порт под RS485 для BMS батареи
 HardwareSerial Serial3(PC7, PC6);  // Порт Lora
+static const E22Radio::ControlPins kRadioControlPins = { RADIO_E22_M0, RADIO_E22_M1, RADIO_E22_AUX };
 
 STM32_CAN            Can1(CAN1, ALT, RX_SIZE_256, TX_SIZE_256); // CAN шина на пинах PB8 PB9
 static CAN_message_t CAN_TX_msg;                                // Пакет данных CAN на передачу
@@ -546,7 +550,9 @@ void setup()
     pinMode(RED_LED, OUTPUT);
     pinMode(WHITE_LED, OUTPUT);
     pinMode(ZOOMER, OUTPUT);
-    pinMode(LORA, OUTPUT);
+    pinMode(RADIO_E22_M0, OUTPUT);
+    pinMode(RADIO_E22_M1, OUTPUT);
+    pinMode(RADIO_E22_AUX, INPUT_PULLUP);
     pinMode(RS485, OUTPUT);
     pinMode(DATCHIK_F1, INPUT_PULLUP);
     pinMode(DATCHIK_R1, INPUT_PULLUP);
@@ -572,11 +578,12 @@ void setup()
     digitalWrite(ZOOMER, LOW);
     digitalWrite(RS485, LOW);
     pinMode(RS485, INPUT_PULLDOWN);
-    // digitalWrite(LORA, HIGH);
+    digitalWrite(RADIO_E22_M0, LOW);
+    digitalWrite(RADIO_E22_M1, LOW);
 
     SerialDisplay.begin(230400, SERIAL_8E1);
     SerialRS485.begin(9600);
-    SerialLora.begin(E32Radio::uartBaudValue(kRadioHostBaud));
+    SerialLora.begin(E22Radio::uartBaudValue(kRadioHostBaud));
 
     uint32_t displayWaitStart = millis();
     while (!SerialDisplay && (millis() - displayWaitStart < 1500))
@@ -1398,14 +1405,14 @@ enum ParseState
     STATE_READ_CRC
 };
 
-static inline bool buildRemoteRouteForShuttleId(uint8_t shuttleId, E32Radio::FixedRoute *outRoute)
+static inline bool buildRemoteRouteForShuttleId(uint8_t shuttleId, E22Radio::FixedRoute *outRoute)
 {
-    if (!outRoute || !E32Radio::isValidNodeId(shuttleId))
+    if (!outRoute || !E22Radio::isValidNodeId(shuttleId))
     {
         return false;
     }
 
-    *outRoute = E32Radio::fixedRouteToRemote(shuttleId, E32Radio::kDefaultChannel440);
+    *outRoute = E22Radio::fixedRouteToRemote(shuttleId, E22Radio::kDefaultChannel440);
     return true;
 }
 
@@ -1426,7 +1433,7 @@ static inline int transportAvailableForWrite(Stream *port)
 }
 
 static size_t
-writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E32Radio::FixedRoute *fixedRoute)
+writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E22Radio::FixedRoute *fixedRoute)
 {
     if (!port || !buffer || length == 0)
     {
@@ -1442,8 +1449,8 @@ writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, cons
         return port->write(buffer, length);
     }
 
-    E32Radio::FixedRoute        route      = { 0, 0, 0 };
-    const E32Radio::FixedRoute *routeToUse = fixedRoute;
+    E22Radio::FixedRoute        route      = { 0, 0, 0 };
+    const E22Radio::FixedRoute *routeToUse = fixedRoute;
     if (routeToUse == NULL)
     {
         if (!buildRemoteRouteForShuttleId(shuttleNum, &route))
@@ -1463,7 +1470,7 @@ writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, cons
     return length;
 }
 
-void sendAck(uint8_t seq, AckResult result, Stream *port, const E32Radio::FixedRoute *fixedRoute)
+void sendAck(uint8_t seq, AckResult result, Stream *port, const E22Radio::FixedRoute *fixedRoute)
 {
     if (!port)
         return;
@@ -1496,7 +1503,7 @@ void sendTelemAck(
     AckResult                   result,
     Stream                     *port,
     int16_t                     shuttleStatusOverride,
-    const E32Radio::FixedRoute *fixedRoute)
+    const E22Radio::FixedRoute *fixedRoute)
 {
     if (!port || pendingBootloaderEntry)
         return;
@@ -1736,11 +1743,11 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
                     sendAck(header->seq, ACK_BUSY, replyPort);
                 return NO_NEW_CMD;
             }
-            E32Radio::FixedRoute        ackRoute    = { 0, 0, 0 };
-            const E32Radio::FixedRoute *ackRoutePtr = NULL;
+            E22Radio::FixedRoute        ackRoute    = { 0, 0, 0 };
+            const E22Radio::FixedRoute *ackRoutePtr = NULL;
             if (replyPort == &SerialLora)
             {
-                const uint8_t oldReplyId = E32Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
                 if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute))
                 {
                     ackRoutePtr = &ackRoute;
@@ -1842,8 +1849,8 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
         }
 
         bool                        shuttleIdChanged = (eepromData.shuttleNum != fullCfg->shuttleNumber);
-        E32Radio::FixedRoute        ackRoute         = { 0, 0, 0 };
-        const E32Radio::FixedRoute *ackRoutePtr      = NULL;
+        E22Radio::FixedRoute        ackRoute         = { 0, 0, 0 };
+        const E22Radio::FixedRoute *ackRoutePtr      = NULL;
         if (shuttleIdChanged)
         {
             if (!isPhysicallyStationary())
@@ -1854,7 +1861,7 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
             }
             if (replyPort == &SerialLora)
             {
-                const uint8_t oldReplyId = E32Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
                 if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute))
                 {
                     ackRoutePtr = &ackRoute;
@@ -2006,7 +2013,6 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
 
 uint8_t pollSerial(Stream &port, ProtocolParser &parser, bool isRadioPort)
 {
-    (void)isRadioPort;
     uint32_t now     = millis();
     uint8_t  lastCmd = NO_NEW_CMD;
     while (!pendingBootloaderEntry && port.available() > 0)
@@ -2023,6 +2029,11 @@ uint8_t pollSerial(Stream &port, ProtocolParser &parser, bool isRadioPort)
         if (header != nullptr)
         {
             DIAG_ONLY(if (isRadioPort) linkDiag.radioRxValid++; else linkDiag.displayRxValid++;);
+            if (isRadioPort && radioAppendedRssiEnabled)
+            {
+                uint8_t rssiRaw = 0;
+                e22Radio.readLastPacketRssiRaw(rssiRaw, E22Radio::kDefaultPacketRssiTimeoutMs);
+            }
             uint8_t res = processPacket(header, (uint8_t *)header + sizeof(FrameHeader), &port);
             if (res != NO_NEW_CMD)
             {
@@ -6160,86 +6171,96 @@ void blink()
 
 static void applyRadioConfigAtBoot()
 {
-    const bool    shuttleAddressValid = isProvisionedShuttle() && E32Radio::isValidNodeId(shuttleNum);
-    const uint8_t radioAddress        = shuttleAddressValid ? shuttleNum : E32Radio::kAddressLowUnassigned;
+    const bool    shuttleAddressValid = isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum);
+    const uint8_t radioAddress        = shuttleAddressValid ? shuttleNum : E22Radio::kAddressLowUnassigned;
     if (!shuttleAddressValid)
     {
         makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
     }
 
-    const E32Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(radioAddress);
-    const E32Radio::EnsureOptions ensureOptions = makeRadioEnsureOptions();
+    const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(radioAddress);
+    const E22Radio::EnsureOptions ensureOptions = makeRadioEnsureOptions();
+    const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
 
-    e32Radio.init(&SerialLora, LORA, E32Radio::uartBaudValue(kRadioHostBaud), E32Radio::ConfigModeLevel::ConfigHigh, NULL);
+    e22Radio.init(&SerialLora, kRadioControlPins, E22Radio::uartBaudValue(kRadioHostBaud), NULL);
 
-    const E32Radio::EnsureResult ensureResult = e32Radio.ensureConfig(desiredConfig, ensureOptions);
+    const E22Radio::EnsureResult ensureResult = e22Radio.ensureConfig(desiredConfig, ensureOptions);
+    radioAppendedRssiEnabled                  = ensureResult.ok() && desiredConfig.appendRssiEnabled;
     if (ensureResult.ok())
     {
         makeLog(
             LOG_INFO,
-            "Radio ok a=%u c=%u f=%u b=%lu",
+            "E22 ok a=%u c=%u f=%lu.%03lu b=%lu",
             radioAddress,
             desiredConfig.channel,
-            E32Radio::channelFrequencyMHz(desiredConfig.channel),
-            (unsigned long)E32Radio::uartBaudValue(desiredConfig.uartBaud));
+            (unsigned long)(freqKhz / 1000UL),
+            (unsigned long)(freqKhz % 1000UL),
+            (unsigned long)E22Radio::uartBaudValue(desiredConfig.uartBaud));
     }
     else
     {
         makeLog(
             LOG_WARN,
-            "Radio fail %s a=%u c=%u f=%u",
-            E32Radio::statusToString(ensureResult.status),
+            "E22 fail %s a=%u c=%u f=%lu.%03lu",
+            E22Radio::statusToString(ensureResult.status),
             radioAddress,
             desiredConfig.channel,
-            E32Radio::channelFrequencyMHz(desiredConfig.channel));
+            (unsigned long)(freqKhz / 1000UL),
+            (unsigned long)(freqKhz % 1000UL));
     }
 }
 
-static E32Radio::EnsureOptions makeRadioEnsureOptions()
+static E22Radio::EnsureOptions makeRadioEnsureOptions()
 {
-    E32Radio::EnsureOptions ensureOptions = {};
-    ensureOptions.maxAttempts             = E32Radio::kDefaultEnsureAttempts;
+    E22Radio::EnsureOptions ensureOptions = {};
+    ensureOptions.maxAttempts             = E22Radio::kDefaultEnsureAttempts;
     return ensureOptions;
 }
 
-static E32Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
+static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
 {
-    const uint8_t radioAddress = E32Radio::isValidNodeId(nodeId) ? nodeId : E32Radio::kAddressLowUnassigned;
-    return E32Radio::makeFixedConfig(
-        E32Radio::shuttleAddressFromNodeId(radioAddress),
-        E32Radio::kDefaultChannel440,
+    const uint8_t radioAddress = E22Radio::isValidNodeId(nodeId) ? nodeId : E22Radio::kAddressLowUnassigned;
+    return E22Radio::makeFixedConfig(
+        E22Radio::shuttleAddressFromNodeId(radioAddress),
+        E22Radio::kDefaultChannel440,
         kRadioHostBaud,
-        E32Radio::AirDataRate::B4800,
-        E32Radio::TxPower::Dbm27,
-        E32Radio::UartParity::U8N1,
-        E32Radio::IoDriveMode::PushPull,
-        E32Radio::WakeupTime::Ms250,
-        E32Radio::Fec::On);
+        E22Radio::AirDataRate::B4800,
+        E22Radio::TxPower::Dbm27,
+        E22Radio::UartParity::U8N1,
+        E22Radio::kDefaultNetId,
+        E22Radio::SubPacketSize::Bytes240,
+        true,
+        true,
+        E22Radio::kDefaultCryptKey);
 }
 
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uint8_t ackSeq, bool suppressAck)
 {
-    const E32Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
-    const E32Radio::EnsureResult  ensureResult  = e32Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
+    const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
+    const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
+    const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
+    radioAppendedRssiEnabled                   = ensureResult.ok() && desiredConfig.appendRssiEnabled;
     if (ensureResult.ok())
     {
         makeLog(
             LOG_INFO,
-            "Radio ID ok a=%u c=%u f=%u",
+            "E22 ID ok a=%u c=%u f=%lu.%03lu",
             desiredConfig.address.addl,
             desiredConfig.channel,
-            E32Radio::channelFrequencyMHz(desiredConfig.channel));
+            (unsigned long)(freqKhz / 1000UL),
+            (unsigned long)(freqKhz % 1000UL));
         return true;
     }
 
     makeLog(
         LOG_ERROR,
-        "Radio ID fail %s %u>%u c=%u f=%u",
-        E32Radio::statusToString(ensureResult.status),
+        "E22 ID fail %s %u>%u c=%u f=%lu.%03lu",
+        E22Radio::statusToString(ensureResult.status),
         shuttleNum,
         newId,
         desiredConfig.channel,
-        E32Radio::channelFrequencyMHz(desiredConfig.channel));
+        (unsigned long)(freqKhz / 1000UL),
+        (unsigned long)(freqKhz % 1000UL));
     if (!suppressAck && replyPort == &SerialDisplay)
     {
         sendAck(ackSeq, ACK_REJECTED, replyPort);
@@ -6314,7 +6335,7 @@ static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fr
 
 static inline bool isValidProvisionedShuttleId(int32_t id)
 {
-    return (id >= E32Radio::kAddressNodeMin && id <= E32Radio::kAddressNodeMax);
+    return (id >= E22Radio::kAddressNodeMin && id <= E22Radio::kAddressNodeMax);
 }
 
 static inline bool isProvisionedShuttle()
