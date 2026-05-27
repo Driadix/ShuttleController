@@ -106,6 +106,8 @@ static void                  batterySafetyCheck(uint32_t now);
 static void                  batterySafetyReset(uint32_t now);
 static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
+static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
+static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
 static inline bool           batteryIsHighLoad();
 static inline bool           batteryLowFaultLatched();
 static bool                  batteryIsMotionLikeStatus(uint8_t st);
@@ -242,6 +244,8 @@ constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
 constexpr uint32_t kTofI2cClockHz              = 400000U;
+constexpr uint32_t kRadioBootDiagWindowMs      = 120000U;
+constexpr uint32_t kRadioBootDiagIntervalMs    = 10000U;
 
 #pragma endregion
 
@@ -263,6 +267,8 @@ bool       manualRadioHoldActive          = false;
 bool       statusSourceRadio              = false;
 bool       radioAppendedRssiEnabled       = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
+bool       radioLastRawConfigValid        = false;
+E22Radio::RawConfig radioLastRawConfig    = {};
 
 HardwareSerial Serial1(PA10, PA9); // Порт для экранцика LilyGo
 HardwareSerial Serial2(PA3, PA2);  // Порт под RS485 для BMS батареи
@@ -5358,6 +5364,22 @@ void SystemYield()
     static uint32_t timerSensors   = 0;
     static uint32_t timerStats     = 0;
     static uint32_t timerUptime    = 0;
+    static uint32_t timerRadioDiag = 0;
+
+    if (currentMillis < kRadioBootDiagWindowMs && currentMillis - timerRadioDiag >= kRadioBootDiagIntervalMs)
+    {
+        timerRadioDiag = currentMillis;
+        if (radioLastRawConfigValid)
+        {
+            logRadioRawConfig(LOG_INFO, "E22 diag", radioLastRawConfig);
+        }
+        else
+        {
+            const uint8_t radioAddress =
+                (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
+            logRadioDesiredConfig(LOG_INFO, "E22 diag", makeRadioDesiredConfig(radioAddress));
+        }
+    }
 
     batteryBms.tick(currentMillis, mapBatteryActivity());
     batteryCharge = batteryBms.socPercent();
@@ -6193,9 +6215,15 @@ static void applyRadioConfigAtBoot()
     const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
 
     e22Radio.init(&SerialLora, kRadioControlPins, E22Radio::uartBaudValue(kRadioHostBaud), NULL);
+    logRadioDesiredConfig(LOG_INFO, "E22 want", desiredConfig);
 
     const E22Radio::EnsureResult ensureResult = e22Radio.ensureConfig(desiredConfig, ensureOptions);
     radioAppendedRssiEnabled                  = ensureResult.ok() && desiredConfig.appendRssiEnabled;
+    radioLastRawConfigValid                   = ensureResult.hasFinalConfig;
+    if (ensureResult.hasFinalConfig)
+    {
+        radioLastRawConfig = ensureResult.finalConfig;
+    }
     if (ensureResult.ok())
     {
         makeLog(
@@ -6206,6 +6234,7 @@ static void applyRadioConfigAtBoot()
             (unsigned long)(freqKhz / 1000UL),
             (unsigned long)(freqKhz % 1000UL),
             (unsigned long)E22Radio::uartBaudValue(desiredConfig.uartBaud));
+        logRadioRawConfig(LOG_INFO, "E22 got", ensureResult.finalConfig);
     }
     else
     {
@@ -6217,6 +6246,10 @@ static void applyRadioConfigAtBoot()
             desiredConfig.channel,
             (unsigned long)(freqKhz / 1000UL),
             (unsigned long)(freqKhz % 1000UL));
+        if (ensureResult.hasFinalConfig)
+        {
+            logRadioRawConfig(LOG_WARN, "E22 got", ensureResult.finalConfig);
+        }
     }
 }
 
@@ -6234,11 +6267,11 @@ static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
     cfg.address                 = E22Radio::shuttleAddressFromNodeId(radioAddress);
     cfg.channel                 = E22Radio::kDefaultChannel440;
     cfg.uartBaud                = kRadioHostBaud;
-    cfg.airDataRate             = E22Radio::AirDataRate::B38400;
-    cfg.txPower                 = E22Radio::TxPower::Dbm30; 
+    cfg.airDataRate             = E22Radio::AirDataRate::B4800;
+    cfg.txPower                 = E22Radio::TxPower::Dbm27;
     cfg.parity                  = E22Radio::UartParity::U8N1;
     cfg.netId                   = 0x00;
-    cfg.ambientRssiEnabled      = false;
+    cfg.ambientRssiEnabled      = true;
     cfg.appendRssiEnabled       = true;
     cfg.cryptKey                = E22Radio::kDefaultCryptKey;
     cfg.transmissionMode        = E22Radio::TransmissionMode::Fixed;
@@ -6252,6 +6285,12 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
     const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
     const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
     const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
+    logRadioDesiredConfig(LOG_INFO, "E22ID want", desiredConfig);
+    radioLastRawConfigValid = ensureResult.hasFinalConfig;
+    if (ensureResult.hasFinalConfig)
+    {
+        radioLastRawConfig = ensureResult.finalConfig;
+    }
     if (ensureResult.ok())
     {
         radioAppendedRssiEnabled = desiredConfig.appendRssiEnabled;
@@ -6262,6 +6301,7 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
             desiredConfig.channel,
             (unsigned long)(freqKhz / 1000UL),
             (unsigned long)(freqKhz % 1000UL));
+        logRadioRawConfig(LOG_INFO, "E22ID got", ensureResult.finalConfig);
         return;
     }
 
@@ -6274,6 +6314,21 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
         desiredConfig.channel,
         (unsigned long)(freqKhz / 1000UL),
         (unsigned long)(freqKhz % 1000UL));
+    if (ensureResult.hasFinalConfig)
+    {
+        logRadioRawConfig(LOG_WARN, "E22ID got", ensureResult.finalConfig);
+    }
+}
+
+static void logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw)
+{
+    makeLog(level, "%s ah=%02X al=%02X net=%02X", tag, raw.addh, raw.addl, raw.netid);
+    makeLog(level, "%s r0=%02X r1=%02X ch=%02X r3=%02X", tag, raw.reg0, raw.reg1, raw.reg2, raw.reg3);
+}
+
+static void logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config)
+{
+    logRadioRawConfig(level, tag, E22Radio::encode(config));
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd)
