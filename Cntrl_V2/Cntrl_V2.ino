@@ -6276,7 +6276,7 @@ static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
     cfg.cryptKey                = E22Radio::kDefaultCryptKey;
     cfg.transmissionMode        = E22Radio::TransmissionMode::Fixed;
     cfg.lbtEnabled              = true;
-    cfg.subPacketSize           = E22Radio::SubPacketSize::Bytes64;
+    cfg.subPacketSize           = E22Radio::SubPacketSize::Bytes240;
     return cfg;
 }
 
