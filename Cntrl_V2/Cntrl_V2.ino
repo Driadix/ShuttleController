@@ -6220,18 +6220,21 @@ static E22Radio::EnsureOptions makeRadioEnsureOptions()
 static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
 {
     const uint8_t radioAddress = E22Radio::isValidNodeId(nodeId) ? nodeId : E22Radio::kAddressLowUnassigned;
-    return E22Radio::makeFixedConfig(
-        E22Radio::shuttleAddressFromNodeId(radioAddress),
-        E22Radio::kDefaultChannel440,
-        kRadioHostBaud,
-        E22Radio::AirDataRate::B4800,
-        E22Radio::TxPower::Dbm27,
-        E22Radio::UartParity::U8N1,
-        E22Radio::kDefaultNetId,
-        E22Radio::SubPacketSize::Bytes240,
-        true,
-        true,
-        E22Radio::kDefaultCryptKey);
+    E22Radio::LogicalConfig cfg = {};
+    cfg.address                 = E22Radio::shuttleAddressFromNodeId(radioAddress);
+    cfg.channel                 = E22Radio::kDefaultChannel440;
+    cfg.uartBaud                = kRadioHostBaud;
+    cfg.airDataRate             = E22Radio::AirDataRate::B38400;
+    cfg.txPower                 = E22Radio::TxPower::Dbm30; 
+    cfg.parity                  = E22Radio::UartParity::U8N1;
+    cfg.netId                   = 0x00;
+    cfg.ambientRssiEnabled      = false;
+    cfg.appendRssiEnabled       = true;
+    cfg.cryptKey                = E22Radio::kDefaultCryptKey;
+    cfg.transmissionMode        = E22Radio::TransmissionMode::Fixed;
+    cfg.lbtEnabled              = true;
+    cfg.subPacketSize           = E22Radio::SubPacketSize::Bytes64;
+    return cfg;
 }
 
 static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uint8_t ackSeq, bool suppressAck)
