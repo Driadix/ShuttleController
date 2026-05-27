@@ -66,6 +66,7 @@ static inline bool             isLiftCommand(uint8_t cmd);
 static inline bool             isUnprovisionedCommandAllowed(uint8_t cmd);
 static inline bool             isOutOfChannelExemptCommand(uint8_t cmd);
 static inline bool             canAcceptCommandNow(uint8_t cmd, bool fromRadio);
+static inline bool             canApplyConfigNow();
 static inline bool             isPhysicallyStationary();
 static inline void             performSystemReset();
 static inline void             clearLatchedAlertsAndReturnToIdle(uint32_t now);
@@ -1732,6 +1733,13 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
     else if (realMsgID == MSG_CONFIG_SET)
     {
         ConfigPacket *cfg = (ConfigPacket *)payload;
+        if (!canApplyConfigNow())
+        {
+            if (!requiresNoAck)
+                sendAck(header->seq, ACK_BUSY, replyPort);
+            return NO_NEW_CMD;
+        }
+
         switch (cfg->paramID)
         {
         case CFG_SHUTTLE_NUM:
@@ -1844,6 +1852,12 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
     else if (realMsgID == MSG_CONFIG_SYNC_PUSH)
     {
         FullConfigPacket *fullCfg = (FullConfigPacket *)payload;
+        if (!canApplyConfigNow())
+        {
+            if (!requiresNoAck)
+                sendAck(header->seq, ACK_BUSY, replyPort);
+            return NO_NEW_CMD;
+        }
 
         if (!isValidProvisionedShuttleId(fullCfg->shuttleNumber))
         {
@@ -6457,6 +6471,16 @@ static inline bool canAcceptCommandNow(uint8_t cmd, bool fromRadio)
     }
 
     return isShuttleIdle();
+}
+
+static inline bool canApplyConfigNow()
+{
+    if (!isPhysicallyStationary() || pendingBootloaderEntry || batterySafetyState.emergencyActionActive)
+    {
+        return false;
+    }
+
+    return (currentMode == CoreOpMode::IDLE || currentMode == CoreOpMode::ERROR) && isShuttleIdle();
 }
 
 static inline bool isPhysicallyStationary()
