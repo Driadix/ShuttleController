@@ -16,7 +16,7 @@ namespace BmsDdA5Firmware
         uint32_t sumMismatchMs     = 5000U;
         uint32_t cellDeltaMs       = 60000U;
         uint32_t cellLowMs         = 60000U;
-        uint32_t transportMs       = 30000U;
+        uint32_t transportMs       = 60000U;
         uint16_t sumMismatchAbs_mV = 500U;
         uint16_t cellDeltaWarn_mV  = 300U;
         uint16_t cellLowWarn_mV    = 2500U;

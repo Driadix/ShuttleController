@@ -63,11 +63,13 @@ static inline bool             isManualMoveCommand(uint8_t cmd);
 static inline bool             isManualDistanceCommand(uint8_t cmd);
 static inline bool             isContinuousManualCommand(uint8_t cmd);
 static inline bool             isLiftCommand(uint8_t cmd);
+static inline bool             isUnprovisionedCommandAllowed(uint8_t cmd);
 static inline bool             isOutOfChannelExemptCommand(uint8_t cmd);
 static inline bool             canAcceptCommandNow(uint8_t cmd, bool fromRadio);
 static inline bool             isPhysicallyStationary();
 static inline void             performSystemReset();
 static inline void             clearLatchedAlertsAndReturnToIdle(uint32_t now);
+static inline void             resetTofDiagnostics();
 static inline void             touchManualSession();
 static inline void             beginManualRadioHold(uint32_t now);
 static inline void             refreshManualRadioHoldWatchdog(uint32_t now);
@@ -75,7 +77,7 @@ static inline void             clearManualRadioHold();
 static void                    scheduleBootloaderEntry();
 static E22Radio::EnsureOptions makeRadioEnsureOptions();
 static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
-static bool       reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uint8_t ackSeq, bool suppressAck);
+static void       reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId);
 static inline int transportAvailableForWrite(Stream *port);
 static size_t
 writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E22Radio::FixedRoute *fixedRoute = NULL);
@@ -448,6 +450,12 @@ static BmsDdA5::Config makeBatteryPollConfig()
     return cfg;
 }
 
+static uint8_t  tofSensorErrors[4]          = { 0, 0, 0, 0 };
+static uint16_t tofDistanceFault            = 0;
+static uint32_t tofLastI2cRecoveryMs        = 0;
+static uint32_t tofLastI2cRecoveryLogMs     = 0;
+static bool     tofI2cRecoveryLogged        = false;
+
 static void initTofI2cBus()
 {
     Wire.setSDA(TOF_I2C_SDA);
@@ -458,14 +466,18 @@ static void initTofI2cBus()
 
 static void recoverTofI2cBus()
 {
-    static uint32_t lastRecoveryMs = 0;
-    uint32_t        now            = millis();
+    uint32_t now = millis();
 
-    if (now - lastRecoveryMs < 250U)
+    if (now - tofLastI2cRecoveryMs < 250U)
         return;
-    lastRecoveryMs = now;
+    tofLastI2cRecoveryMs = now;
 
-    LOG_RATE_LIMITED(LOG_WARN, 2000, "TOF I2C recovery");
+    if (!tofI2cRecoveryLogged || now - tofLastI2cRecoveryLogMs >= 60000U)
+    {
+        makeLog(LOG_WARN, "TOF I2C recovery");
+        tofI2cRecoveryLogged   = true;
+        tofLastI2cRecoveryLogMs = now;
+    }
     setWarning(WARN_I2C_RECOVERY, 3000);
 
 #if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
@@ -1641,7 +1653,7 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
             return NO_NEW_CMD;
         }
 
-        if (!isProvisionedShuttle())
+        if (!isProvisionedShuttle() && !isUnprovisionedCommandAllowed(reqCmd))
         {
             if (reqCmd == CMD_MANUAL_MODE || isContinuousManualCommand(reqCmd) || isManualDistanceCommand(reqCmd) ||
                 isLiftCommand(reqCmd))
@@ -1737,31 +1749,23 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
                     sendAck(header->seq, ACK_OK, replyPort);
                 return NO_NEW_CMD;
             }
-            if (!isPhysicallyStationary())
-            {
-                if (!requiresNoAck)
-                    sendAck(header->seq, ACK_BUSY, replyPort);
-                return NO_NEW_CMD;
-            }
+            const uint8_t              oldId       = shuttleNum;
             E22Radio::FixedRoute        ackRoute    = { 0, 0, 0 };
             const E22Radio::FixedRoute *ackRoutePtr = NULL;
             if (replyPort == &SerialLora)
             {
-                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : oldId;
                 if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute))
                 {
                     ackRoutePtr = &ackRoute;
                 }
-            }
-            if (!reapplyRadioConfigForShuttleId(newId, replyPort, header->seq, requiresNoAck))
-            {
-                return NO_NEW_CMD;
             }
             eepromData.shuttleNum = newId;
             shuttleNum            = newId;
             pendingEepromSave     = true;
             if (!requiresNoAck)
                 sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
+            reapplyRadioConfigForShuttleId(newId, oldId);
             return NO_NEW_CMD;
         }
         case CFG_INTER_PALLET:
@@ -1849,27 +1853,18 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
         }
 
         bool                        shuttleIdChanged = (eepromData.shuttleNum != fullCfg->shuttleNumber);
+        const uint8_t               oldId            = shuttleNum;
         E22Radio::FixedRoute        ackRoute         = { 0, 0, 0 };
         const E22Radio::FixedRoute *ackRoutePtr      = NULL;
         if (shuttleIdChanged)
         {
-            if (!isPhysicallyStationary())
-            {
-                if (!requiresNoAck)
-                    sendAck(header->seq, ACK_BUSY, replyPort);
-                return NO_NEW_CMD;
-            }
             if (replyPort == &SerialLora)
             {
-                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : shuttleNum;
+                const uint8_t oldReplyId = E22Radio::isValidNodeId(header->targetID) ? header->targetID : oldId;
                 if (buildRemoteRouteForShuttleId(oldReplyId, &ackRoute))
                 {
                     ackRoutePtr = &ackRoute;
                 }
-            }
-            if (!reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, replyPort, header->seq, requiresNoAck))
-            {
-                return NO_NEW_CMD;
             }
         }
 
@@ -1899,6 +1894,8 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
 
         if (!requiresNoAck)
             sendAck(header->seq, ACK_OK, replyPort, ackRoutePtr);
+        if (shuttleIdChanged)
+            reapplyRadioConfigForShuttleId(fullCfg->shuttleNumber, oldId);
         return NO_NEW_CMD;
     }
     else if (realMsgID == MSG_CONFIG_SYNC_REQ)
@@ -2290,9 +2287,7 @@ void get_Distance()
 {
     if (millis() - countSensor < 8)
         return;
-    static uint16_t fault       = 0;
     static uint8_t  filterCount = 0;
-    static uint8_t  err[4]      = { 0 };
     TOF_Parameter   sensor;
     countSensor = millis();
 
@@ -2303,14 +2298,14 @@ void get_Distance()
 
     if (!TOF_Is_Device_Present(currentSensor + 1))
     {
-        if (err[currentSensor] < 250)
+        if (tofSensorErrors[currentSensor] < 250)
         {
-            err[currentSensor]++;
+            tofSensorErrors[currentSensor]++;
         }
 
         data[currentSensor][filterCount] = 1500;
 
-        if (err[currentSensor] >= 7)
+        if (tofSensorErrors[currentSensor] >= 7)
         {
             if (currentSensor == 0)
                 setFault(FAULT_TOF_CH_F);
@@ -2321,13 +2316,14 @@ void get_Distance()
             else if (currentSensor == 3)
                 setFault(FAULT_TOF_PAL_R);
 
-            if (err[0] >= 7 && err[1] >= 7 && err[2] >= 7 && err[3] >= 7)
+            if (tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 &&
+                tofSensorErrors[3] >= 7)
             {
                 recoverTofI2cBus();
             }
         }
 
-        if (err[currentSensor] == 7)
+        if (tofSensorErrors[currentSensor] == 7)
         {
             if (currentSensor == 0)
                 LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
@@ -2342,9 +2338,9 @@ void get_Distance()
     }
     else
     {
-        if (err[currentSensor] > 0)
+        if (tofSensorErrors[currentSensor] > 0)
         {
-            err[currentSensor] = 0;
+            tofSensorErrors[currentSensor] = 0;
         }
     }
 
@@ -2383,7 +2379,7 @@ void get_Distance()
     }
     else
     {
-        fault += pow(10, currentSensor);
+        tofDistanceFault += pow(10, currentSensor);
     }
 }
 
@@ -6237,14 +6233,14 @@ static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
     return cfg;
 }
 
-static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uint8_t ackSeq, bool suppressAck)
+static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
 {
     const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
     const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
     const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
-    radioAppendedRssiEnabled                   = ensureResult.ok() && desiredConfig.appendRssiEnabled;
     if (ensureResult.ok())
     {
+        radioAppendedRssiEnabled = desiredConfig.appendRssiEnabled;
         makeLog(
             LOG_INFO,
             "E22 ID ok a=%u c=%u f=%lu.%03lu",
@@ -6252,24 +6248,18 @@ static bool reapplyRadioConfigForShuttleId(uint8_t newId, Stream *replyPort, uin
             desiredConfig.channel,
             (unsigned long)(freqKhz / 1000UL),
             (unsigned long)(freqKhz % 1000UL));
-        return true;
+        return;
     }
 
     makeLog(
-        LOG_ERROR,
+        LOG_WARN,
         "E22 ID fail %s %u>%u c=%u f=%lu.%03lu",
         E22Radio::statusToString(ensureResult.status),
-        shuttleNum,
+        previousId,
         newId,
         desiredConfig.channel,
         (unsigned long)(freqKhz / 1000UL),
         (unsigned long)(freqKhz % 1000UL));
-    if (!suppressAck && replyPort == &SerialDisplay)
-    {
-        sendAck(ackSeq, ACK_REJECTED, replyPort);
-    }
-    status = CMD_SYSTEM_RESET;
-    return false;
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd)
@@ -6408,11 +6398,16 @@ static inline bool isLiftCommand(uint8_t cmd)
     return (cmd == CMD_LIFT_UP || cmd == CMD_LIFT_DOWN);
 }
 
+static inline bool isUnprovisionedCommandAllowed(uint8_t cmd)
+{
+    return (cmd == CMD_STOP || cmd == CMD_STOP_MANUAL || cmd == CMD_SYSTEM_RESET || cmd == CMD_RESET_ERROR);
+}
+
 static inline bool isOutOfChannelExemptCommand(uint8_t cmd)
 {
     return (
-        cmd == CMD_SYSTEM_RESET || cmd == CMD_SAVE_EEPROM || cmd == CMD_GET_CONFIG || cmd == CMD_RESET_ERROR ||
-        isLiftCommand(cmd));
+        cmd == CMD_STOP || cmd == CMD_STOP_MANUAL || cmd == CMD_SYSTEM_RESET || cmd == CMD_SAVE_EEPROM ||
+        cmd == CMD_GET_CONFIG || cmd == CMD_RESET_ERROR || isLiftCommand(cmd));
 }
 
 static inline bool isOverrideCommand(uint8_t cmd)
@@ -6482,6 +6477,7 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
     alertMan.clearAllFaults();
     alertMan.clearAllWarnings();
     batterySafetyReset(now);
+    resetTofDiagnostics();
     clearManualRadioHold();
     pendingDisplayManualModeBypass = false;
     statusSourceRadio              = false;
@@ -6489,6 +6485,17 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
     currentOperation               = STATE_IDLE;
     digitalWrite(RED_LED, LOW);
     currentMode = CoreOpMode::IDLE;
+}
+
+static inline void resetTofDiagnostics()
+{
+    for (uint8_t i = 0; i < 4; ++i)
+    {
+        tofSensorErrors[i] = 0;
+    }
+    tofDistanceFault        = 0;
+    tofI2cRecoveryLogged    = false;
+    tofLastI2cRecoveryLogMs = 0;
 }
 
 static inline void touchManualSession()
