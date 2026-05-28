@@ -6275,7 +6275,7 @@ static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
     cfg.appendRssiEnabled       = true;
     cfg.cryptKey                = E22Radio::kDefaultCryptKey;
     cfg.transmissionMode        = E22Radio::TransmissionMode::Fixed;
-    cfg.lbtEnabled              = true;
+    cfg.lbtEnabled              = false;
     cfg.subPacketSize           = E22Radio::SubPacketSize::Bytes240;
     return cfg;
 }
