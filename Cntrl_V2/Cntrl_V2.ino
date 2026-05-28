@@ -244,8 +244,8 @@ constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
 constexpr uint32_t kTofI2cClockHz              = 400000U;
-constexpr uint32_t kRadioBootDiagWindowMs      = 120000U;
-constexpr uint32_t kRadioBootDiagIntervalMs    = 10000U;
+constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
+
 
 #pragma endregion
 
@@ -5366,19 +5366,12 @@ void SystemYield()
     static uint32_t timerUptime    = 0;
     static uint32_t timerRadioDiag = 0;
 
-    if (currentMillis < kRadioBootDiagWindowMs && currentMillis - timerRadioDiag >= kRadioBootDiagIntervalMs)
+    if (!radioLastRawConfigValid && currentMillis >= kRadioConfigFailureWarnIntervalMs && currentMillis - timerRadioDiag >= kRadioConfigFailureWarnIntervalMs)
     {
         timerRadioDiag = currentMillis;
-        if (radioLastRawConfigValid)
-        {
-            logRadioRawConfig(LOG_INFO, "E22 diag", radioLastRawConfig);
-        }
-        else
-        {
-            const uint8_t radioAddress =
-                (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
-            logRadioDesiredConfig(LOG_INFO, "E22 diag", makeRadioDesiredConfig(radioAddress));
-        }
+        const uint8_t radioAddress =
+            (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
+        makeLog(LOG_ERROR, "Radio not configured in 1 min! Wanted ID %u, CH %u", radioAddress, makeRadioDesiredConfig(radioAddress).channel);
     }
 
     batteryBms.tick(currentMillis, mapBatteryActivity());
