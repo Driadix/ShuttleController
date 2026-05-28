@@ -218,9 +218,9 @@ struct ConfigPageHeader
 #define RED_LED     PC3  // Пин красного светодиода ошибки
 #define WHITE_LED   PC2  // Пин белого светодиода работы
 #define ZOOMER      PA0  // Зумер
-#define RADIO_E22_M0  PC0
+#define RADIO_E22_M0  PB15
 #define RADIO_E22_M1  PB14
-#define RADIO_E22_AUX PB15
+#define RADIO_E22_AUX PC0
 #define RS485       PB13 // Пин передачи шины RS485
 #define BUMPER_F1   PB7  // Пин бампера вперед
 #define BUMPER_F2   PB3  // Пин бампера вперед
