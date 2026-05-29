@@ -101,6 +101,9 @@ static void sendCommandAck(
 static void                  sendTelemetryPacket(Stream *port);
 static void                  sendSensorPacket(Stream *port);
 static void                  sendStatsPacket(Stream *port);
+static void                  sendLinkHealthPacket(Stream *port);
+static void                  populateLinkHealthPacket(LinkHealthPacket *pkt);
+static bool                  isRadioPacketRssiFresh(uint32_t now);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void                  batterySafetyCheck(uint32_t now);
 static void                  batterySafetyReset(uint32_t now);
@@ -245,6 +248,8 @@ constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
 constexpr uint32_t kTofI2cClockHz              = 400000U;
 constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
+constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
+constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
 
 
 #pragma endregion
@@ -266,6 +271,7 @@ bool       pendingDisplayManualModeBypass = false;
 bool       manualRadioHoldActive          = false;
 bool       statusSourceRadio              = false;
 bool       radioAppendedRssiEnabled       = false;
+bool       radioConfigOk                  = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
 bool       radioLastRawConfigValid        = false;
 E22Radio::RawConfig radioLastRawConfig    = {};
@@ -5365,6 +5371,9 @@ void SystemYield()
     static uint32_t timerStats     = 0;
     static uint32_t timerUptime    = 0;
     static uint32_t timerRadioDiag = 0;
+    static uint32_t timerLinkHealth = 0;
+    static bool     lastLinkHealthValid = false;
+    static bool     lastLinkHealthValidInitialized = false;
 
     if (!radioLastRawConfigValid && currentMillis >= kRadioConfigFailureWarnIntervalMs && currentMillis - timerRadioDiag >= kRadioConfigFailureWarnIntervalMs)
     {
@@ -5400,6 +5409,19 @@ void SystemYield()
         {
             timerStats = currentMillis;
             sendStatsPacket(&SerialDisplay);
+        }
+    }
+    const bool linkHealthValid = isRadioPacketRssiFresh(currentMillis);
+    const bool linkHealthValidityChanged =
+        !lastLinkHealthValidInitialized || linkHealthValid != lastLinkHealthValid;
+    if (linkHealthValidityChanged || currentMillis - timerLinkHealth >= kLinkHealthPublishMs)
+    {
+        if (SerialDisplay.availableForWrite() >= (int)(sizeof(LinkHealthPacket) + sizeof(FrameHeader) + 2U))
+        {
+            timerLinkHealth                  = currentMillis;
+            lastLinkHealthValid              = linkHealthValid;
+            lastLinkHealthValidInitialized   = true;
+            sendLinkHealthPacket(&SerialDisplay);
         }
     }
     if (currentMillis - timerUptime >= 60000)
@@ -6211,7 +6233,8 @@ static void applyRadioConfigAtBoot()
     logRadioDesiredConfig(LOG_INFO, "E22 want", desiredConfig);
 
     const E22Radio::EnsureResult ensureResult = e22Radio.ensureConfig(desiredConfig, ensureOptions);
-    radioAppendedRssiEnabled                  = ensureResult.ok() && desiredConfig.appendRssiEnabled;
+    radioConfigOk                             = ensureResult.ok();
+    radioAppendedRssiEnabled                  = radioConfigOk && desiredConfig.appendRssiEnabled;
     radioLastRawConfigValid                   = ensureResult.hasFinalConfig;
     if (ensureResult.hasFinalConfig)
     {
@@ -6279,14 +6302,15 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
     const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
     const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
     logRadioDesiredConfig(LOG_INFO, "E22ID want", desiredConfig);
-    radioLastRawConfigValid = ensureResult.hasFinalConfig;
+    radioConfigOk             = ensureResult.ok();
+    radioAppendedRssiEnabled  = radioConfigOk && desiredConfig.appendRssiEnabled;
+    radioLastRawConfigValid   = ensureResult.hasFinalConfig;
     if (ensureResult.hasFinalConfig)
     {
         radioLastRawConfig = ensureResult.finalConfig;
     }
     if (ensureResult.ok())
     {
-        radioAppendedRssiEnabled = desiredConfig.appendRssiEnabled;
         makeLog(
             LOG_INFO,
             "E22 ID ok a=%u c=%u f=%lu.%03lu",
@@ -6833,6 +6857,68 @@ void sendStatsPacket(Stream *port)
     header->msgID             = MSG_STATS;
 
     memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(StatsPacket));
+
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2)
+    {
+        countTxFrame(port);
+    }
+}
+
+static bool isRadioPacketRssiFresh(uint32_t now)
+{
+    if (!radioConfigOk || !e22Radio.hasLastPacketRssi())
+    {
+        return false;
+    }
+    const uint32_t sampleAt = e22Radio.lastPacketRssiAtMs();
+    return sampleAt != 0 && (now - sampleAt <= kRadioPacketRssiFreshMs);
+}
+
+static void populateLinkHealthPacket(LinkHealthPacket *pkt)
+{
+    if (!pkt)
+        return;
+
+    const uint32_t now          = millis();
+    const bool     hasFreshRssi = isRadioPacketRssiFresh(now);
+
+    pkt->packetRssiRaw   = hasFreshRssi ? e22Radio.lastPacketRssiRaw() : 0;
+    pkt->packetRssiDbm   = hasFreshRssi ? e22Radio.lastPacketRssiDbm() : 0;
+    pkt->packetRssiAgeMs = hasFreshRssi ? (now - e22Radio.lastPacketRssiAtMs()) : 0xFFFFFFFFUL;
+    pkt->flags           = 0;
+
+    if (hasFreshRssi)
+        pkt->flags |= LINK_HEALTH_RSSI_VALID;
+    if (radioConfigOk)
+        pkt->flags |= LINK_HEALTH_RADIO_CONFIG_OK;
+    if (e22Radio.hasAuxPin())
+        pkt->flags |= LINK_HEALTH_AUX_PRESENT;
+    if (e22Radio.hasAuxPin() && e22Radio.isAuxHigh())
+        pkt->flags |= LINK_HEALTH_AUX_HIGH;
+}
+
+static void sendLinkHealthPacket(Stream *port)
+{
+    if (!port || pendingBootloaderEntry)
+        return;
+
+    uint8_t          localTxBuffer[sizeof(FrameHeader) + sizeof(LinkHealthPacket) + 2];
+    LinkHealthPacket pkt;
+    populateLinkHealthPacket(&pkt);
+
+    FrameHeader *header       = (FrameHeader *)localTxBuffer;
+    header->sync1             = PROTOCOL_SYNC_1_V2;
+    header->sync2             = PROTOCOL_SYNC_2_V2;
+    header->length            = sizeof(LinkHealthPacket);
+    header->targetID          = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0;
+    header->seq               = seqCounter++;
+    header->msgID             = MSG_LINK_HEALTH;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(LinkHealthPacket));
 
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);

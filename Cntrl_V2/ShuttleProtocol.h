@@ -34,6 +34,7 @@ enum MsgID : uint8_t
     MSG_REQ_HEARTBEAT = 0x04, // Pult -> Shuttle: Request Heartbeat (Keep-Alive)
     MSG_REQ_SENSORS   = 0x05, // Pult -> Shuttle: Request Sensors
     MSG_REQ_STATS     = 0x06, // Pult -> Shuttle: Request Stats
+    MSG_LINK_HEALTH   = 0x07, // Shuttle -> Display/backend: radio link diagnostics
 
     // Asynchronous
     MSG_LOG = 0x10, // Shuttle -> Display: Truncated vsnprintf string
@@ -243,6 +244,19 @@ struct StatsPacket
     uint16_t lowBatteryEvents;
 };
 
+constexpr uint8_t LINK_HEALTH_RSSI_VALID      = (1 << 0);
+constexpr uint8_t LINK_HEALTH_RADIO_CONFIG_OK = (1 << 1);
+constexpr uint8_t LINK_HEALTH_AUX_HIGH        = (1 << 2);
+constexpr uint8_t LINK_HEALTH_AUX_PRESENT     = (1 << 3);
+
+struct LinkHealthPacket
+{
+    int16_t  packetRssiDbm;
+    uint8_t  packetRssiRaw;
+    uint8_t  flags;
+    uint32_t packetRssiAgeMs;
+};
+
 struct FullConfigPacket
 {
     uint16_t interPallet;
@@ -310,6 +324,9 @@ struct AckTelemPacket
 };
 
 #pragma pack(pop)
+
+static_assert(sizeof(LinkHealthPacket) == 8, "LinkHealthPacket wire size changed");
+static_assert(sizeof(FrameHeader) + sizeof(LinkHealthPacket) + 2 <= 64, "LinkHealthPacket exceeds parser buffer");
 
 class AlertUtils
 {

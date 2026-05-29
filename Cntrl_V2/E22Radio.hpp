@@ -7,7 +7,6 @@
 
 namespace E22Radio
 {
-
     constexpr uint8_t  kAddressHighDefault        = 0x00;
     constexpr uint8_t  kAddressHighShuttle        = 0x01;
     constexpr uint8_t  kAddressHighRemote         = 0x02;
@@ -467,6 +466,16 @@ namespace E22Radio
         bool isInitialized() const
         {
             return _initialized && (_serial != nullptr);
+        }
+
+        bool hasAuxPin() const
+        {
+            return _pins.aux >= 0;
+        }
+
+        bool isAuxHigh() const
+        {
+            return !hasAuxPin() || digitalRead(_pins.aux) == HIGH;
         }
 
         bool setMode(ModuleMode mode, const EnsureOptions &options = EnsureOptions{})
