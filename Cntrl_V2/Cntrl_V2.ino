@@ -351,7 +351,7 @@ struct EEPROMData // Структура данных параметров для
 EEPROMData eepromData;
 
 volatile bool      pendingEepromSave       = false;
-constexpr uint32_t kBootloaderEntryGraceMs = 60;
+constexpr uint32_t kBootloaderEntryGraceMs = 15;
 constexpr uint32_t kSystemBootloaderAddr   = 0x1FFF0000UL;
 volatile bool      pendingBootloaderEntry  = false;
 volatile bool      bootloaderStopDone      = false;
