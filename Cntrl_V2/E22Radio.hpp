@@ -178,6 +178,17 @@ namespace E22Radio
         NotInitialized
     };
 
+    struct EnsureDiagnostics
+    {
+        uint8_t  triedBaudMask       = 0;
+        uint32_t lastBaud            = 0;
+        uint8_t  auxTimeoutCount     = 0;
+        uint8_t  readTimeoutCount    = 0;
+        uint8_t  writeFailureCount   = 0;
+        uint8_t  verifyMismatchCount = 0;
+        bool     finalAuxHigh        = false;
+    };
+
     struct EnsureResult
     {
         EnsureStatus status         = EnsureStatus::NotInitialized;
@@ -185,6 +196,7 @@ namespace E22Radio
         bool         changed        = false;
         bool         hasFinalConfig = false;
         RawConfig    finalConfig    = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        EnsureDiagnostics diag      = {};
 
         bool ok() const
         {
@@ -504,13 +516,13 @@ namespace E22Radio
                 break;
             }
             delay(options.modeSettleMs);
-            waitAuxHigh(options.auxTimeoutMs);
+            const bool auxReady = waitAuxHigh(options.auxTimeoutMs);
             if (options.postModeGuardMs > 0)
             {
                 delay(options.postModeGuardMs);
             }
             flushInput();
-            return true;
+            return auxReady;
         }
 
         bool waitAuxHigh(uint32_t timeoutMs) const
@@ -563,13 +575,19 @@ namespace E22Radio
                 result.attemptsUsed = static_cast<uint8_t>(attempt + 1);
                 for (uint8_t baudIndex = 0; baudIndex < baudCount && !configured; ++baudIndex)
                 {
+                    recordTriedBaud(&result.diag, bauds[baudIndex]);
                     setHostBaud(bauds[baudIndex], options);
-                    setMode(ModuleMode::Config, options);
+                    if (!setModeTracked(ModuleMode::Config, options, &result.diag))
+                    {
+                        lastFail = EnsureStatus::Timeout;
+                        continue;
+                    }
 
                     RawConfig current = {};
-                    const bool readOk = readRawConfigInternal(current, options);
+                    const bool readOk = readRawConfigInternal(current, options, &result.diag);
                     if (!readOk)
                     {
+                        lastFail = EnsureStatus::Timeout;
                         continue;
                     }
 
@@ -582,7 +600,7 @@ namespace E22Radio
                         break;
                     }
 
-                    if (!writePersistentConfig(desired, options))
+                    if (!writePersistentConfig(desired, options, &result.diag))
                     {
                         lastFail = EnsureStatus::WriteFail;
                         logf(
@@ -594,11 +612,16 @@ namespace E22Radio
                     }
 
                     const uint32_t desiredBaud = uartBaudFromReg0(desired.reg0);
+                    recordTriedBaud(&result.diag, desiredBaud);
                     setHostBaud(desiredBaud, options);
-                    setMode(ModuleMode::Config, options);
+                    if (!setModeTracked(ModuleMode::Config, options, &result.diag))
+                    {
+                        lastFail = EnsureStatus::Timeout;
+                        continue;
+                    }
 
                     RawConfig verify = {};
-                    if (!readRawConfigInternal(verify, options))
+                    if (!readRawConfigInternal(verify, options, &result.diag))
                     {
                         lastFail = EnsureStatus::Timeout;
                         logf(
@@ -620,6 +643,7 @@ namespace E22Radio
                     }
 
                     lastFail = EnsureStatus::VerifyMismatch;
+                    countVerifyMismatch(&result.diag);
                     logf("W", "verify mismatch (%u/%u)", static_cast<unsigned>(attempt + 1), static_cast<unsigned>(attempts));
                 }
             }
@@ -636,6 +660,7 @@ namespace E22Radio
 
             result.status  = lastFail;
             result.changed = changed;
+            result.diag.finalAuxHigh = isAuxHigh();
             if (!result.hasFinalConfig && configured)
             {
                 result.finalConfig    = desired;
@@ -927,7 +952,93 @@ namespace E22Radio
             return false;
         }
 
-        bool readRegistersInternal(uint8_t startAddress, uint8_t *outRegisters, uint8_t length, const EnsureOptions &options)
+        static uint8_t baudMaskBit(uint32_t baud)
+        {
+            switch (baud)
+            {
+            case 1200:
+                return 0;
+            case 2400:
+                return 1;
+            case 4800:
+                return 2;
+            case 9600:
+                return 3;
+            case 19200:
+                return 4;
+            case 38400:
+                return 5;
+            case 57600:
+                return 6;
+            case 115200:
+                return 7;
+            default:
+                return 0xFF;
+            }
+        }
+
+        static void recordTriedBaud(EnsureDiagnostics *diag, uint32_t baud)
+        {
+            if (diag == nullptr)
+            {
+                return;
+            }
+            diag->lastBaud = baud;
+            const uint8_t bit = baudMaskBit(baud);
+            if (bit < 8)
+            {
+                diag->triedBaudMask |= static_cast<uint8_t>(1u << bit);
+            }
+        }
+
+        static void countAuxTimeout(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->auxTimeoutCount < 255)
+            {
+                diag->auxTimeoutCount++;
+            }
+        }
+
+        static void countReadTimeout(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->readTimeoutCount < 255)
+            {
+                diag->readTimeoutCount++;
+            }
+        }
+
+        static void countWriteFailure(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->writeFailureCount < 255)
+            {
+                diag->writeFailureCount++;
+            }
+        }
+
+        static void countVerifyMismatch(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->verifyMismatchCount < 255)
+            {
+                diag->verifyMismatchCount++;
+            }
+        }
+
+        bool setModeTracked(ModuleMode mode, const EnsureOptions &options, EnsureDiagnostics *diag)
+        {
+            const bool ok = setMode(mode, options);
+            if (!ok)
+            {
+                countAuxTimeout(diag);
+            }
+            return ok;
+        }
+
+        bool readRegistersInternal(
+            uint8_t startAddress,
+            uint8_t *outRegisters,
+            uint8_t length,
+            const EnsureOptions &options,
+            EnsureDiagnostics *diag = nullptr)
         {
             if (_serial == nullptr || outRegisters == nullptr || length == 0)
             {
@@ -938,6 +1049,7 @@ namespace E22Radio
             flushInput();
             if (!waitAuxHigh(options.auxTimeoutMs))
             {
+                countAuxTimeout(diag);
                 return false;
             }
             _serial->write(readCmd, sizeof(readCmd));
@@ -977,13 +1089,14 @@ namespace E22Radio
                 }
                 delay(1);
             }
+            countReadTimeout(diag);
             return false;
         }
 
-        bool readRawConfigInternal(RawConfig &outConfig, const EnsureOptions &options)
+        bool readRawConfigInternal(RawConfig &outConfig, const EnsureOptions &options, EnsureDiagnostics *diag = nullptr)
         {
             uint8_t registers[9] = {};
-            if (!readRegistersInternal(0x00, registers, sizeof(registers), options))
+            if (!readRegistersInternal(0x00, registers, sizeof(registers), options, diag))
             {
                 return false;
             }
@@ -996,7 +1109,8 @@ namespace E22Radio
             const uint8_t *registers,
             uint8_t length,
             uint8_t command,
-            const EnsureOptions &options)
+            const EnsureOptions &options,
+            EnsureDiagnostics *diag = nullptr)
         {
             if (_serial == nullptr || registers == nullptr || length == 0)
             {
@@ -1012,20 +1126,31 @@ namespace E22Radio
             flushInput();
             if (!waitAuxHigh(options.auxTimeoutMs))
             {
+                countAuxTimeout(diag);
+                countWriteFailure(diag);
                 return false;
             }
             const size_t written = _serial->write(frame, static_cast<size_t>(length + 3));
             _serial->flush();
             delay(options.writeSettleMs);
-            waitAuxHigh(options.auxTimeoutMs);
-            return written == static_cast<size_t>(length + 3);
+            const bool auxReady = waitAuxHigh(options.auxTimeoutMs);
+            if (!auxReady)
+            {
+                countAuxTimeout(diag);
+            }
+            const bool ok = written == static_cast<size_t>(length + 3) && auxReady;
+            if (!ok)
+            {
+                countWriteFailure(diag);
+            }
+            return ok;
         }
 
-        bool writePersistentConfig(const RawConfig &config, const EnsureOptions &options)
+        bool writePersistentConfig(const RawConfig &config, const EnsureOptions &options, EnsureDiagnostics *diag = nullptr)
         {
             uint8_t registers[9] = {};
             rawConfigToBytes(config, registers);
-            return writeRegistersInternal(0x00, registers, sizeof(registers), 0xC0, options);
+            return writeRegistersInternal(0x00, registers, sizeof(registers), 0xC0, options, diag);
         }
 
         void logf(const char *level, const char *fmt, ...) const

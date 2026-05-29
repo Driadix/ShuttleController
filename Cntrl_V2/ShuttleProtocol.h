@@ -5,7 +5,7 @@
 
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
-constexpr uint8_t PROTOCOL_VER       = 2;
+constexpr uint8_t PROTOCOL_VER       = 3;
 
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
@@ -189,6 +189,18 @@ enum ShuttleWarning : uint16_t
     WARN_OBSTACLE_AHEAD    = (1 << 7)
 };
 
+enum ResetReasonFlags : uint32_t
+{
+    RESET_REASON_NONE               = 0x00000000UL,
+    RESET_REASON_WATCHDOG           = 0x00000001UL,
+    RESET_REASON_SOFTWARE           = 0x00000002UL,
+    RESET_REASON_BOOTLOADER_REQUEST = 0x00000004UL,
+    RESET_REASON_PIN                = 0x00000008UL,
+    RESET_REASON_POWER              = 0x00000010UL,
+    RESET_REASON_LOW_POWER          = 0x00000020UL,
+    RESET_REASON_UNKNOWN            = 0x80000000UL
+};
+
 struct TelemetryPacket
 {
     uint16_t     errorCode;
@@ -247,8 +259,13 @@ struct StatsPacket
     uint16_t motorStallCount;
     uint16_t lifterOverloadCount;
     uint16_t crashCount;
-    uint16_t watchdogResets;
+    uint16_t resetWatchdogCount;
+    uint16_t resetSoftwareCount;
+    uint16_t resetPinCount;
+    uint16_t resetPowerCount;
+    uint16_t resetOtherCount;
     uint16_t lowBatteryEvents;
+    uint32_t lastResetFlags;
 };
 
 constexpr uint8_t LINK_HEALTH_RSSI_VALID      = (1 << 0);
@@ -334,6 +351,7 @@ struct AckTelemPacket
 
 static_assert(sizeof(LinkHealthPacket) == 8, "LinkHealthPacket wire size changed");
 static_assert(sizeof(FrameHeader) + sizeof(LinkHealthPacket) + 2 <= 64, "LinkHealthPacket exceeds parser buffer");
+static_assert(sizeof(StatsPacket) == 54, "StatsPacket wire size changed");
 
 class AlertUtils
 {

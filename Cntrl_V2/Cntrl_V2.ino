@@ -74,6 +74,16 @@ static inline bool             isPhysicallyStationary();
 static inline void             performSystemReset();
 static inline void             clearLatchedAlertsAndReturnToIdle(uint32_t now);
 static inline void             resetTofDiagnostics();
+static inline void             handlePendingCrash();
+static void                    crashF1Irq();
+static void                    crashF2Irq();
+static void                    crashR1Irq();
+static void                    crashR2Irq();
+static void                    recordBootResetCause();
+static void                    setResetRequestMarker(uint32_t flags);
+static uint32_t                consumeResetRequestMarker();
+static uint32_t                captureResetReasonFlags();
+static const char             *primaryResetCategoryName(uint32_t flags);
 static inline void             touchManualSession();
 static inline void             beginManualRadioHold(uint32_t now);
 static inline void             refreshManualRadioHoldWatchdog(uint32_t now);
@@ -118,6 +128,13 @@ static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
 static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
 static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
+static void                  logRadioEnsureFailure(
+                     LogLevel level,
+                     const char *tag,
+                     const E22Radio::LogicalConfig &desired,
+                     const E22Radio::EnsureResult &result);
+static void                  formatRadioBaudMask(uint8_t mask, char *buffer, size_t bufferSize);
+static void                  retryRadioConfigIfIdle(uint32_t now);
 static inline bool           batteryIsHighLoad();
 static inline bool           batteryLowFaultLatched();
 static bool                  batteryIsMotionLikeStatus(uint8_t st);
@@ -131,6 +148,7 @@ static inline void countReplyTiming(Stream *port, uint32_t elapsedUs);
 static inline bool isShuttleIdle();
 
 void motor_Stop();
+void motor_Force_Stop();
 void motor_Speed(int spd);
 void moove_Before_Pallete_F();
 void moove_Before_Pallete_R();
@@ -171,8 +189,11 @@ void blink_Warning();
 void blink_Error();
 void jumpToBootloader();
 
-#define STATS_MAGIC_WORD  0xAA55BEEF
-#define BKPSRAM_BASE_ADDR 0x40024000
+#define STATS_MAGIC_WORD        0xAA55BEF0
+#define BKPSRAM_BASE_ADDR       0x40024000
+#define RESET_MARKER_MAGIC_WORD 0x51E7A5E7UL
+#define RESET_MARKER_MAGIC_ADDR (BKPSRAM_BASE_ADDR + 0x0FE8)
+#define RESET_MARKER_FLAGS_ADDR (BKPSRAM_BASE_ADDR + 0x0FEC)
 #define BOOTLOADER_MAGIC_WORD 0xB00710ADUL
 #define BOOTLOADER_MAGIC_ADDR (BKPSRAM_BASE_ADDR + 0x0FF0)
 #define BOOTLOADER_MAGIC_CONFIRM_WORD 0x4FF8EF52UL
@@ -189,6 +210,8 @@ struct SecureStats
 #pragma pack(pop)
 
 SecureStats *volatile sramStats = (SecureStats *)BKPSRAM_BASE_ADDR;
+static volatile uint32_t *const resetMarkerMagic = (volatile uint32_t *)RESET_MARKER_MAGIC_ADDR;
+static volatile uint32_t *const resetMarkerFlags = (volatile uint32_t *)RESET_MARKER_FLAGS_ADDR;
 static volatile uint32_t *const bootloaderMagicWord = (volatile uint32_t *)BOOTLOADER_MAGIC_ADDR;
 static volatile uint32_t *const bootloaderMagicConfirm = (volatile uint32_t *)BOOTLOADER_MAGIC_CONFIRM_ADDR;
 
@@ -241,8 +264,8 @@ struct ConfigPageHeader
 #define RS485       PB13 // Пин передачи шины RS485
 #define BUMPER_F1   PB7  // Пин бампера вперед
 #define BUMPER_F2   PB3  // Пин бампера вперед
-#define BUMPER_R1   PA6  // Пин бампера назад
-#define BUMPER_R2   PC5  // Пин бампера назад
+#define BUMPER_R1   PC12  // Пин бампера назад
+#define BUMPER_R2   PA15  // Пин бампера назад
 #define CHANNEL     PB5  // Пин датчика канала
 #define TOF_I2C_SDA PB11
 #define TOF_I2C_SCL PB10
@@ -287,9 +310,12 @@ bool       statusSourceRadio              = false;
 bool       radioAppendedRssiEnabled       = false;
 bool       radioConfigOk                  = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
-bool       radioLastRawConfigValid        = false;
-E22Radio::RawConfig radioLastRawConfig    = {};
 bool       serialLinksStarted             = false;
+E22Radio::EnsureResult radioLastEnsureResult = {};
+uint32_t               radioLastRxFrameMs = 0;
+uint32_t               radioLastConfigRetryMs = 0;
+constexpr uint32_t     kRadioConfigRetryIntervalMs = 60000UL;
+constexpr uint32_t     kRadioConfigRetryRxQuietMs  = 10000UL;
 
 HardwareSerial Serial1(PA10, PA9); // Порт для экранцика LilyGo
 HardwareSerial Serial2(PA3, PA2);  // Порт под RS485 для BMS батареи
@@ -480,10 +506,23 @@ static BmsDdA5::Config makeBatteryPollConfig()
 }
 
 static uint8_t  tofSensorErrors[4]          = { 0, 0, 0, 0 };
+static uint8_t  tofProbeErrors[4]           = { 0, 0, 0, 0 };
+static uint8_t  tofReadErrors[4]            = { 0, 0, 0, 0 };
 static uint16_t tofDistanceFault            = 0;
 static uint32_t tofLastI2cRecoveryMs        = 0;
 static uint32_t tofLastI2cRecoveryLogMs     = 0;
 static bool     tofI2cRecoveryLogged        = false;
+static uint32_t tofI2cRecoveryCount         = 0;
+static uint32_t tofLastRecoverySummaryLogMs = 0;
+
+constexpr uint8_t CRASH_SRC_F1 = 0x01;
+constexpr uint8_t CRASH_SRC_F2 = 0x02;
+constexpr uint8_t CRASH_SRC_R1 = 0x04;
+constexpr uint8_t CRASH_SRC_R2 = 0x08;
+volatile bool     crashPending = false;
+volatile uint8_t  crashSourceMask = 0;
+volatile uint16_t crashIrqCount = 0;
+static uint32_t   crashLastLogMs = 0;
 
 static void initTofI2cBus()
 {
@@ -500,13 +539,9 @@ static void recoverTofI2cBus()
     if (now - tofLastI2cRecoveryMs < 250U)
         return;
     tofLastI2cRecoveryMs = now;
-
-    if (!tofI2cRecoveryLogged || now - tofLastI2cRecoveryLogMs >= 60000U)
-    {
-        makeLog(LOG_WARN, "TOF I2C recovery");
-        tofI2cRecoveryLogged   = true;
-        tofLastI2cRecoveryLogMs = now;
-    }
+    tofI2cRecoveryCount++;
+    const uint8_t sdaBefore = digitalRead(TOF_I2C_SDA);
+    const uint8_t sclBefore = digitalRead(TOF_I2C_SCL);
     setWarning(WARN_I2C_RECOVERY, 3000);
 
 #if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
@@ -544,6 +579,30 @@ static void recoverTofI2cBus()
     delayMicroseconds(10);
 
     initTofI2cBus();
+
+    const uint8_t sdaAfter = digitalRead(TOF_I2C_SDA);
+    const uint8_t sclAfter = digitalRead(TOF_I2C_SCL);
+    if (!tofI2cRecoveryLogged || now - tofLastI2cRecoveryLogMs >= 60000U)
+    {
+        makeLog(
+            LOG_WARN,
+            "TOF I2C recovery #%lu SDA/SCL %u/%u->%u/%u p=%u/%u/%u/%u r=%u/%u/%u/%u",
+            (unsigned long)tofI2cRecoveryCount,
+            sdaBefore,
+            sclBefore,
+            sdaAfter,
+            sclAfter,
+            tofProbeErrors[0],
+            tofProbeErrors[1],
+            tofProbeErrors[2],
+            tofProbeErrors[3],
+            tofReadErrors[0],
+            tofReadErrors[1],
+            tofReadErrors[2],
+            tofReadErrors[3]);
+        tofI2cRecoveryLogged   = true;
+        tofLastI2cRecoveryLogMs = now;
+    }
 }
 
 static BmsDdA5Firmware::Adapter batteryBms(SerialRS485, RS485, makeLogImpl, makeBatteryPollConfig());
@@ -612,10 +671,10 @@ void setup()
     pinMode(BUMPER_R2, INPUT);
     pinMode(CHANNEL, INPUT);
 
-    attachInterrupt(BUMPER_F1, crash, FALLING);
-    attachInterrupt(BUMPER_F2, crash, FALLING);
-    attachInterrupt(BUMPER_R1, crash, FALLING);
-    attachInterrupt(BUMPER_R2, crash, FALLING);
+    attachInterrupt(BUMPER_F1, crashF1Irq, FALLING);
+    attachInterrupt(BUMPER_F2, crashF2Irq, FALLING);
+    attachInterrupt(BUMPER_R1, crashR1Irq, FALLING);
+    attachInterrupt(BUMPER_R2, crashR2Irq, FALLING);
 
     digitalWrite(GREEN_LED, HIGH);
     digitalWrite(BOARD_LED, HIGH);
@@ -639,11 +698,7 @@ void setup()
     }
 
     initStatsSRAM();
-
-    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) || __HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))
-    {
-        STATS_ATOMIC_UPDATE(sramStats->payload.watchdogResets++);
-    }
+    recordBootResetCause();
     __HAL_RCC_CLEAR_RESET_FLAGS();
 
     read_EEPROM_Data();
@@ -720,6 +775,7 @@ void setup()
 void loop()
 {
     SystemYield();
+    handlePendingCrash();
 
     if (pendingEepromSave && motorStart == 0 && motorReverse == 2)
     {
@@ -2074,6 +2130,10 @@ uint8_t pollSerial(Stream &port, ProtocolParser &parser, bool isRadioPort)
         if (header != nullptr)
         {
             DIAG_ONLY(if (isRadioPort) linkDiag.radioRxValid++; else linkDiag.displayRxValid++;);
+            if (isRadioPort)
+            {
+                radioLastRxFrameMs = now;
+            }
             if (isRadioPort && radioAppendedRssiEnabled)
             {
                 uint8_t rssiRaw = 0;
@@ -2330,6 +2390,112 @@ void detect_Pallete()
     }
 }
 
+static ShuttleFault tofFaultForSensor(uint8_t sensorIndex)
+{
+    switch (sensorIndex)
+    {
+    case 0:
+        return FAULT_TOF_CH_R;
+    case 1:
+        return FAULT_TOF_CH_F;
+    case 2:
+        return FAULT_TOF_PAL_R;
+    case 3:
+        return FAULT_TOF_PAL_F;
+    default:
+        return FAULT_NONE;
+    }
+}
+
+static const char *tofNameForSensor(uint8_t sensorIndex)
+{
+    switch (sensorIndex)
+    {
+    case 0:
+        return "ID1 Channel R";
+    case 1:
+        return "ID2 Channel F";
+    case 2:
+        return "ID3 Pallet R";
+    case 3:
+        return "ID4 Pallet F";
+    default:
+        return "unknown";
+    }
+}
+
+static void incrementTofFailureCounter(uint8_t &counter)
+{
+    if (counter < 250)
+    {
+        counter++;
+    }
+}
+
+static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFailure)
+{
+    incrementTofFailureCounter(tofSensorErrors[sensor]);
+    if (probeFailure)
+    {
+        incrementTofFailureCounter(tofProbeErrors[sensor]);
+    }
+    else
+    {
+        incrementTofFailureCounter(tofReadErrors[sensor]);
+    }
+
+    data[sensor][filterIndex] = 1500;
+
+    if (tofSensorErrors[sensor] >= 7)
+    {
+        setFault(tofFaultForSensor(sensor));
+        if (tofSensorErrors[sensor] == 7)
+        {
+            makeLog(
+                LOG_ERROR,
+                "TOF %s failed probe=%u read=%u SDA=%u SCL=%u",
+                tofNameForSensor(sensor),
+                tofProbeErrors[sensor],
+                tofReadErrors[sensor],
+                digitalRead(TOF_I2C_SDA),
+                digitalRead(TOF_I2C_SCL));
+        }
+
+        if (tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 &&
+            tofSensorErrors[3] >= 7)
+        {
+            recoverTofI2cBus();
+        }
+    }
+}
+
+static void recordTofSuccess(uint8_t sensor)
+{
+    if (tofSensorErrors[sensor] == 0 && tofProbeErrors[sensor] == 0 && tofReadErrors[sensor] == 0)
+    {
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (tofLastRecoverySummaryLogMs == 0 || now - tofLastRecoverySummaryLogMs >= 60000U)
+    {
+        makeLog(
+            LOG_INFO,
+            "TOF %s recovered total=%u probe=%u read=%u SDA=%u SCL=%u",
+            tofNameForSensor(sensor),
+            tofSensorErrors[sensor],
+            tofProbeErrors[sensor],
+            tofReadErrors[sensor],
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        tofLastRecoverySummaryLogMs = now;
+    }
+
+    tofSensorErrors[sensor] = 0;
+    tofProbeErrors[sensor]  = 0;
+    tofReadErrors[sensor]   = 0;
+}
+
 // Опрос всех сенсоров расстояния
 void get_Distance()
 {
@@ -2346,53 +2512,17 @@ void get_Distance()
 
     if (!TOF_Is_Device_Present(currentSensor + 1))
     {
-        if (tofSensorErrors[currentSensor] < 250)
-        {
-            tofSensorErrors[currentSensor]++;
-        }
-
-        data[currentSensor][filterCount] = 1500;
-
-        if (tofSensorErrors[currentSensor] >= 7)
-        {
-            if (currentSensor == 0)
-                setFault(FAULT_TOF_CH_F);
-            else if (currentSensor == 1)
-                setFault(FAULT_TOF_CH_R);
-            else if (currentSensor == 2)
-                setFault(FAULT_TOF_PAL_F);
-            else if (currentSensor == 3)
-                setFault(FAULT_TOF_PAL_R);
-
-            if (tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 &&
-                tofSensorErrors[3] >= 7)
-            {
-                recoverTofI2cBus();
-            }
-        }
-
-        if (tofSensorErrors[currentSensor] == 7)
-        {
-            if (currentSensor == 0)
-                LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 1 (Forward) failed!");
-            else if (currentSensor == 1)
-                LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 2 (Reverse) failed!");
-            else if (currentSensor == 2)
-                LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 3 (Pallete F) failed!");
-            else if (currentSensor == 3)
-                LOG_RATE_LIMITED(LOG_ERROR, 5000, "TOF Sensor 4 (Pallete R) failed!");
-        }
+        recordTofFailure(currentSensor, filterCount, true);
         return;
     }
-    else
+
+    if (!TOF_Inquire_I2C_Decoding_ByID(currentSensor + 1, &sensor))
     {
-        if (tofSensorErrors[currentSensor] > 0)
-        {
-            tofSensorErrors[currentSensor] = 0;
-        }
+        recordTofFailure(currentSensor, filterCount, false);
+        return;
     }
 
-    TOF_Inquire_I2C_Decoding_ByID(currentSensor + 1, &sensor);
+    recordTofSuccess(currentSensor);
     uint16_t dist = sensor.dis;
 
     if ((dist <= 1500 && sensor.signal_strength > 100) || dist > 1500)
@@ -5081,7 +5211,7 @@ void long_Unload(uint8_t num)
 // Движение назад в ручном режиме
 void moove_Right()
 {
-    // Legacy wire name: RIGHT_MAN drives physical reverse.
+    // Protocol command RIGHT_MAN drives physical reverse.
     makeLog(LOG_INFO, "Manual reverse hold...");
     uint8_t manualCount = 6;
     uint8_t moove       = 1;
@@ -5150,7 +5280,7 @@ void moove_Right()
 // Движение вперед в ручном режиме
 void moove_Left()
 {
-    // Legacy wire name: LEFT_MAN drives physical forward.
+    // Protocol command LEFT_MAN drives physical forward.
     makeLog(LOG_INFO, "Manual forward hold...");
     uint8_t manualCount = 6;
     uint8_t moove       = 1;
@@ -5366,6 +5496,7 @@ void SystemYield()
     uint32_t currentMillis = millis();
     IWatchdog.reload();
     alertMan.processTimeouts(currentMillis);
+    handlePendingCrash();
 
     if (pendingBootloaderEntry)
     {
@@ -5397,13 +5528,15 @@ void SystemYield()
     static bool     lastLinkHealthValid = false;
     static bool     lastLinkHealthValidInitialized = false;
 
-    if (!radioLastRawConfigValid && currentMillis >= kRadioConfigFailureWarnIntervalMs && currentMillis - timerRadioDiag >= kRadioConfigFailureWarnIntervalMs)
+    if (!radioConfigOk && currentMillis >= kRadioConfigFailureWarnIntervalMs &&
+        currentMillis - timerRadioDiag >= kRadioConfigFailureWarnIntervalMs)
     {
         timerRadioDiag = currentMillis;
         const uint8_t radioAddress =
             (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
-        makeLog(LOG_ERROR, "Radio not configured in 1 min! Wanted ID %u, CH %u", radioAddress, makeRadioDesiredConfig(radioAddress).channel);
+        logRadioEnsureFailure(LOG_ERROR, "E22 60s", makeRadioDesiredConfig(radioAddress), radioLastEnsureResult);
     }
+    retryRadioConfigIfIdle(currentMillis);
 
     batteryBms.tick(currentMillis, mapBatteryActivity());
     batteryCharge = batteryBms.socPercent();
@@ -5556,6 +5689,13 @@ void SystemYield()
     }
 }
 
+static void saveStatsPayload()
+{
+    sramStats->magicWord = STATS_MAGIC_WORD;
+    sramStats->reserved  = 0;
+    sramStats->crc16     = ProtocolUtils::calcCRC16((uint8_t *)&sramStats->payload, sizeof(StatsPacket));
+}
+
 void initStatsSRAM()
 {
     __HAL_RCC_PWR_CLK_ENABLE();
@@ -5586,8 +5726,130 @@ void initStatsSRAM()
 
     makeLog(LOG_WARN, "SRAM Stats Corrupt/Empty. Initializing to zero.");
     memset((void *)&sramStats->payload, 0, sizeof(StatsPacket));
-    sramStats->magicWord = STATS_MAGIC_WORD;
-    sramStats->crc16     = ProtocolUtils::calcCRC16((uint8_t *)&sramStats->payload, sizeof(StatsPacket));
+    saveStatsPayload();
+}
+
+static void setResetRequestMarker(uint32_t flags)
+{
+    enableBackupSramAccess(100);
+    *resetMarkerFlags = flags;
+    *resetMarkerMagic = RESET_MARKER_MAGIC_WORD;
+}
+
+static uint32_t consumeResetRequestMarker()
+{
+    if (*resetMarkerMagic != RESET_MARKER_MAGIC_WORD)
+    {
+        return RESET_REASON_NONE;
+    }
+
+    const uint32_t flags = *resetMarkerFlags;
+    *resetMarkerFlags   = RESET_REASON_NONE;
+    *resetMarkerMagic   = 0;
+    return flags;
+}
+
+static uint32_t captureResetReasonFlags()
+{
+    uint32_t flags = RESET_REASON_NONE;
+
+#if defined(RCC_FLAG_IWDGRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST))
+        flags |= RESET_REASON_WATCHDOG;
+#endif
+#if defined(RCC_FLAG_WWDGRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST))
+        flags |= RESET_REASON_WATCHDOG;
+#endif
+#if defined(RCC_FLAG_SFTRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST))
+        flags |= RESET_REASON_SOFTWARE;
+#endif
+#if defined(RCC_FLAG_PINRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST))
+        flags |= RESET_REASON_PIN;
+#endif
+#if defined(RCC_FLAG_PORRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST))
+        flags |= RESET_REASON_POWER;
+#endif
+#if defined(RCC_FLAG_BORRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST))
+        flags |= RESET_REASON_POWER;
+#endif
+#if defined(RCC_FLAG_LPWRRST)
+    if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST))
+        flags |= RESET_REASON_LOW_POWER;
+#endif
+
+    if (flags == RESET_REASON_NONE)
+    {
+        flags = RESET_REASON_UNKNOWN;
+    }
+    return flags;
+}
+
+static const char *primaryResetCategoryName(uint32_t flags)
+{
+    if ((flags & RESET_REASON_WATCHDOG) != 0)
+        return "watchdog";
+    if ((flags & RESET_REASON_SOFTWARE) != 0)
+        return ((flags & RESET_REASON_BOOTLOADER_REQUEST) != 0) ? "bootloader" : "software";
+    if ((flags & RESET_REASON_POWER) != 0)
+        return "power";
+    if ((flags & RESET_REASON_PIN) != 0)
+        return "pin";
+    return "other";
+}
+
+static void recordBootResetCause()
+{
+    const uint32_t rccFlags    = captureResetReasonFlags();
+    const uint32_t markerFlags = consumeResetRequestMarker();
+    uint32_t       flags       = rccFlags | markerFlags;
+    if (markerFlags != RESET_REASON_NONE)
+    {
+        flags |= RESET_REASON_SOFTWARE;
+    }
+    if (flags == RESET_REASON_NONE)
+    {
+        flags = RESET_REASON_UNKNOWN;
+    }
+
+    STATS_ATOMIC_UPDATE(
+        sramStats->payload.lastResetFlags = flags;
+        if ((flags & RESET_REASON_WATCHDOG) != 0)
+        {
+            sramStats->payload.resetWatchdogCount++;
+        }
+        else if ((flags & RESET_REASON_SOFTWARE) != 0)
+        {
+            sramStats->payload.resetSoftwareCount++;
+        }
+        else if ((flags & RESET_REASON_POWER) != 0)
+        {
+            sramStats->payload.resetPowerCount++;
+        }
+        else if ((flags & RESET_REASON_PIN) != 0)
+        {
+            sramStats->payload.resetPinCount++;
+        }
+        else
+        {
+            sramStats->payload.resetOtherCount++;
+        });
+
+    makeLog(
+        LOG_INFO,
+        "Reset %s flags=%08lX marker=%08lX cnt=%u/%u/%u/%u/%u",
+        primaryResetCategoryName(flags),
+        (unsigned long)flags,
+        (unsigned long)markerFlags,
+        sramStats->payload.resetWatchdogCount,
+        sramStats->payload.resetSoftwareCount,
+        sramStats->payload.resetPinCount,
+        sramStats->payload.resetPowerCount,
+        sramStats->payload.resetOtherCount);
 }
 
 // Процедура калибровки энкодера вперед
@@ -6036,17 +6298,80 @@ static void batterySafetyReset(uint32_t now)
     (void)batteryBms.requestNow(BmsDdA5::RequestKind::BasicInfo, now);
 }
 
-// Обработка срабатывания бампера
-void crash()
+static inline void markCrashFromIsr(uint8_t sourceBit)
 {
+    crashSourceMask |= sourceBit;
+    crashPending = true;
+    if (crashIrqCount < 0xFFFF)
+    {
+        crashIrqCount++;
+    }
+}
+
+static void crashF1Irq()
+{
+    markCrashFromIsr(CRASH_SRC_F1);
+}
+
+static void crashF2Irq()
+{
+    markCrashFromIsr(CRASH_SRC_F2);
+}
+
+static void crashR1Irq()
+{
+    markCrashFromIsr(CRASH_SRC_R1);
+}
+
+static void crashR2Irq()
+{
+    markCrashFromIsr(CRASH_SRC_R2);
+}
+
+// Обработка срабатывания бампера из обычного потока, не из ISR.
+static inline void handlePendingCrash()
+{
+    __disable_irq();
+    const bool     pending = crashPending;
+    const uint8_t  sources = crashSourceMask;
+    const uint16_t irqSeen = crashIrqCount;
+    crashPending           = false;
+    crashSourceMask        = 0;
+    __enable_irq();
+
+    if (!pending)
+    {
+        return;
+    }
+
+    const bool wasLatched = (alertMan.getErrorCode() & static_cast<uint16_t>(FAULT_CRASH_BUMPER)) != 0;
     setFault(FAULT_CRASH_BUMPER);
-    LOG_RATE_LIMITED(LOG_WARN, 1000, "crash encountered");
-    if (!(status == CMD_STOP))
+    status = CMD_STOP;
+
+    if (!isPhysicallyStationary())
     {
         motor_Force_Stop();
-        status = CMD_STOP;
-        STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
         oldSpeed = 0;
+    }
+
+    if (!wasLatched)
+    {
+        STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
+    }
+
+    const uint32_t now = millis();
+    if (crashLastLogMs == 0 || now - crashLastLogMs >= 1000U)
+    {
+        crashLastLogMs = now;
+        makeLog(
+            LOG_WARN,
+            "Bumper crash src=%02X irq=%u pins F=%u%u R=%u%u",
+            sources,
+            irqSeen,
+            digitalRead(BUMPER_F1),
+            digitalRead(BUMPER_F2),
+            digitalRead(BUMPER_R1),
+            digitalRead(BUMPER_R2));
     }
 }
 
@@ -6269,13 +6594,9 @@ static void applyRadioConfigAtBoot()
     logRadioDesiredConfig(LOG_INFO, "E22 want", desiredConfig);
 
     const E22Radio::EnsureResult ensureResult = e22Radio.ensureConfig(desiredConfig, ensureOptions);
+    radioLastEnsureResult                     = ensureResult;
     radioConfigOk                             = ensureResult.ok();
     radioAppendedRssiEnabled                  = radioConfigOk && desiredConfig.appendRssiEnabled;
-    radioLastRawConfigValid                   = ensureResult.hasFinalConfig;
-    if (ensureResult.hasFinalConfig)
-    {
-        radioLastRawConfig = ensureResult.finalConfig;
-    }
     if (ensureResult.ok())
     {
         makeLog(
@@ -6290,25 +6611,23 @@ static void applyRadioConfigAtBoot()
     }
     else
     {
-        makeLog(
-            LOG_WARN,
-            "E22 fail %s a=%u c=%u f=%lu.%03lu",
-            E22Radio::statusToString(ensureResult.status),
-            radioAddress,
-            desiredConfig.channel,
-            (unsigned long)(freqKhz / 1000UL),
-            (unsigned long)(freqKhz % 1000UL));
-        if (ensureResult.hasFinalConfig)
-        {
-            logRadioRawConfig(LOG_WARN, "E22 got", ensureResult.finalConfig);
-        }
+        logRadioEnsureFailure(LOG_WARN, "E22 fail", desiredConfig, ensureResult);
     }
 }
 
 static E22Radio::EnsureOptions makeRadioEnsureOptions()
 {
     E22Radio::EnsureOptions ensureOptions = {};
-    ensureOptions.maxAttempts             = E22Radio::kDefaultEnsureAttempts;
+    ensureOptions.maxAttempts             = 3;
+    ensureOptions.modeSettleMs            = 100;
+    ensureOptions.auxTimeoutMs            = 300;
+    ensureOptions.ioTimeoutMs             = 250;
+    ensureOptions.readCmdSettleMs         = 30;
+    ensureOptions.writeSettleMs           = 100;
+    ensureOptions.baudSwitchSettleMs      = 30;
+    ensureOptions.postModeGuardMs         = 20;
+    ensureOptions.configCommandBaud       = 9600;
+    ensureOptions.packetRssiReadTimeoutMs = E22Radio::kDefaultPacketRssiTimeoutMs;
     return ensureOptions;
 }
 
@@ -6338,13 +6657,9 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
     const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
     const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
     logRadioDesiredConfig(LOG_INFO, "E22ID want", desiredConfig);
+    radioLastEnsureResult  = ensureResult;
     radioConfigOk             = ensureResult.ok();
     radioAppendedRssiEnabled  = radioConfigOk && desiredConfig.appendRssiEnabled;
-    radioLastRawConfigValid   = ensureResult.hasFinalConfig;
-    if (ensureResult.hasFinalConfig)
-    {
-        radioLastRawConfig = ensureResult.finalConfig;
-    }
     if (ensureResult.ok())
     {
         makeLog(
@@ -6358,19 +6673,8 @@ static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
         return;
     }
 
-    makeLog(
-        LOG_WARN,
-        "E22 ID fail %s %u>%u c=%u f=%lu.%03lu",
-        E22Radio::statusToString(ensureResult.status),
-        previousId,
-        newId,
-        desiredConfig.channel,
-        (unsigned long)(freqKhz / 1000UL),
-        (unsigned long)(freqKhz % 1000UL));
-    if (ensureResult.hasFinalConfig)
-    {
-        logRadioRawConfig(LOG_WARN, "E22ID got", ensureResult.finalConfig);
-    }
+    makeLog(LOG_WARN, "E22 ID change failed %u>%u", previousId, newId);
+    logRadioEnsureFailure(LOG_WARN, "E22ID fail", desiredConfig, ensureResult);
 }
 
 static void logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw)
@@ -6382,6 +6686,97 @@ static void logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::R
 static void logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config)
 {
     logRadioRawConfig(level, tag, E22Radio::encode(config));
+}
+
+static void formatRadioBaudMask(uint8_t mask, char *buffer, size_t bufferSize)
+{
+    if (buffer == NULL || bufferSize == 0)
+        return;
+
+    buffer[0] = '\0';
+    static const uint32_t kBauds[8] = { 1200UL, 2400UL, 4800UL, 9600UL, 19200UL, 38400UL, 57600UL, 115200UL };
+    size_t used = 0;
+    for (uint8_t i = 0; i < 8 && used < bufferSize; ++i)
+    {
+        if ((mask & (1u << i)) == 0)
+            continue;
+        const int written = snprintf(
+            buffer + used,
+            bufferSize - used,
+            "%s%lu",
+            used == 0 ? "" : ",",
+            (unsigned long)kBauds[i]);
+        if (written < 0)
+            break;
+        used += static_cast<size_t>(written);
+        if (used >= bufferSize)
+        {
+            buffer[bufferSize - 1] = '\0';
+            break;
+        }
+    }
+    if (buffer[0] == '\0')
+    {
+        snprintf(buffer, bufferSize, "none");
+    }
+}
+
+static void logRadioEnsureFailure(
+    LogLevel level,
+    const char *tag,
+    const E22Radio::LogicalConfig &desired,
+    const E22Radio::EnsureResult &result)
+{
+    char baudList[56];
+    formatRadioBaudMask(result.diag.triedBaudMask, baudList, sizeof(baudList));
+
+    makeLog(
+        level,
+        "%s %s a=%u c=%u attempts=%u bauds=%s last=%lu pins M0/M1/AUX=%u/%u/%u cnt aux/read/write/verify=%u/%u/%u/%u finalAux=%u",
+        tag,
+        E22Radio::statusToString(result.status),
+        desired.address.addl,
+        desired.channel,
+        result.attemptsUsed,
+        baudList,
+        (unsigned long)result.diag.lastBaud,
+        digitalRead(RADIO_E22_M0),
+        digitalRead(RADIO_E22_M1),
+        digitalRead(RADIO_E22_AUX),
+        result.diag.auxTimeoutCount,
+        result.diag.readTimeoutCount,
+        result.diag.writeFailureCount,
+        result.diag.verifyMismatchCount,
+        result.diag.finalAuxHigh ? 1 : 0);
+    logRadioDesiredConfig(level, "E22 desired", desired);
+    if (result.hasFinalConfig)
+    {
+        logRadioRawConfig(level, "E22 final", result.finalConfig);
+    }
+    else
+    {
+        makeLog(level, "E22 final config unreadable");
+    }
+}
+
+static void retryRadioConfigIfIdle(uint32_t now)
+{
+    if (radioConfigOk || pendingBootloaderEntry || !isPhysicallyStationary())
+    {
+        return;
+    }
+    if (now - radioLastConfigRetryMs < kRadioConfigRetryIntervalMs)
+    {
+        return;
+    }
+    if (radioLastRxFrameMs != 0 && now - radioLastRxFrameMs < kRadioConfigRetryRxQuietMs)
+    {
+        return;
+    }
+
+    radioLastConfigRetryMs = now;
+    makeLog(LOG_WARN, "E22 idle config retry");
+    applyRadioConfigAtBoot();
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd)
@@ -6492,6 +6887,7 @@ static bool consumeBootloaderResetRequest()
 static void requestBootloaderResetEntry()
 {
     enableBackupSramAccess(100);
+    setResetRequestMarker(RESET_REASON_SOFTWARE | RESET_REASON_BOOTLOADER_REQUEST);
     *bootloaderMagicWord    = BOOTLOADER_MAGIC_WORD;
     *bootloaderMagicConfirm = BOOTLOADER_MAGIC_CONFIRM_WORD;
 }
@@ -6639,6 +7035,7 @@ static inline bool isPhysicallyStationary()
 static inline void performSystemReset()
 {
     makeLog(LOG_INFO, "Reboot system by external command...");
+    setResetRequestMarker(RESET_REASON_SOFTWARE);
     delay(20);
     HAL_NVIC_SystemReset();
 }
@@ -6664,10 +7061,13 @@ static inline void resetTofDiagnostics()
     for (uint8_t i = 0; i < 4; ++i)
     {
         tofSensorErrors[i] = 0;
+        tofProbeErrors[i]  = 0;
+        tofReadErrors[i]   = 0;
     }
     tofDistanceFault        = 0;
     tofI2cRecoveryLogged    = false;
     tofLastI2cRecoveryLogMs = 0;
+    tofLastRecoverySummaryLogMs = 0;
 }
 
 static inline void touchManualSession()
@@ -6927,8 +7327,13 @@ void sendStatsPacket(Stream *port)
     pkt.motorStallCount         = sramStats->payload.motorStallCount;
     pkt.lifterOverloadCount     = sramStats->payload.lifterOverloadCount;
     pkt.crashCount              = sramStats->payload.crashCount;
-    pkt.watchdogResets          = sramStats->payload.watchdogResets;
+    pkt.resetWatchdogCount      = sramStats->payload.resetWatchdogCount;
+    pkt.resetSoftwareCount      = sramStats->payload.resetSoftwareCount;
+    pkt.resetPinCount           = sramStats->payload.resetPinCount;
+    pkt.resetPowerCount         = sramStats->payload.resetPowerCount;
+    pkt.resetOtherCount         = sramStats->payload.resetOtherCount;
     pkt.lowBatteryEvents        = sramStats->payload.lowBatteryEvents;
+    pkt.lastResetFlags          = sramStats->payload.lastResetFlags;
 
     FrameHeader *header       = (FrameHeader *)localTxBuffer;
     header->sync1             = PROTOCOL_SYNC_1_V2;

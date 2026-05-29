@@ -50,7 +50,7 @@ typedef struct
 #define IIC_CHANGE_TO_UART_DATA 0x00
 
 // Функции
-void TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data);
+bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data);
 void IIC_Set_ID(uint8_t current_id, uint8_t new_id);
 void IIC_Change_Mode_To_UART(uint8_t id);
 bool TOF_Is_Device_Present(uint8_t id);

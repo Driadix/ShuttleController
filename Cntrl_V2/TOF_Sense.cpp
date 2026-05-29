@@ -1,4 +1,5 @@
 #include "TOF_Sense.h"
+#include <string.h>
 
 /*****************************************************************************
  * | File       :   TOF_Sense.cpp
@@ -6,31 +7,68 @@
  * | Function    :   TOF driver with multi-device support
  ******************************************************************************/
 
-// Универсальная функция чтения данных с указанием адреса
-static void I2C_Read_Nbyte_ByAddr(uint8_t slave_addr, uint8_t reg_addr, uint8_t *pdata, uint8_t len)
+static void I2C_Drain()
 {
+    while (Wire.available())
+    {
+        Wire.read();
+    }
+}
+
+// Универсальная функция чтения данных с указанием адреса
+static bool I2C_Read_Nbyte_ByAddr(uint8_t slave_addr, uint8_t reg_addr, uint8_t *pdata, uint8_t len)
+{
+    if (pdata == nullptr || len == 0)
+    {
+        return false;
+    }
+
     Wire.beginTransmission(slave_addr);
     Wire.write(reg_addr);
-    Wire.endTransmission();
+    if (Wire.endTransmission(false) != 0)
+    {
+        I2C_Drain();
+        return false;
+    }
 
-    Wire.requestFrom(slave_addr, len);
+    const uint8_t received = Wire.requestFrom(slave_addr, len);
+    if (received != len)
+    {
+        I2C_Drain();
+        return false;
+    }
     uint8_t i = 0;
     while (Wire.available() && i < len)
     {
         pdata[i++] = Wire.read();
     }
+    if (i != len)
+    {
+        I2C_Drain();
+        return false;
+    }
+    return true;
 }
 
 // Функция опроса датчика по ID
-void TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data)
+bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data)
 {
+    if (tof_data == nullptr)
+    {
+        return false;
+    }
+
     uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
-    uint8_t read_buf[TOF_REGISTER_TOTAL_SIZE];
+    uint8_t read_buf[TOF_REGISTER_TOTAL_SIZE] = {};
 
     // Чтение данных двумя частями
-    I2C_Read_Nbyte_ByAddr(slave_addr, 0x00, read_buf, TOF_REGISTER_TOTAL_SIZE / 2);
-    I2C_Read_Nbyte_ByAddr(
-        slave_addr, TOF_REGISTER_TOTAL_SIZE / 2, &read_buf[TOF_REGISTER_TOTAL_SIZE / 2], TOF_REGISTER_TOTAL_SIZE / 2);
+    if (!I2C_Read_Nbyte_ByAddr(slave_addr, 0x00, read_buf, TOF_REGISTER_TOTAL_SIZE / 2) ||
+        !I2C_Read_Nbyte_ByAddr(
+            slave_addr, TOF_REGISTER_TOTAL_SIZE / 2, &read_buf[TOF_REGISTER_TOTAL_SIZE / 2], TOF_REGISTER_TOTAL_SIZE / 2))
+    {
+        memset(tof_data, 0, sizeof(TOF_Parameter));
+        return false;
+    }
 
     // Парсинг данных
     tof_data->interface_mode = read_buf[TOF_ADDR_MODE] & 0x07;
@@ -49,6 +87,7 @@ void TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data)
     tof_data->signal_strength =
         (uint16_t)((uint16_t)read_buf[TOF_ADDR_SIGNAL_STRENGTH] | ((uint16_t)read_buf[TOF_ADDR_SIGNAL_STRENGTH + 1] << 8));
     tof_data->range_precision = read_buf[TOF_ADDR_RANGE_PRECISION];
+    return true;
 }
 
 // Функция изменения ID датчика
@@ -84,12 +123,13 @@ bool TOF_Is_Device_Present(uint8_t id)
         return false; // Нет ответа
     }
 
-    Wire.requestFrom(slave_addr, (uint8_t)1);
-    if (Wire.available())
+    const uint8_t received = Wire.requestFrom(slave_addr, (uint8_t)1);
+    if (received == 1 && Wire.available() >= 1)
     {
         Wire.read();
         return true; // Есть ответ
     }
 
+    I2C_Drain();
     return false;
 }
