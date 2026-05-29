@@ -586,6 +586,11 @@ uint16_t data[4][5] = {
 // Инициация устройств
 void setup()
 {
+    if (consumeBootloaderResetRequest())
+    {
+        jumpToBootloader();
+    }
+
     pinMode(GREEN_LED, OUTPUT);
     pinMode(BOARD_LED, OUTPUT);
     pinMode(RED_LED, OUTPUT);
@@ -606,11 +611,6 @@ void setup()
     pinMode(BUMPER_R1, INPUT);
     pinMode(BUMPER_R2, INPUT);
     pinMode(CHANNEL, INPUT);
-
-    if (consumeBootloaderResetRequest())
-    {
-        jumpToBootloader();
-    }
 
     attachInterrupt(BUMPER_F1, crash, FALLING);
     attachInterrupt(BUMPER_F2, crash, FALLING);
