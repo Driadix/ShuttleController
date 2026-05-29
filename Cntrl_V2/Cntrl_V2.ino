@@ -79,6 +79,10 @@ static inline void             beginManualRadioHold(uint32_t now);
 static inline void             refreshManualRadioHoldWatchdog(uint32_t now);
 static inline void             clearManualRadioHold();
 static void                    scheduleBootloaderEntry();
+static void                    enableBackupSramAccess(uint32_t readyTimeoutMs);
+static bool                    consumeBootloaderResetRequest();
+static void                    requestBootloaderResetEntry();
+static void                    resetIntoBootloader();
 static E22Radio::EnsureOptions makeRadioEnsureOptions();
 static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
 static void       reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId);
@@ -165,9 +169,14 @@ void set_Position();
 void blink_Work();
 void blink_Warning();
 void blink_Error();
+void jumpToBootloader();
 
 #define STATS_MAGIC_WORD  0xAA55BEEF
 #define BKPSRAM_BASE_ADDR 0x40024000
+#define BOOTLOADER_MAGIC_WORD 0xB00710ADUL
+#define BOOTLOADER_MAGIC_ADDR (BKPSRAM_BASE_ADDR + 0x0FF0)
+#define BOOTLOADER_MAGIC_CONFIRM_WORD 0x4FF8EF52UL
+#define BOOTLOADER_MAGIC_CONFIRM_ADDR (BKPSRAM_BASE_ADDR + 0x0FF4)
 
 #pragma pack(push, 1)
 struct SecureStats
@@ -180,6 +189,8 @@ struct SecureStats
 #pragma pack(pop)
 
 SecureStats *volatile sramStats = (SecureStats *)BKPSRAM_BASE_ADDR;
+static volatile uint32_t *const bootloaderMagicWord = (volatile uint32_t *)BOOTLOADER_MAGIC_ADDR;
+static volatile uint32_t *const bootloaderMagicConfirm = (volatile uint32_t *)BOOTLOADER_MAGIC_CONFIRM_ADDR;
 
 ProtocolParser               parserRadio;
 ProtocolParser               parserDisplay;
@@ -278,6 +289,7 @@ bool       radioConfigOk                  = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
 bool       radioLastRawConfigValid        = false;
 E22Radio::RawConfig radioLastRawConfig    = {};
+bool       serialLinksStarted             = false;
 
 HardwareSerial Serial1(PA10, PA9); // Порт для экранцика LilyGo
 HardwareSerial Serial2(PA3, PA2);  // Порт под RS485 для BMS батареи
@@ -595,6 +607,11 @@ void setup()
     pinMode(BUMPER_R2, INPUT);
     pinMode(CHANNEL, INPUT);
 
+    if (consumeBootloaderResetRequest())
+    {
+        jumpToBootloader();
+    }
+
     attachInterrupt(BUMPER_F1, crash, FALLING);
     attachInterrupt(BUMPER_F2, crash, FALLING);
     attachInterrupt(BUMPER_R1, crash, FALLING);
@@ -613,6 +630,7 @@ void setup()
     SerialDisplay.begin(230400, SERIAL_8E1);
     SerialRS485.begin(9600);
     SerialLora.begin(E22Radio::uartBaudValue(kRadioHostBaud));
+    serialLinksStarted = true;
 
     uint32_t displayWaitStart = millis();
     while (!SerialDisplay && (millis() - displayWaitStart < 1500))
@@ -5366,7 +5384,7 @@ void SystemYield()
             return;
         }
 
-        jumpToBootloader();
+        resetIntoBootloader();
         return;
     }
 
@@ -6144,9 +6162,19 @@ void jumpToBootloader()
     const uint32_t bootJumpAddress = *(__IO uint32_t *)(kSystemBootloaderAddr + 4U);
     void (*bootJump)(void)        = (void (*)(void))bootJumpAddress;
 
-    SerialDisplay.end();
-    SerialLora.end();
-    SerialRS485.end();
+    if (serialLinksStarted)
+    {
+        SerialDisplay.flush();
+        SerialLora.flush();
+        SerialRS485.flush();
+        SerialDisplay.end();
+        SerialLora.end();
+        SerialRS485.end();
+        serialLinksStarted = false;
+    }
+
+    HAL_RCC_DeInit();
+    HAL_DeInit();
 
     __disable_irq();
 
@@ -6156,23 +6184,16 @@ void jumpToBootloader()
         NVIC->ICPR[i] = 0xFFFFFFFF;
     }
 
-    // Сброс всех периферийных устройств (опционально, но рекомендуется)
-    RCC->APB1RSTR = 0xFFFFFFFF;
-    RCC->APB1RSTR = 0x00000000;
-    RCC->APB2RSTR = 0xFFFFFFFF;
-    RCC->APB2RSTR = 0x00000000;
-    RCC->AHB1RSTR = 0xFFFFFFFF;
-    RCC->AHB1RSTR = 0x00000000;
-    RCC->AHB2RSTR = 0xFFFFFFFF;
-    RCC->AHB2RSTR = 0x00000000;
-
-    // Отключаем SysTick
     SysTick->CTRL = 0;
     SysTick->LOAD = 0;
     SysTick->VAL  = 0;
 
-    pinMode(ZOOMER, OUTPUT);
-    digitalWrite(ZOOMER, LOW);
+#if defined(__HAL_RCC_SYSCFG_CLK_ENABLE)
+    __HAL_RCC_SYSCFG_CLK_ENABLE();
+#endif
+#if defined(__HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH)
+    __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+#endif
 
     SCB->VTOR = kSystemBootloaderAddr;
     __DSB();
@@ -6442,6 +6463,46 @@ static void scheduleBootloaderEntry()
     pendingBootloaderEntry = true;
     bootloaderStopDone     = false;
     bootloaderEntryAtMs    = millis();
+}
+
+static void enableBackupSramAccess(uint32_t readyTimeoutMs)
+{
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+    __HAL_RCC_BKPSRAM_CLK_ENABLE();
+    HAL_PWREx_EnableBkUpReg();
+
+    const uint32_t start = millis();
+    while (__HAL_PWR_GET_FLAG(PWR_FLAG_BRR) == RESET && (millis() - start) < readyTimeoutMs)
+    {
+    }
+}
+
+static bool consumeBootloaderResetRequest()
+{
+    enableBackupSramAccess(100);
+    if (*bootloaderMagicWord != BOOTLOADER_MAGIC_WORD || *bootloaderMagicConfirm != BOOTLOADER_MAGIC_CONFIRM_WORD)
+        return false;
+
+    *bootloaderMagicWord    = 0;
+    *bootloaderMagicConfirm = 0;
+    return true;
+}
+
+static void requestBootloaderResetEntry()
+{
+    enableBackupSramAccess(100);
+    *bootloaderMagicWord    = BOOTLOADER_MAGIC_WORD;
+    *bootloaderMagicConfirm = BOOTLOADER_MAGIC_CONFIRM_WORD;
+}
+
+static void resetIntoBootloader()
+{
+    requestBootloaderResetEntry();
+    HAL_NVIC_SystemReset();
+    while (1)
+    {
+    }
 }
 
 static inline bool isSupportedCommand(uint8_t cmd)
