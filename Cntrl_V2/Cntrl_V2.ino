@@ -20,6 +20,8 @@
 #define CONNECTION_LOGS 0
 #endif
 
+constexpr size_t LOG_FORMAT_MAX_PRINTABLE_CHARS = 255;
+
 #if CONNECTION_LOGS
 #define DIAG_ONLY(code)                                                                                                     \
     do                                                                                                                      \
@@ -37,7 +39,8 @@
     do                                                                                                                      \
     {                                                                                                                       \
         static_assert(                                                                                                      \
-            sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS, "Log format string too long! Max 54 printable chars.");          \
+            sizeof(format) - 1 <= LOG_FORMAT_MAX_PRINTABLE_CHARS,                                                           \
+            "Log format string too long for logStringBuffer.");                                                             \
         static uint32_t lastLog = 0;                                                                                        \
         if (millis() - lastLog > (interval))                                                                                \
         {                                                                                                                   \
@@ -50,8 +53,8 @@
     do                                                                                                                      \
     {                                                                                                                       \
         static_assert(                                                                                                      \
-            sizeof(format) - 1 <= LOG_MAX_PRINTABLE_CHARS,                                                                  \
-            "makeLog: format string literal exceeds LOG_MAX_PRINTABLE_CHARS (54)!");                                        \
+            sizeof(format) - 1 <= LOG_FORMAT_MAX_PRINTABLE_CHARS,                                                           \
+            "makeLog: format string literal exceeds logStringBuffer capacity.");                                             \
         makeLogImpl(level, format, ##__VA_ARGS__);                                                                          \
     } while (0)
 
@@ -337,6 +340,7 @@ EEPROMData eepromData;
 
 volatile bool      pendingEepromSave       = false;
 constexpr uint32_t kBootloaderEntryGraceMs = 60;
+constexpr uint32_t kSystemBootloaderAddr   = 0x1FFF0000UL;
 volatile bool      pendingBootloaderEntry  = false;
 volatile bool      bootloaderStopDone      = false;
 volatile uint32_t  bootloaderEntryAtMs     = 0;
@@ -6136,9 +6140,21 @@ bool isLeapYear(int year)
 // Программный переход в загрузчик DFU
 void jumpToBootloader()
 {
-    // while (1) {digitalToggle(BOARD_LED); delay(100); IWatchdog.reload();}
-    // Отключаем все прерывания
+    const uint32_t bootStack       = *(__IO uint32_t *)kSystemBootloaderAddr;
+    const uint32_t bootJumpAddress = *(__IO uint32_t *)(kSystemBootloaderAddr + 4U);
+    void (*bootJump)(void)        = (void (*)(void))bootJumpAddress;
+
+    SerialDisplay.end();
+    SerialLora.end();
+    SerialRS485.end();
+
     __disable_irq();
+
+    for (uint8_t i = 0; i < 8; i++)
+    {
+        NVIC->ICER[i] = 0xFFFFFFFF;
+        NVIC->ICPR[i] = 0xFFFFFFFF;
+    }
 
     // Сброс всех периферийных устройств (опционально, но рекомендуется)
     RCC->APB1RSTR = 0xFFFFFFFF;
@@ -6158,14 +6174,13 @@ void jumpToBootloader()
     pinMode(ZOOMER, OUTPUT);
     digitalWrite(ZOOMER, LOW);
 
-    // Устанавливаем вектор таблицу на адрес загрузчика
-    __set_MSP(*(__IO uint32_t *)0x1FFF0000); // MSP из загрузчика
+    SCB->VTOR = kSystemBootloaderAddr;
+    __DSB();
+    __ISB();
 
-    // Получаем адрес точки входа загрузчика
-    uint32_t bootJumpAddress = *(__IO uint32_t *)(0x1FFF0000 + 4);
-    void (*bootJump)(void)   = (void (*)(void))bootJumpAddress;
-
-    // Переход в загрузчик
+    // Устанавливаем MSP из загрузчика и передаем управление ROM bootloader.
+    __set_MSP(bootStack);
+    __enable_irq();
     bootJump();
 
     // Эта точка не должна быть достигнута
@@ -6639,35 +6654,42 @@ static inline bool shouldAbortLoop()
 
 void sendLog(LogLevel level, const char *msg, Stream *port = &SerialDisplay)
 {
-    if (pendingBootloaderEntry)
+    if (pendingBootloaderEntry || msg == NULL)
         return;
-    uint8_t  logBuffer[300];
-    uint16_t msgLen = strlen(msg);
 
-    if (msgLen > MAX_LOG_STRING_LEN - 1)
+    const char *cursor    = msg;
+    size_t      remaining = strlen(msg);
+
+    do
     {
-        msgLen = MAX_LOG_STRING_LEN - 1;
-    }
+        const uint8_t msgLen =
+            (remaining > LOG_MAX_PRINTABLE_CHARS) ? LOG_MAX_PRINTABLE_CHARS : static_cast<uint8_t>(remaining);
+        uint8_t logBuffer[sizeof(FrameHeader) + 1 + MAX_LOG_STRING_LEN + 2];
 
-    FrameHeader *header = (FrameHeader *)logBuffer;
-    header->sync1       = PROTOCOL_SYNC_1_V2;
-    header->sync2       = PROTOCOL_SYNC_2_V2;
-    header->length      = 1 + msgLen + 1;
-    header->targetID    = TARGET_ID_NONE;
+        FrameHeader *header = (FrameHeader *)logBuffer;
+        header->sync1       = PROTOCOL_SYNC_1_V2;
+        header->sync2       = PROTOCOL_SYNC_2_V2;
+        header->length      = 1 + msgLen + 1;
+        header->targetID    = TARGET_ID_NONE;
 
-    static uint8_t seqCounter = 0;
-    header->seq               = seqCounter++;
-    header->msgID             = MSG_LOG;
+        static uint8_t seqCounter = 0;
+        header->seq               = seqCounter++;
+        header->msgID             = MSG_LOG;
 
-    logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
+        logBuffer[sizeof(FrameHeader)] = (uint8_t)level;
 
-    memcpy(logBuffer + sizeof(FrameHeader) + 1, msg, msgLen);
-    logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0';
+        memcpy(logBuffer + sizeof(FrameHeader) + 1, cursor, msgLen);
+        logBuffer[sizeof(FrameHeader) + 1 + msgLen] = '\0';
 
-    uint16_t totalLen = sizeof(FrameHeader) + header->length;
-    ProtocolUtils::appendCRC(logBuffer, totalLen);
+        uint16_t totalLen = sizeof(FrameHeader) + header->length;
+        ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-    writeTransportPayload(port, logBuffer, totalLen + 2, NULL);
+        if (writeTransportPayload(port, logBuffer, totalLen + 2, NULL) != totalLen + 2)
+            break;
+
+        cursor += msgLen;
+        remaining -= msgLen;
+    } while (remaining > 0);
 }
 
 void makeLogImpl(LogLevel level, const char *format, ...)

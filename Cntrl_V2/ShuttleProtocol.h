@@ -10,9 +10,6 @@ constexpr uint8_t PROTOCOL_VER       = 2;
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
 
-constexpr uint8_t MAX_LOG_STRING_LEN      = 55;
-constexpr uint8_t LOG_MAX_PRINTABLE_CHARS = MAX_LOG_STRING_LEN - 1;
-
 #pragma pack(push, 1)
 
 typedef struct
@@ -24,6 +21,16 @@ typedef struct
     uint8_t seq;      // Rolling sequence counter (0-255)
     uint8_t length;   // Length of Payload ONLY (excludes header and CRC)
 } FrameHeader;
+
+constexpr uint8_t PROTOCOL_CRC_SIZE       = 2;
+constexpr uint8_t PROTOCOL_MAX_FRAME_SIZE = 128;
+constexpr uint8_t LOG_LEVEL_FIELD_SIZE    = 1;
+constexpr uint8_t MAX_LOG_STRING_LEN =
+    static_cast<uint8_t>(PROTOCOL_MAX_FRAME_SIZE - sizeof(FrameHeader) - PROTOCOL_CRC_SIZE - LOG_LEVEL_FIELD_SIZE);
+constexpr uint8_t LOG_MAX_PRINTABLE_CHARS = MAX_LOG_STRING_LEN - 1;
+static_assert(
+    sizeof(FrameHeader) + LOG_LEVEL_FIELD_SIZE + MAX_LOG_STRING_LEN + PROTOCOL_CRC_SIZE <= PROTOCOL_MAX_FRAME_SIZE,
+    "MSG_LOG frame exceeds PROTOCOL_MAX_FRAME_SIZE");
 
 enum MsgID : uint8_t
 {
@@ -37,7 +44,7 @@ enum MsgID : uint8_t
     MSG_LINK_HEALTH   = 0x07, // Shuttle -> Display/backend: radio link diagnostics
 
     // Asynchronous
-    MSG_LOG = 0x10, // Shuttle -> Display: Truncated vsnprintf string
+    MSG_LOG = 0x10, // Shuttle/Display -> backend: bounded log string frame
 
     // Configuration
     MSG_CONFIG_SET       = 0x20, // Pult/Display -> Shuttle: Set single EEPROM param
@@ -306,7 +313,7 @@ struct DateTimePacket
 struct LogPacket
 {
     uint8_t logLevel;
-    char    message[MAX_LOG_STRING_LEN]; // Null terminated via vsnprintf
+    char    message[MAX_LOG_STRING_LEN]; // Null terminated; long logs may be sent as multiple frames
 };
 
 // Used with MSG_ACK (2 bytes)
@@ -406,6 +413,8 @@ class ProtocolParser
 
     ProtocolParser()
     {
+        for (uint16_t i = 0; i < sizeof(rxBuffer); ++i)
+            rxBuffer[i] = 0;
         reset();
     }
 
@@ -458,7 +467,8 @@ class ProtocolParser
             rxBuffer[rxIndex++] = byte;
             if (rxIndex >= sizeof(FrameHeader))
             {
-                FrameHeader *header = (FrameHeader *)rxBuffer;
+                // cppcheck-suppress dangerousTypeCast
+                FrameHeader *header = reinterpret_cast<FrameHeader *>(rxBuffer);
                 payloadLen          = header->length;
 
                 if (payloadLen > sizeof(rxBuffer) - sizeof(FrameHeader) - 2)
@@ -498,7 +508,8 @@ class ProtocolParser
 
                 if (receivedCRC == calculatedCRC)
                 {
-                    return (FrameHeader *)rxBuffer;
+                    // cppcheck-suppress dangerousTypeCast
+                    return reinterpret_cast<FrameHeader *>(rxBuffer);
                 }
                 else
                 {
@@ -516,7 +527,7 @@ class ProtocolParser
     uint32_t                  lastRxTime    = 0;
     static constexpr uint32_t RX_TIMEOUT_MS = 250;
 
-    uint8_t  rxBuffer[64];
+    uint8_t  rxBuffer[PROTOCOL_MAX_FRAME_SIZE];
     uint16_t rxIndex;
     uint8_t  payloadLen;
 };
