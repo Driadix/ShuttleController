@@ -20,7 +20,47 @@
 #define CONNECTION_LOGS 0
 #endif
 
+#ifndef I2C_DIAG_LOGS
+#define I2C_DIAG_LOGS 1
+#endif
+
 constexpr size_t LOG_FORMAT_MAX_PRINTABLE_CHARS = 255;
+
+enum BreadcrumbStage : uint8_t
+{
+    BC_BOOT = 1,
+    BC_LOOP,
+    BC_SYSTEM_YIELD,
+    BC_BMS_TICK,
+    BC_TX_TELEMETRY,
+    BC_TX_SENSORS,
+    BC_TX_STATS,
+    BC_TX_LINK_HEALTH,
+    BC_POLL_DISPLAY,
+    BC_POLL_RADIO,
+    BC_TOF_POLL,
+    BC_TOF_PREFLIGHT,
+    BC_TOF_PROBE,
+    BC_TOF_READ,
+    BC_TOF_RECOVERY,
+    BC_AS5600_ANGLE,
+    BC_SERIAL_COMMAND
+};
+
+#pragma pack(push, 1)
+struct BreadcrumbRecord
+{
+    uint32_t magicWord;
+    uint32_t sequence;
+    uint32_t millisAt;
+    uint8_t  stage;
+    uint8_t  sensor;
+    uint8_t  status;
+    uint8_t  detail;
+    uint16_t crc16;
+    uint16_t reserved;
+};
+#pragma pack(pop)
 
 #if CONNECTION_LOGS
 #define DIAG_ONLY(code)                                                                                                     \
@@ -59,6 +99,11 @@ constexpr size_t LOG_FORMAT_MAX_PRINTABLE_CHARS = 255;
     } while (0)
 
 void                           makeLogImpl(LogLevel level, const char *format, ...);
+static const char             *breadcrumbStageName(uint8_t stage);
+static bool                    readBreadcrumb(BreadcrumbRecord *out);
+static void                    writeBreadcrumb(BreadcrumbStage stage, uint8_t sensor = 0xFF, uint8_t status = 0, uint8_t detail = 0);
+static void                    logPreviousBreadcrumbIfWatchdog(uint32_t resetFlags);
+static void                    logBreadcrumbSummaryIfDue(uint32_t now);
 static inline bool             isValidProvisionedShuttleId(int32_t id);
 static inline bool             isProvisionedShuttle();
 static inline bool             isSupportedCommand(uint8_t cmd);
@@ -126,6 +171,9 @@ static void                  batterySafetyCheck(uint32_t now);
 static void                  batterySafetyReset(uint32_t now);
 static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
+static inline bool           tofBusLinesReady();
+static bool                  recoverTofI2cBusIfNeeded();
+static bool                  tofDiagNeedsRecovery(const TofI2cDiagnostics &diag);
 static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
 static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
 static void                  logRadioEnsureFailure(
@@ -198,6 +246,10 @@ void jumpToBootloader();
 #define BOOTLOADER_MAGIC_ADDR (BKPSRAM_BASE_ADDR + 0x0FF0)
 #define BOOTLOADER_MAGIC_CONFIRM_WORD 0x4FF8EF52UL
 #define BOOTLOADER_MAGIC_CONFIRM_ADDR (BKPSRAM_BASE_ADDR + 0x0FF4)
+#define DIAG_BREADCRUMB_MAGIC_WORD 0xBADC0DE5UL
+#define DIAG_BREADCRUMB_OFFSET     0x0F80
+#define DIAG_BREADCRUMB_ADDR       (BKPSRAM_BASE_ADDR + DIAG_BREADCRUMB_OFFSET)
+#define DIAG_BREADCRUMB_MAX_AGE_MS 600000UL
 
 #pragma pack(push, 1)
 struct SecureStats
@@ -209,11 +261,18 @@ struct SecureStats
 };
 #pragma pack(pop)
 
+static_assert(sizeof(SecureStats) <= DIAG_BREADCRUMB_OFFSET, "SecureStats overlaps diagnostic breadcrumb.");
+static_assert(
+    DIAG_BREADCRUMB_OFFSET + sizeof(BreadcrumbRecord) <= 0x0FE8,
+    "Diagnostic breadcrumb overlaps reset markers.");
+
 SecureStats *volatile sramStats = (SecureStats *)BKPSRAM_BASE_ADDR;
 static volatile uint32_t *const resetMarkerMagic = (volatile uint32_t *)RESET_MARKER_MAGIC_ADDR;
 static volatile uint32_t *const resetMarkerFlags = (volatile uint32_t *)RESET_MARKER_FLAGS_ADDR;
 static volatile uint32_t *const bootloaderMagicWord = (volatile uint32_t *)BOOTLOADER_MAGIC_ADDR;
 static volatile uint32_t *const bootloaderMagicConfirm = (volatile uint32_t *)BOOTLOADER_MAGIC_CONFIRM_ADDR;
+static volatile BreadcrumbRecord *const diagBreadcrumb = (volatile BreadcrumbRecord *)DIAG_BREADCRUMB_ADDR;
+static uint32_t breadcrumbSequence = 0;
 
 ProtocolParser               parserRadio;
 ProtocolParser               parserDisplay;
@@ -508,8 +567,10 @@ static BmsDdA5::Config makeBatteryPollConfig()
 static uint8_t  tofSensorErrors[4]          = { 0, 0, 0, 0 };
 static uint8_t  tofProbeErrors[4]           = { 0, 0, 0, 0 };
 static uint8_t  tofReadErrors[4]            = { 0, 0, 0, 0 };
+static uint8_t  tofTimeoutErrors[4]         = { 0, 0, 0, 0 };
+static uint8_t  tofBusErrors[4]             = { 0, 0, 0, 0 };
+static uint8_t  tofLastDiagStatus[4]        = { TOF_I2C_OK, TOF_I2C_OK, TOF_I2C_OK, TOF_I2C_OK };
 static uint16_t tofDistanceFault            = 0;
-static uint32_t tofLastI2cRecoveryMs        = 0;
 static uint32_t tofLastI2cRecoveryLogMs     = 0;
 static bool     tofI2cRecoveryLogged        = false;
 static uint32_t tofI2cRecoveryCount         = 0;
@@ -524,6 +585,203 @@ volatile uint8_t  crashSourceMask = 0;
 volatile uint16_t crashIrqCount = 0;
 static uint32_t   crashLastLogMs = 0;
 
+static const char *breadcrumbStageName(uint8_t stage)
+{
+    switch ((BreadcrumbStage)stage)
+    {
+    case BC_BOOT:
+        return "boot";
+    case BC_LOOP:
+        return "loop";
+    case BC_SYSTEM_YIELD:
+        return "yield";
+    case BC_BMS_TICK:
+        return "bms";
+    case BC_TX_TELEMETRY:
+        return "tx_tel";
+    case BC_TX_SENSORS:
+        return "tx_sen";
+    case BC_TX_STATS:
+        return "tx_stat";
+    case BC_TX_LINK_HEALTH:
+        return "tx_link";
+    case BC_POLL_DISPLAY:
+        return "disp_rx";
+    case BC_POLL_RADIO:
+        return "rad_rx";
+    case BC_TOF_POLL:
+        return "tof_poll";
+    case BC_TOF_PREFLIGHT:
+        return "tof_pre";
+    case BC_TOF_PROBE:
+        return "tof_probe";
+    case BC_TOF_READ:
+        return "tof_read";
+    case BC_TOF_RECOVERY:
+        return "tof_rec";
+    case BC_AS5600_ANGLE:
+        return "as5600";
+    case BC_SERIAL_COMMAND:
+        return "cmd";
+    default:
+        return "unknown";
+    }
+}
+
+static uint16_t breadcrumbCrc(const BreadcrumbRecord &record)
+{
+    BreadcrumbRecord crcRecord = record;
+    crcRecord.magicWord        = 0;
+    crcRecord.crc16            = 0;
+    return ProtocolUtils::calcCRC16((uint8_t *)&crcRecord, sizeof(BreadcrumbRecord));
+}
+
+static bool readBreadcrumb(BreadcrumbRecord *out)
+{
+    if (out == nullptr)
+    {
+        return false;
+    }
+
+    BreadcrumbRecord local;
+    local.magicWord = diagBreadcrumb->magicWord;
+    local.sequence  = diagBreadcrumb->sequence;
+    local.millisAt  = diagBreadcrumb->millisAt;
+    local.stage     = diagBreadcrumb->stage;
+    local.sensor    = diagBreadcrumb->sensor;
+    local.status    = diagBreadcrumb->status;
+    local.detail    = diagBreadcrumb->detail;
+    local.crc16     = diagBreadcrumb->crc16;
+    local.reserved  = diagBreadcrumb->reserved;
+
+    if (local.magicWord != DIAG_BREADCRUMB_MAGIC_WORD)
+    {
+        return false;
+    }
+    if (breadcrumbCrc(local) != local.crc16)
+    {
+        return false;
+    }
+
+    *out = local;
+    return true;
+}
+
+static void writeBreadcrumb(BreadcrumbStage stage, uint8_t sensor, uint8_t status, uint8_t detail)
+{
+    BreadcrumbRecord local = {};
+    local.magicWord       = DIAG_BREADCRUMB_MAGIC_WORD;
+    local.sequence        = ++breadcrumbSequence;
+    local.millisAt        = millis();
+    local.stage           = (uint8_t)stage;
+    local.sensor          = sensor;
+    local.status          = status;
+    local.detail          = detail;
+    local.crc16           = breadcrumbCrc(local);
+
+    __disable_irq();
+    diagBreadcrumb->magicWord = 0;
+    diagBreadcrumb->sequence  = local.sequence;
+    diagBreadcrumb->millisAt  = local.millisAt;
+    diagBreadcrumb->stage     = local.stage;
+    diagBreadcrumb->sensor    = local.sensor;
+    diagBreadcrumb->status    = local.status;
+    diagBreadcrumb->detail    = local.detail;
+    diagBreadcrumb->crc16     = local.crc16;
+    diagBreadcrumb->reserved  = 0;
+    diagBreadcrumb->magicWord = local.magicWord;
+    __enable_irq();
+}
+
+static void logPreviousBreadcrumbIfWatchdog(uint32_t resetFlags)
+{
+#if I2C_DIAG_LOGS
+    if ((resetFlags & RESET_REASON_WATCHDOG) == 0)
+    {
+        return;
+    }
+
+    BreadcrumbRecord previous;
+    if (!readBreadcrumb(&previous))
+    {
+        return;
+    }
+
+    if (previous.sequence > breadcrumbSequence)
+    {
+        breadcrumbSequence = previous.sequence;
+    }
+
+    makeLog(
+        LOG_WARN,
+        "BC prev rst=%s bc=%s q=%lu ms=%lu s=%u st=%u d=%u c=%u",
+        primaryResetCategoryName(resetFlags),
+        breadcrumbStageName(previous.stage),
+        (unsigned long)previous.sequence,
+        (unsigned long)previous.millisAt,
+        previous.sensor,
+        previous.status,
+        previous.detail,
+        previous.crc16);
+#else
+    (void)resetFlags;
+#endif
+}
+
+static void logBreadcrumbSummaryIfDue(uint32_t now)
+{
+#if I2C_DIAG_LOGS
+    static uint32_t lastLogMs = 0;
+    if (now - lastLogMs < 5000U)
+    {
+        return;
+    }
+    lastLogMs = now;
+
+    BreadcrumbRecord current;
+    if (!readBreadcrumb(&current))
+    {
+        return;
+    }
+
+    uint32_t age = (now >= current.millisAt) ? now - current.millisAt : DIAG_BREADCRUMB_MAX_AGE_MS;
+    if (age > DIAG_BREADCRUMB_MAX_AGE_MS)
+    {
+        age = DIAG_BREADCRUMB_MAX_AGE_MS;
+    }
+
+    uint16_t timeoutTotal = 0;
+    uint16_t busTotal     = 0;
+    for (uint8_t i = 0; i < 4; ++i)
+    {
+        timeoutTotal += tofTimeoutErrors[i];
+        busTotal += tofBusErrors[i];
+    }
+
+    makeLog(
+        LOG_DEBUG,
+        "BC %s q=%lu age=%lu s=%u st=%u t=%u b=%u rec=%lu io=%u/%u",
+        breadcrumbStageName(current.stage),
+        (unsigned long)current.sequence,
+        (unsigned long)age,
+        current.sensor,
+        current.status,
+        timeoutTotal,
+        busTotal,
+        (unsigned long)tofI2cRecoveryCount,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+#else
+    (void)now;
+#endif
+}
+
+static bool tofDiagNeedsRecovery(const TofI2cDiagnostics &diag)
+{
+    return diag.status == TOF_I2C_HAL_TIMEOUT || diag.status == TOF_I2C_HAL_BUSY ||
+           diag.status == TOF_I2C_NO_HANDLE || diag.status == TOF_I2C_BUS_STUCK;
+}
+
 static void initTofI2cBus()
 {
     Wire.setSDA(TOF_I2C_SDA);
@@ -535,10 +793,7 @@ static void initTofI2cBus()
 static void recoverTofI2cBus()
 {
     uint32_t now = millis();
-
-    if (now - tofLastI2cRecoveryMs < 250U)
-        return;
-    tofLastI2cRecoveryMs = now;
+    writeBreadcrumb(BC_TOF_RECOVERY, 0xFF, 0, 0);
     tofI2cRecoveryCount++;
     const uint8_t sdaBefore = digitalRead(TOF_I2C_SDA);
     const uint8_t sclBefore = digitalRead(TOF_I2C_SCL);
@@ -586,23 +841,40 @@ static void recoverTofI2cBus()
     {
         makeLog(
             LOG_WARN,
-            "TOF I2C recovery #%lu SDA/SCL %u/%u->%u/%u p=%u/%u/%u/%u r=%u/%u/%u/%u",
+            "TOF I2C rec #%lu io=%u/%u>%u/%u t=%u/%u/%u/%u b=%u/%u/%u/%u",
             (unsigned long)tofI2cRecoveryCount,
             sdaBefore,
             sclBefore,
             sdaAfter,
             sclAfter,
-            tofProbeErrors[0],
-            tofProbeErrors[1],
-            tofProbeErrors[2],
-            tofProbeErrors[3],
-            tofReadErrors[0],
-            tofReadErrors[1],
-            tofReadErrors[2],
-            tofReadErrors[3]);
+            tofTimeoutErrors[0],
+            tofTimeoutErrors[1],
+            tofTimeoutErrors[2],
+            tofTimeoutErrors[3],
+            tofBusErrors[0],
+            tofBusErrors[1],
+            tofBusErrors[2],
+            tofBusErrors[3]);
         tofI2cRecoveryLogged   = true;
         tofLastI2cRecoveryLogMs = now;
     }
+}
+
+static inline bool tofBusLinesReady()
+{
+    return digitalRead(TOF_I2C_SDA) == HIGH && digitalRead(TOF_I2C_SCL) == HIGH;
+}
+
+static bool recoverTofI2cBusIfNeeded()
+{
+    if (tofBusLinesReady())
+    {
+        return true;
+    }
+
+    writeBreadcrumb(BC_TOF_PREFLIGHT, 0xFF, TOF_I2C_BUS_STUCK, 0);
+    recoverTofI2cBus();
+    return tofBusLinesReady();
 }
 
 static BmsDdA5Firmware::Adapter batteryBms(SerialRS485, RS485, makeLogImpl, makeBatteryPollConfig());
@@ -699,6 +971,7 @@ void setup()
 
     initStatsSRAM();
     recordBootResetCause();
+    writeBreadcrumb(BC_BOOT, 0xFF, 0, 0);
     __HAL_RCC_CLEAR_RESET_FLAGS();
 
     read_EEPROM_Data();
@@ -774,6 +1047,7 @@ void setup()
 // Основной цикл
 void loop()
 {
+    writeBreadcrumb(BC_LOOP, 0xFF, 0, 0);
     SystemYield();
     handlePendingCrash();
 
@@ -2432,7 +2706,7 @@ static void incrementTofFailureCounter(uint8_t &counter)
     }
 }
 
-static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFailure)
+static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFailure, const TofI2cDiagnostics *diag)
 {
     incrementTofFailureCounter(tofSensorErrors[sensor]);
     if (probeFailure)
@@ -2444,8 +2718,23 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
         incrementTofFailureCounter(tofReadErrors[sensor]);
     }
 
+    if (diag != nullptr)
+    {
+        tofLastDiagStatus[sensor] = (uint8_t)diag->status;
+        if (diag->status == TOF_I2C_HAL_TIMEOUT)
+        {
+            incrementTofFailureCounter(tofTimeoutErrors[sensor]);
+        }
+        if (diag->status == TOF_I2C_BUS_STUCK || diag->status == TOF_I2C_HAL_BUSY ||
+            diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_HAL_ERROR)
+        {
+            incrementTofFailureCounter(tofBusErrors[sensor]);
+        }
+    }
+
     data[sensor][filterIndex] = 1500;
 
+    bool recoveryRequested = false;
     if (tofSensorErrors[sensor] >= 7)
     {
         setFault(tofFaultForSensor(sensor));
@@ -2453,25 +2742,36 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
         {
             makeLog(
                 LOG_ERROR,
-                "TOF %s failed probe=%u read=%u SDA=%u SCL=%u",
+                "TOF %s fail p=%u r=%u t=%u b=%u st=%u io=%u/%u",
                 tofNameForSensor(sensor),
                 tofProbeErrors[sensor],
                 tofReadErrors[sensor],
+                tofTimeoutErrors[sensor],
+                tofBusErrors[sensor],
+                tofLastDiagStatus[sensor],
                 digitalRead(TOF_I2C_SDA),
                 digitalRead(TOF_I2C_SCL));
         }
 
-        if (tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 &&
-            tofSensorErrors[3] >= 7)
+        const bool allSensorsFailed =
+            tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 && tofSensorErrors[3] >= 7;
+        if (allSensorsFailed)
         {
             recoverTofI2cBus();
+            recoveryRequested = true;
         }
+    }
+
+    if (!recoveryRequested && diag != nullptr && (tofDiagNeedsRecovery(*diag) || !tofBusLinesReady()))
+    {
+        recoverTofI2cBus();
     }
 }
 
 static void recordTofSuccess(uint8_t sensor)
 {
-    if (tofSensorErrors[sensor] == 0 && tofProbeErrors[sensor] == 0 && tofReadErrors[sensor] == 0)
+    if (tofSensorErrors[sensor] == 0 && tofProbeErrors[sensor] == 0 && tofReadErrors[sensor] == 0 &&
+        tofTimeoutErrors[sensor] == 0 && tofBusErrors[sensor] == 0)
     {
         return;
     }
@@ -2481,11 +2781,13 @@ static void recordTofSuccess(uint8_t sensor)
     {
         makeLog(
             LOG_INFO,
-            "TOF %s recovered total=%u probe=%u read=%u SDA=%u SCL=%u",
+            "TOF %s rec total=%u p=%u r=%u t=%u b=%u io=%u/%u",
             tofNameForSensor(sensor),
             tofSensorErrors[sensor],
             tofProbeErrors[sensor],
             tofReadErrors[sensor],
+            tofTimeoutErrors[sensor],
+            tofBusErrors[sensor],
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
         tofLastRecoverySummaryLogMs = now;
@@ -2494,6 +2796,9 @@ static void recordTofSuccess(uint8_t sensor)
     tofSensorErrors[sensor] = 0;
     tofProbeErrors[sensor]  = 0;
     tofReadErrors[sensor]   = 0;
+    tofTimeoutErrors[sensor] = 0;
+    tofBusErrors[sensor]     = 0;
+    tofLastDiagStatus[sensor] = TOF_I2C_OK;
 }
 
 // Опрос всех сенсоров расстояния
@@ -2510,19 +2815,49 @@ void get_Distance()
     if (currentSensor == 3)
         filterCount = (filterCount + 1) % 5;
 
-    if (!TOF_Is_Device_Present(currentSensor + 1))
+    const uint8_t sensorId = currentSensor + 1;
+    writeBreadcrumb(BC_TOF_POLL, currentSensor, 0, filterCount);
+
+    if (!recoverTofI2cBusIfNeeded())
     {
-        recordTofFailure(currentSensor, filterCount, true);
+        TofI2cDiagnostics diag = {};
+        diag.status            = TOF_I2C_BUS_STUCK;
+        diag.address           = TOF_BASE_I2C_ADDR + sensorId;
+        writeBreadcrumb(BC_TOF_PREFLIGHT, currentSensor, diag.status, filterCount);
+        recordTofFailure(currentSensor, filterCount, true, &diag);
         return;
     }
 
-    if (!TOF_Inquire_I2C_Decoding_ByID(currentSensor + 1, &sensor))
+    TofI2cDiagnostics diag = {};
+    writeBreadcrumb(BC_TOF_PROBE, currentSensor, 0, filterCount);
+    if (!TOF_Is_Device_Present(sensorId, &diag))
     {
-        recordTofFailure(currentSensor, filterCount, false);
+        writeBreadcrumb(BC_TOF_PROBE, currentSensor, diag.status, (uint8_t)diag.halError);
+        recordTofFailure(currentSensor, filterCount, true, &diag);
+        return;
+    }
+
+    if (!recoverTofI2cBusIfNeeded())
+    {
+        diag                   = {};
+        diag.status            = TOF_I2C_BUS_STUCK;
+        diag.address           = TOF_BASE_I2C_ADDR + sensorId;
+        writeBreadcrumb(BC_TOF_PREFLIGHT, currentSensor, diag.status, filterCount);
+        recordTofFailure(currentSensor, filterCount, false, &diag);
+        return;
+    }
+
+    diag = {};
+    writeBreadcrumb(BC_TOF_READ, currentSensor, 0, filterCount);
+    if (!TOF_Inquire_I2C_Decoding_ByID(sensorId, &sensor, &diag))
+    {
+        writeBreadcrumb(BC_TOF_READ, currentSensor, diag.status, (uint8_t)diag.halError);
+        recordTofFailure(currentSensor, filterCount, false, &diag);
         return;
     }
 
     recordTofSuccess(currentSensor);
+    writeBreadcrumb(BC_TOF_POLL, currentSensor, TOF_I2C_OK, filterCount);
     uint16_t dist = sensor.dis;
 
     if ((dist <= 1500 && sensor.signal_strength > 100) || dist > 1500)
@@ -5494,6 +5829,7 @@ void demo_Mode()
 void SystemYield()
 {
     uint32_t currentMillis = millis();
+    writeBreadcrumb(BC_SYSTEM_YIELD, 0xFF, 0, 0);
     IWatchdog.reload();
     alertMan.processTimeouts(currentMillis);
     handlePendingCrash();
@@ -5538,6 +5874,7 @@ void SystemYield()
     }
     retryRadioConfigIfIdle(currentMillis);
 
+    writeBreadcrumb(BC_BMS_TICK, 0xFF, 0, 0);
     batteryBms.tick(currentMillis, mapBatteryActivity());
     batteryCharge = batteryBms.socPercent();
     batterySafetyCheck(currentMillis);
@@ -5547,6 +5884,7 @@ void SystemYield()
         if (SerialDisplay.availableForWrite() >= (int)(sizeof(TelemetryPacket) + sizeof(FrameHeader) + 2U))
         {
             timerTelemetry = currentMillis;
+            writeBreadcrumb(BC_TX_TELEMETRY, 0xFF, 0, 0);
             sendTelemetryPacket(&SerialDisplay);
         }
     }
@@ -5555,6 +5893,7 @@ void SystemYield()
         if (SerialDisplay.availableForWrite() >= (int)(sizeof(SensorPacket) + sizeof(FrameHeader) + 2U))
         {
             timerSensors = currentMillis;
+            writeBreadcrumb(BC_TX_SENSORS, 0xFF, 0, 0);
             sendSensorPacket(&SerialDisplay);
         }
     }
@@ -5563,6 +5902,7 @@ void SystemYield()
         if (SerialDisplay.availableForWrite() >= (int)(sizeof(StatsPacket) + sizeof(FrameHeader) + 2U))
         {
             timerStats = currentMillis;
+            writeBreadcrumb(BC_TX_STATS, 0xFF, 0, 0);
             sendStatsPacket(&SerialDisplay);
         }
     }
@@ -5576,6 +5916,7 @@ void SystemYield()
             timerLinkHealth                  = currentMillis;
             lastLinkHealthValid              = linkHealthValid;
             lastLinkHealthValidInitialized   = true;
+            writeBreadcrumb(BC_TX_LINK_HEALTH, 0xFF, linkHealthValid ? 1 : 0, 0);
             sendLinkHealthPacket(&SerialDisplay);
         }
     }
@@ -5585,12 +5926,18 @@ void SystemYield()
         STATS_ATOMIC_UPDATE(sramStats->payload.totalUptimeMinutes++);
     }
 
+    writeBreadcrumb(BC_POLL_DISPLAY, 0xFF, 0, 0);
     uint8_t cmdDisp = pollSerial(SerialDisplay, parserDisplay, false);
     if (pendingBootloaderEntry)
         return;
+    writeBreadcrumb(BC_POLL_RADIO, 0xFF, 0, 0);
     uint8_t cmdRad = pollSerial(SerialLora, parserRadio, true);
     if (pendingBootloaderEntry)
         return;
+    if (cmdDisp != NO_NEW_CMD || cmdRad != NO_NEW_CMD)
+    {
+        writeBreadcrumb(BC_SERIAL_COMMAND, 0xFF, cmdRad != NO_NEW_CMD ? cmdRad : cmdDisp, cmdDisp != NO_NEW_CMD ? 1 : 2);
+    }
 
     if (cmdDisp == CMD_STOP || cmdDisp == CMD_STOP_MANUAL || cmdRad == CMD_STOP || cmdRad == CMD_STOP_MANUAL)
     {
@@ -5687,6 +6034,8 @@ void SystemYield()
     {
         performSystemReset();
     }
+
+    logBreadcrumbSummaryIfDue(currentMillis);
 }
 
 static void saveStatsPayload()
@@ -5850,6 +6199,7 @@ static void recordBootResetCause()
         sramStats->payload.resetPinCount,
         sramStats->payload.resetPowerCount,
         sramStats->payload.resetOtherCount);
+    logPreviousBreadcrumbIfWatchdog(flags);
 }
 
 // Процедура калибровки энкодера вперед
@@ -7063,6 +7413,9 @@ static inline void resetTofDiagnostics()
         tofSensorErrors[i] = 0;
         tofProbeErrors[i]  = 0;
         tofReadErrors[i]   = 0;
+        tofTimeoutErrors[i] = 0;
+        tofBusErrors[i]     = 0;
+        tofLastDiagStatus[i] = TOF_I2C_OK;
     }
     tofDistanceFault        = 0;
     tofI2cRecoveryLogged    = false;
@@ -7268,7 +7621,9 @@ void sendSensorPacket(Stream *port)
     pkt.distanceR      = distance[0];
     pkt.distancePltF   = distance[3];
     pkt.distancePltR   = distance[2];
+    writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 0);
     pkt.angle          = as5600.readAngle();
+    writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 1);
     pkt.lifterCurrent  = lifterCurrent;
     pkt.temperature_dC = (int16_t)(temp * 10);
 

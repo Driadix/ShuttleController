@@ -49,10 +49,34 @@ typedef struct
 
 #define IIC_CHANGE_TO_UART_DATA 0x00
 
+enum TofI2cStatus : uint8_t
+{
+    TOF_I2C_OK = 0,
+    TOF_I2C_INVALID_ARG,
+    TOF_I2C_NO_HANDLE,
+    TOF_I2C_HAL_ERROR,
+    TOF_I2C_HAL_BUSY,
+    TOF_I2C_HAL_TIMEOUT,
+    TOF_I2C_SHORT_READ,
+    TOF_I2C_BUS_STUCK
+};
+
+struct TofI2cDiagnostics
+{
+    TofI2cStatus status;
+    uint8_t      address;
+    uint8_t      reg;
+    uint8_t      expected;
+    uint8_t      received;
+    uint32_t     halStatus;
+    uint32_t     halError;
+};
+
 // Функции
-bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data);
+const char *TOF_I2C_Status_Name(TofI2cStatus status);
+bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDiagnostics *diag = nullptr);
 void IIC_Set_ID(uint8_t current_id, uint8_t new_id);
 void IIC_Change_Mode_To_UART(uint8_t id);
-bool TOF_Is_Device_Present(uint8_t id);
+bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag = nullptr);
 
 #endif
