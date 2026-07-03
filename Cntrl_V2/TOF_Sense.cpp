@@ -152,32 +152,40 @@ bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDi
     }
 
     uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
-    uint8_t read_buf[TOF_REGISTER_TOTAL_SIZE] = {};
+    uint8_t read_buf[TOF_MEASUREMENT_BLOCK_SIZE] = {};
 
-    if (!I2C_Read_Nbyte_ByAddr(slave_addr, 0x00, read_buf, TOF_REGISTER_TOTAL_SIZE / 2, diag) ||
-        !I2C_Read_Nbyte_ByAddr(
-            slave_addr, TOF_REGISTER_TOTAL_SIZE / 2, &read_buf[TOF_REGISTER_TOTAL_SIZE / 2], TOF_REGISTER_TOTAL_SIZE / 2, diag))
+    if (!I2C_Read_Nbyte_ByAddr(slave_addr, TOF_MEASUREMENT_REG_START, read_buf, TOF_MEASUREMENT_BLOCK_SIZE, diag))
     {
         memset(tof_data, 0, sizeof(TOF_Parameter));
         return false;
     }
 
-    tof_data->interface_mode = read_buf[TOF_ADDR_MODE] & 0x07;
-    tof_data->id             = read_buf[TOF_ADDR_ID];
-    tof_data->uart_baudrate  = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_UART_BAUDRATE]);
+    // read_buf[0..3]   = system_time       @0x20, uint32_t LE
+    // read_buf[4..7]   = dis               @0x24, uint32_t LE
+    // read_buf[8..9]   = dis_status        @0x28, uint16_t LE
+    // read_buf[10..11] = signal_strength   @0x2A, uint16_t LE
+    // read_buf[12]     = range_precision   @0x2C, uint8_t
     tof_data->system_time = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_SYSTEM_TIME]);
+        ((uint32_t)read_buf[3] << 24) | ((uint32_t)read_buf[2] << 16) |
+        ((uint32_t)read_buf[1] << 8)  | (uint32_t)read_buf[0]);
     tof_data->dis = (uint32_t)(
-        ((uint32_t)read_buf[TOF_ADDR_DIS + 3] << 24) | ((uint32_t)read_buf[TOF_ADDR_DIS + 2] << 16) |
-        ((uint32_t)read_buf[TOF_ADDR_DIS + 1] << 8) | (uint32_t)read_buf[TOF_ADDR_DIS]);
+        ((uint32_t)read_buf[7] << 24) | ((uint32_t)read_buf[6] << 16) |
+        ((uint32_t)read_buf[5] << 8)  | (uint32_t)read_buf[4]);
     tof_data->dis_status =
-        (uint16_t)((uint16_t)read_buf[TOF_ADDR_DIS_STATUS] | ((uint16_t)read_buf[TOF_ADDR_DIS_STATUS + 1] << 8));
+        (uint16_t)((uint16_t)read_buf[8] | ((uint16_t)read_buf[9] << 8));
     tof_data->signal_strength =
-        (uint16_t)((uint16_t)read_buf[TOF_ADDR_SIGNAL_STRENGTH] | ((uint16_t)read_buf[TOF_ADDR_SIGNAL_STRENGTH + 1] << 8));
-    tof_data->range_precision = read_buf[TOF_ADDR_RANGE_PRECISION];
+        (uint16_t)((uint16_t)read_buf[10] | ((uint16_t)read_buf[11] << 8));
+    tof_data->range_precision = read_buf[12];
+
+    if (tof_data->dis_status == 0)
+    {
+        tof_data->dis = 0;
+    }
+
+    tof_data->interface_mode = 0;
+    tof_data->id             = 0;
+    tof_data->uart_baudrate  = 0;
+
     return true;
 }
 
@@ -202,4 +210,38 @@ bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag)
     uint8_t idReg      = 0;
 
     return I2C_Read_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &idReg, TOF_SIZE_ID, diag);
+}
+
+bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,
+                             uint32_t idle_threshold_ms,
+                             TofI2cDiagnostics *diag)
+{
+    if (tof_data == nullptr)
+    {
+        if (diag != nullptr)
+        {
+            tofSetDiag(diag, TOF_I2C_INVALID_ARG, 0, 0, 0, 0, 0, 0);
+        }
+        return false;
+    }
+
+    if (id < TOF_MAX_SENSORS)
+    {
+        static uint32_t last_read_ms[TOF_MAX_SENSORS] = {0};
+
+        if (millis() - last_read_ms[id] >= idle_threshold_ms)
+        {
+            TOF_Parameter discard;
+            (void)TOF_Inquire_I2C_Decoding_ByID(id, &discard, nullptr);
+        }
+
+        const bool ok = TOF_Inquire_I2C_Decoding_ByID(id, tof_data, diag);
+        if (ok)
+        {
+            last_read_ms[id] = millis();
+        }
+        return ok;
+    }
+
+    return TOF_Inquire_I2C_Decoding_ByID(id, tof_data, diag);
 }

@@ -47,6 +47,11 @@ typedef struct
 #define TOF_ADDR_RANGE_PRECISION 0x2c
 #define TOF_SIZE_RANGE_PRECISION 1
 
+// Размер блока данных для одного чтения измерения (system_time + distance + status + signal + precision)
+#define TOF_MEASUREMENT_REG_START  0x20   // первый регистр данных измерения
+#define TOF_MEASUREMENT_BLOCK_SIZE 13     // 0x20..0x2C включительно
+#define TOF_MAX_SENSORS            16     // максимальное количество сенсоров на шине
+
 #define IIC_CHANGE_TO_UART_DATA 0x00
 
 enum TofI2cStatus : uint8_t
@@ -79,4 +84,12 @@ void IIC_Set_ID(uint8_t current_id, uint8_t new_id);
 void IIC_Change_Mode_To_UART(uint8_t id);
 bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag = nullptr);
 
+// Если с момента последнего успешного чтения прошло > idle_threshold_ms,
+// делает preflight read перед основным чтением.
+// idle_threshold_ms = 0 → preflight при каждом вызове.
+bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,
+                             uint32_t idle_threshold_ms = 500,
+                             TofI2cDiagnostics *diag = nullptr);
+
 #endif
+
