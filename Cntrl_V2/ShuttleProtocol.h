@@ -5,7 +5,7 @@
 
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
-constexpr uint8_t PROTOCOL_VER       = 3;
+constexpr uint8_t PROTOCOL_VER       = 4;
 
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
@@ -169,10 +169,13 @@ enum ShuttleFault : uint16_t
     FAULT_TOF_CH_R       = (1 << 2),
     FAULT_TOF_PAL_F      = (1 << 3),
     FAULT_TOF_PAL_R      = (1 << 4),
+    FAULT_BUMPER_F1      = (1 << 5),
+    FAULT_BUMPER_F2      = (1 << 6),
+    FAULT_BUMPER_R1      = (1 << 7),
+    FAULT_BUMPER_R2      = (1 << 8),
     FAULT_LIFTER_TIMEOUT = (1 << 9),
     FAULT_MOTOR_STALL    = (1 << 10),
     FAULT_LOW_BATTERY    = (1 << 11),
-    FAULT_CRASH_BUMPER   = (1 << 12),
     FAULT_MOVE_TIMEOUT   = (1 << 13)
 };
 
@@ -234,6 +237,17 @@ struct BmsExtPacket
     int16_t  ntcTemp_dC[4];
 };
 
+constexpr uint16_t HW_FLAG_PALLET_F1   = (1U << 0);
+constexpr uint16_t HW_FLAG_PALLET_F2   = (1U << 1);
+constexpr uint16_t HW_FLAG_PALLET_R1   = (1U << 2);
+constexpr uint16_t HW_FLAG_PALLET_R2   = (1U << 3);
+constexpr uint16_t HW_FLAG_BUMPER_F1   = (1U << 4);
+constexpr uint16_t HW_FLAG_BUMPER_F2   = (1U << 5);
+constexpr uint16_t HW_FLAG_BUMPER_R1   = (1U << 6);
+constexpr uint16_t HW_FLAG_BUMPER_R2   = (1U << 7);
+constexpr uint16_t HW_FLAG_LIFTER_UP   = (1U << 8);
+constexpr uint16_t HW_FLAG_LIFTER_DOWN = (1U << 9);
+
 struct SensorPacket
 {
     uint16_t distanceF;
@@ -243,7 +257,7 @@ struct SensorPacket
     uint16_t angle;
     int16_t  lifterCurrent;
     int16_t  temperature_dC; // 255 = 25.5C
-    uint16_t hardwareFlags;  // Bitmask for discretes
+    uint16_t hardwareFlags;  // Bitmask using HW_FLAG_* constants
 };
 
 struct StatsPacket
@@ -351,7 +365,10 @@ struct AckTelemPacket
 
 static_assert(sizeof(LinkHealthPacket) == 8, "LinkHealthPacket wire size changed");
 static_assert(sizeof(FrameHeader) + sizeof(LinkHealthPacket) + 2 <= 64, "LinkHealthPacket exceeds parser buffer");
+static_assert(sizeof(TelemetryPacket) == 16, "TelemetryPacket wire size changed");
+static_assert(sizeof(SensorPacket) == 16, "SensorPacket wire size changed");
 static_assert(sizeof(StatsPacket) == 54, "StatsPacket wire size changed");
+static_assert(sizeof(AckTelemPacket) == 18, "AckTelemPacket wire size changed");
 
 class AlertUtils
 {

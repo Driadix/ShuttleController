@@ -6677,6 +6677,31 @@ static void crashR2Irq()
 {
     markCrashFromIsr(CRASH_SRC_R2);
 }
+static inline uint16_t crashFaultMaskFromSources(uint8_t sources)
+{
+    uint16_t faultMask = 0;
+    if (sources & CRASH_SRC_F1)
+        faultMask |= static_cast<uint16_t>(FAULT_BUMPER_F1);
+    if (sources & CRASH_SRC_F2)
+        faultMask |= static_cast<uint16_t>(FAULT_BUMPER_F2);
+    if (sources & CRASH_SRC_R1)
+        faultMask |= static_cast<uint16_t>(FAULT_BUMPER_R1);
+    if (sources & CRASH_SRC_R2)
+        faultMask |= static_cast<uint16_t>(FAULT_BUMPER_R2);
+    return faultMask;
+}
+
+static inline void setBumperFaultsFromMask(uint16_t faultMask)
+{
+    if (faultMask & static_cast<uint16_t>(FAULT_BUMPER_F1))
+        setFault(FAULT_BUMPER_F1);
+    if (faultMask & static_cast<uint16_t>(FAULT_BUMPER_F2))
+        setFault(FAULT_BUMPER_F2);
+    if (faultMask & static_cast<uint16_t>(FAULT_BUMPER_R1))
+        setFault(FAULT_BUMPER_R1);
+    if (faultMask & static_cast<uint16_t>(FAULT_BUMPER_R2))
+        setFault(FAULT_BUMPER_R2);
+}
 
 // Обработка срабатывания бампера из обычного потока, не из ISR.
 static inline void handlePendingCrash()
@@ -6694,8 +6719,9 @@ static inline void handlePendingCrash()
         return;
     }
 
-    const bool wasLatched = (alertMan.getErrorCode() & static_cast<uint16_t>(FAULT_CRASH_BUMPER)) != 0;
-    setFault(FAULT_CRASH_BUMPER);
+    const uint16_t bumperFaultMask = crashFaultMaskFromSources(sources);
+    const uint16_t newFaultMask    = bumperFaultMask & ~alertMan.getErrorCode();
+    setBumperFaultsFromMask(bumperFaultMask);
     status = CMD_STOP;
 
     if (!isPhysicallyStationary())
@@ -6704,7 +6730,7 @@ static inline void handlePendingCrash()
         oldSpeed = 0;
     }
 
-    if (!wasLatched)
+    if (newFaultMask != 0)
     {
         STATS_ATOMIC_UPDATE(sramStats->payload.crashCount++);
     }
@@ -7629,21 +7655,25 @@ void sendSensorPacket(Stream *port)
 
     pkt.hardwareFlags = 0;
     if (detectPalleteF1)
-        pkt.hardwareFlags |= (1 << 0);
+        pkt.hardwareFlags |= HW_FLAG_PALLET_F1;
     if (detectPalleteF2)
-        pkt.hardwareFlags |= (1 << 1);
+        pkt.hardwareFlags |= HW_FLAG_PALLET_F2;
     if (detectPalleteR1)
-        pkt.hardwareFlags |= (1 << 2);
+        pkt.hardwareFlags |= HW_FLAG_PALLET_R1;
     if (detectPalleteR2)
-        pkt.hardwareFlags |= (1 << 3);
-    if (digitalRead(BUMPER_F1) || digitalRead(BUMPER_F2))
-        pkt.hardwareFlags |= (1 << 4);
-    if (digitalRead(BUMPER_R1) || digitalRead(BUMPER_R2))
-        pkt.hardwareFlags |= (1 << 5);
+        pkt.hardwareFlags |= HW_FLAG_PALLET_R2;
+    if (!digitalRead(BUMPER_F1))
+        pkt.hardwareFlags |= HW_FLAG_BUMPER_F1;
+    if (!digitalRead(BUMPER_F2))
+        pkt.hardwareFlags |= HW_FLAG_BUMPER_F2;
+    if (!digitalRead(BUMPER_R1))
+        pkt.hardwareFlags |= HW_FLAG_BUMPER_R1;
+    if (!digitalRead(BUMPER_R2))
+        pkt.hardwareFlags |= HW_FLAG_BUMPER_R2;
     if (!digitalRead(DL_UP))
-        pkt.hardwareFlags |= (1 << 6);
+        pkt.hardwareFlags |= HW_FLAG_LIFTER_UP;
     if (!digitalRead(DL_DOWN))
-        pkt.hardwareFlags |= (1 << 7);
+        pkt.hardwareFlags |= HW_FLAG_LIFTER_DOWN;
 
     FrameHeader *header       = (FrameHeader *)localTxBuffer;
     header->sync1             = PROTOCOL_SYNC_1_V2;
