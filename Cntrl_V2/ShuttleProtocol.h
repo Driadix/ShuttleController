@@ -5,7 +5,7 @@
 
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
-constexpr uint8_t PROTOCOL_VER       = 4;
+constexpr uint8_t PROTOCOL_VER       = 5;
 
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
@@ -41,7 +41,8 @@ enum MsgID : uint8_t
     MSG_REQ_HEARTBEAT = 0x04, // Pult -> Shuttle: Request Heartbeat (Keep-Alive)
     MSG_REQ_SENSORS   = 0x05, // Pult -> Shuttle: Request Sensors
     MSG_REQ_STATS     = 0x06, // Pult -> Shuttle: Request Stats
-    MSG_LINK_HEALTH   = 0x07, // Shuttle -> Display/backend: radio link diagnostics
+    MSG_LINK_HEALTH     = 0x07, // Shuttle -> Display/backend/remote: radio link diagnostics
+    MSG_REQ_LINK_HEALTH = 0x08, // Pult -> Shuttle: Request radio link diagnostics
 
     // Asynchronous
     MSG_LOG = 0x10, // Shuttle/Display -> backend: bounded log string frame

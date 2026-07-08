@@ -140,10 +140,20 @@ static void                    requestBootloaderResetEntry();
 static void                    resetIntoBootloader();
 static E22Radio::EnsureOptions makeRadioEnsureOptions();
 static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
+enum class RadioTxAuxPolicy : uint8_t
+{
+    DropIfBusy,
+    SendAfterTimeout
+};
 static void       reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId);
 static inline int transportAvailableForWrite(Stream *port);
 static size_t
-writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E22Radio::FixedRoute *fixedRoute = NULL);
+writeTransportPayload(
+    Stream *port,
+    const uint8_t *buffer,
+    uint16_t length,
+    const E22Radio::FixedRoute *fixedRoute = NULL,
+    RadioTxAuxPolicy auxPolicy = RadioTxAuxPolicy::DropIfBusy);
 static ShuttleState predictTelemetryStateForAcceptedCommand(uint8_t cmd, bool fromRadio);
 static void         populateTelemetryPacket(TelemetryPacket *pkt, int16_t shuttleStatusOverride = -1);
 static void         sendAck(uint8_t seq, AckResult result, Stream *port, const E22Radio::FixedRoute *fixedRoute = NULL);
@@ -346,7 +356,7 @@ constexpr uint32_t kTofI2cClockHz              = 400000U;
 constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
-
+constexpr uint32_t kRadioRuntimeAuxWaitMs             = 20UL;
 
 #pragma endregion
 
@@ -1810,7 +1820,12 @@ static inline int transportAvailableForWrite(Stream *port)
 }
 
 static size_t
-writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, const E22Radio::FixedRoute *fixedRoute)
+writeTransportPayload(
+    Stream *port,
+    const uint8_t *buffer,
+    uint16_t length,
+    const E22Radio::FixedRoute *fixedRoute,
+    RadioTxAuxPolicy auxPolicy)
 {
     if (!port || !buffer || length == 0)
     {
@@ -1824,6 +1839,20 @@ writeTransportPayload(Stream *port, const uint8_t *buffer, uint16_t length, cons
     if (port != &SerialLora)
     {
         return port->write(buffer, length);
+    }
+
+    if (e22Radio.hasAuxPin() && !e22Radio.waitAuxHigh(kRadioRuntimeAuxWaitMs))
+    {
+        LOG_RATE_LIMITED(
+            LOG_WARN,
+            1000,
+            "Radio TX AUX busy len=%u policy=%u",
+            length,
+            auxPolicy == RadioTxAuxPolicy::SendAfterTimeout ? 1 : 0);
+        if (auxPolicy == RadioTxAuxPolicy::DropIfBusy)
+        {
+            return 0;
+        }
     }
 
     E22Radio::FixedRoute        route      = { 0, 0, 0 };
@@ -1869,7 +1898,7 @@ void sendAck(uint8_t seq, AckResult result, Stream *port, const E22Radio::FixedR
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute) == totalLen + 2)
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute, RadioTxAuxPolicy::SendAfterTimeout) == totalLen + 2)
     {
         countTxFrame(port);
     }
@@ -1904,7 +1933,7 @@ void sendTelemAck(
     uint16_t totalLen = sizeof(FrameHeader) + header->length;
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
-    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute) == totalLen + 2)
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2, fixedRoute, RadioTxAuxPolicy::SendAfterTimeout) == totalLen + 2)
     {
         countTxFrame(port);
     }
@@ -1973,6 +2002,13 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
     {
         uint32_t startUs = micros();
         sendStatsPacket(replyPort);
+        countReplyTiming(replyPort, micros() - startUs);
+        return NO_NEW_CMD;
+    }
+    else if (realMsgID == MSG_REQ_LINK_HEALTH)
+    {
+        uint32_t startUs = micros();
+        sendLinkHealthPacket(replyPort);
         countReplyTiming(replyPort, micros() - startUs);
         return NO_NEW_CMD;
     }
