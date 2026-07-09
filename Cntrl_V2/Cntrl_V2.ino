@@ -98,7 +98,17 @@ struct BreadcrumbRecord
         makeLogImpl(level, format, ##__VA_ARGS__);                                                                          \
     } while (0)
 
+#define makeReliableLog(level, format, ...)                                                                                 \
+    do                                                                                                                      \
+    {                                                                                                                       \
+        static_assert(                                                                                                      \
+            sizeof(format) - 1 <= LOG_FORMAT_MAX_PRINTABLE_CHARS,                                                           \
+            "makeReliableLog: format string literal exceeds logStringBuffer capacity.");                                     \
+        makeReliableLogImpl(level, format, ##__VA_ARGS__);                                                                  \
+    } while (0)
+
 void                           makeLogImpl(LogLevel level, const char *format, ...);
+void                           makeReliableLogImpl(LogLevel level, const char *format, ...);
 void                           makeBootLog(LogLevel level, const char *format, ...);
 static const char             *breadcrumbStageName(uint8_t stage);
 static bool                    readBreadcrumb(BreadcrumbRecord *out);
@@ -186,9 +196,16 @@ static bool                  recoverTofI2cBusIfDue();
 static inline bool           tofBusLinesReady();
 static bool                  recoverTofI2cBusIfNeeded();
 static bool                  tofDiagNeedsRecovery(const TofI2cDiagnostics &diag);
+static bool                  tofDiagIsBusFailure(const TofI2cDiagnostics *diag);
+static const char           *tofHalErrorName(uint32_t error);
 static void                  maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char *reason);
 static void                  logTofI2cLines(const char *tag);
+static void                  logI2cBootScan();
 static void                  logTofBootSnapshot();
+static void                  logI2cDiagSummaryIfDue(uint32_t now);
+static bool                  readAs5600AngleChecked(uint16_t *rawAngle);
+static uint16_t              readAs5600AngleForTelemetry();
+static void                  logBootResetReplay();
 static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
 static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
 static void                  logRadioEnsureFailure(
@@ -359,7 +376,7 @@ struct ConfigPageHeader
 constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
 constexpr uint8_t  kFirmwareVersionMajor       = 2;
 constexpr uint8_t  kFirmwareVersionMinor       = 0;
-constexpr uint8_t  kFirmwareVersionPatch       = 3;
+constexpr uint8_t  kFirmwareVersionPatch       = 5;
 constexpr uint32_t kBootLogSettleMs            = 250;
 constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
@@ -370,10 +387,17 @@ constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 250U;
 constexpr uint8_t  kTofFailureWarnCount              = 8U;
 constexpr uint8_t  kTofFailureFaultCount             = 16U;
 constexpr uint32_t kTofFailureFaultDelayMs           = 3000UL;
+constexpr uint8_t  kAs5600I2cAddress                 = 0x36U;
+constexpr uint8_t  kAs5600AngleHighReg               = 0x0EU;
+constexpr uint8_t  kAs5600AngleReadLength            = 2U;
+constexpr uint8_t  kAs5600ExistingBeginPin           = 4U;
+static_assert(kAs5600ExistingBeginPin == 4U, "Keep the controller AS5600 begin pin at 4.");
 constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
 constexpr uint32_t kRadioRuntimeAuxWaitMs             = 20UL;
+constexpr uint32_t kAs5600FailLogIntervalMs           = 5000UL;
+constexpr uint32_t kI2cDiagSummaryIntervalMs          = 5000UL;
 
 #pragma endregion
 
@@ -608,6 +632,12 @@ static uint32_t tofFirstFailureMs[4]        = { 0, 0, 0, 0 };
 static bool     tofFailureWarnLogged[4]     = { false, false, false, false };
 static bool     tofFaultLogged[4]           = { false, false, false, false };
 static bool     tofI2cSlowClockLogged       = false;
+static bool     tofBusFailureLogged         = false;
+
+static uint16_t as5600LastGoodAngleRaw      = 0;
+static bool     as5600LastGoodAngleValid    = false;
+static uint32_t as5600ReadFailCount         = 0;
+static uint32_t as5600LastReadFailLogMs     = 0;
 
 constexpr uint8_t CRASH_SRC_F1 = 0x01;
 constexpr uint8_t CRASH_SRC_F2 = 0x02;
@@ -745,7 +775,7 @@ static void logPreviousBreadcrumbIfWatchdog(uint32_t resetFlags)
         breadcrumbSequence = previous.sequence;
     }
 
-    makeLog(
+    makeReliableLog(
         LOG_WARN,
         "BC prev rst=%s bc=%s q=%lu ms=%lu s=%u st=%u d=%u c=%u",
         primaryResetCategoryName(resetFlags),
@@ -815,9 +845,203 @@ static bool tofDiagNeedsRecovery(const TofI2cDiagnostics &diag)
            diag.status == TOF_I2C_NO_HANDLE || diag.status == TOF_I2C_BUS_STUCK;
 }
 
+static bool tofDiagIsBusFailure(const TofI2cDiagnostics *diag)
+{
+    if (!tofBusLinesReady())
+    {
+        return true;
+    }
+    if (diag == nullptr)
+    {
+        return false;
+    }
+
+    return diag->status == TOF_I2C_HAL_TIMEOUT || diag->status == TOF_I2C_HAL_BUSY ||
+           diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_HAL_ERROR ||
+           diag->status == TOF_I2C_BUS_STUCK;
+}
+
+static const char *tofHalErrorName(uint32_t error)
+{
+    if (error == 0U)
+    {
+        return "none";
+    }
+#if defined(HAL_I2C_ERROR_BERR)
+    if ((error & HAL_I2C_ERROR_BERR) != 0U)
+    {
+        return "berr";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_ARLO)
+    if ((error & HAL_I2C_ERROR_ARLO) != 0U)
+    {
+        return "arlo";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_AF)
+    if ((error & HAL_I2C_ERROR_AF) != 0U)
+    {
+        return "nack";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_OVR)
+    if ((error & HAL_I2C_ERROR_OVR) != 0U)
+    {
+        return "ovr";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_DMA)
+    if ((error & HAL_I2C_ERROR_DMA) != 0U)
+    {
+        return "dma";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_TIMEOUT)
+    if ((error & HAL_I2C_ERROR_TIMEOUT) != 0U)
+    {
+        return "timeout";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_SIZE)
+    if ((error & HAL_I2C_ERROR_SIZE) != 0U)
+    {
+        return "size";
+    }
+#endif
+#if defined(HAL_I2C_ERROR_DMA_PARAM)
+    if ((error & HAL_I2C_ERROR_DMA_PARAM) != 0U)
+    {
+        return "dma_param";
+    }
+#endif
+    return "hal";
+}
+
+static void logI2cBootScan()
+{
+    if (!tofBusLinesReady())
+    {
+        makeReliableLog(
+            LOG_WARN,
+            "I2C scan skip clk=%lu io=%u/%u",
+            (unsigned long)tofI2cClockHz,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        return;
+    }
+
+    Wire.beginTransmission((uint8_t)0x09U);
+    const uint8_t err09 = Wire.endTransmission();
+    Wire.beginTransmission((uint8_t)0x0AU);
+    const uint8_t err0A = Wire.endTransmission();
+    Wire.beginTransmission((uint8_t)0x0BU);
+    const uint8_t err0B = Wire.endTransmission();
+    Wire.beginTransmission((uint8_t)0x0CU);
+    const uint8_t err0C = Wire.endTransmission();
+    Wire.beginTransmission(kAs5600I2cAddress);
+    const uint8_t err36 = Wire.endTransmission();
+
+    makeReliableLog(
+        LOG_INFO,
+        "I2C scan clk=%lu 09=%s/%u 0A=%s/%u 0B=%s/%u 0C=%s/%u 36=%s/%u io=%u/%u",
+        (unsigned long)tofI2cClockHz,
+        (err09 == 0U) ? "ack" : "miss",
+        err09,
+        (err0A == 0U) ? "ack" : "miss",
+        err0A,
+        (err0B == 0U) ? "ack" : "miss",
+        err0B,
+        (err0C == 0U) ? "ack" : "miss",
+        err0C,
+        (err36 == 0U) ? "ack" : "miss",
+        err36,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+}
+
+static bool readAs5600AngleChecked(uint16_t *rawAngle)
+{
+    if (rawAngle == nullptr)
+    {
+        return false;
+    }
+
+    uint8_t txStatus       = 0xFFU;
+    uint8_t requestedBytes = 0U;
+    uint8_t availableBytes = 0U;
+
+    if (tofBusLinesReady())
+    {
+        Wire.beginTransmission(kAs5600I2cAddress);
+        Wire.write(kAs5600AngleHighReg);
+        txStatus = Wire.endTransmission(false);
+        if (txStatus == 0U)
+        {
+            requestedBytes = Wire.requestFrom(kAs5600I2cAddress, kAs5600AngleReadLength);
+            availableBytes = (uint8_t)Wire.available();
+            if (requestedBytes == kAs5600AngleReadLength && availableBytes >= kAs5600AngleReadLength)
+            {
+                const uint16_t high = (uint16_t)Wire.read();
+                const uint16_t low  = (uint16_t)Wire.read();
+                *rawAngle = (uint16_t)(((high << 8) | low) & 0x0FFFU);
+                as5600LastGoodAngleRaw   = *rawAngle;
+                as5600LastGoodAngleValid = true;
+                return true;
+            }
+
+            while (Wire.available() > 0)
+            {
+                (void)Wire.read();
+            }
+        }
+    }
+
+    as5600ReadFailCount++;
+    const uint32_t now = millis();
+    if (as5600LastReadFailLogMs == 0U || now - as5600LastReadFailLogMs >= kAs5600FailLogIntervalMs)
+    {
+        makeReliableLog(
+            LOG_WARN,
+            "AS5600 fail tx=%u got=%u av=%u cnt=%lu last=%u v=%u io=%u/%u",
+            txStatus,
+            requestedBytes,
+            availableBytes,
+            (unsigned long)as5600ReadFailCount,
+            as5600LastGoodAngleRaw,
+            as5600LastGoodAngleValid ? 1U : 0U,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        as5600LastReadFailLogMs = (now == 0U) ? 1U : now;
+    }
+    return false;
+}
+
+static uint16_t readAs5600AngleForTelemetry()
+{
+    uint16_t rawAngle = as5600LastGoodAngleRaw;
+    if (readAs5600AngleChecked(&rawAngle))
+    {
+        return rawAngle;
+    }
+
+    return as5600LastGoodAngleValid ? as5600LastGoodAngleRaw : 0U;
+}
+
+static void logBootResetReplay()
+{
+    makeReliableLog(
+        LOG_INFO,
+        "Reset replay %s flags=%08lX marker=%08lX",
+        primaryResetCategoryName(lastBootResetFlags),
+        (unsigned long)lastBootResetFlags,
+        (unsigned long)lastBootResetMarkerFlags);
+    logPreviousBreadcrumbIfWatchdog(lastBootResetFlags);
+}
+
 static void logTofI2cLines(const char *tag)
 {
-    makeLog(
+    makeReliableLog(
         LOG_INFO,
         "TOF I2C %s clk=%lu io=%u/%u",
         tag != nullptr ? tag : "?",
@@ -851,12 +1075,13 @@ static void maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char 
     initTofI2cBus();
     if (!tofI2cSlowClockLogged)
     {
-        makeLog(
+        makeReliableLog(
             LOG_WARN,
-            "TOF I2C clk fallback %lu %s st=%s he=%lu io=%u/%u",
+            "TOF I2C clk fallback %lu %s st=%s he=%s/%lu io=%u/%u",
             (unsigned long)tofI2cClockHz,
             reason,
             TOF_I2C_Status_Name(diag->status),
+            tofHalErrorName(diag->halError),
             (unsigned long)diag->halError,
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
@@ -914,7 +1139,7 @@ static void recoverTofI2cBus()
     const uint8_t sclAfter = digitalRead(TOF_I2C_SCL);
     if (!tofI2cRecoveryLogged || now - tofLastI2cRecoveryLogMs >= 60000U)
     {
-        makeLog(
+        makeReliableLog(
             LOG_WARN,
             "TOF I2C rec #%lu clk=%lu io=%u/%u>%u/%u t=%u/%u/%u/%u b=%u/%u/%u/%u",
             (unsigned long)tofI2cRecoveryCount,
@@ -985,7 +1210,7 @@ static void logTofBootSnapshot()
 {
     if (!tofBusLinesReady())
     {
-        makeLog(
+        makeReliableLog(
             LOG_WARN,
             "TOF boot skip clk=%lu io=%u/%u",
             (unsigned long)tofI2cClockHz,
@@ -1004,19 +1229,69 @@ static void logTofBootSnapshot()
     const bool palletForwardOk  = readTofBootPresence(4, palletForward);
     const bool palletReverseOk  = readTofBootPresence(3, palletReverse);
 
-    makeLog(
+    makeReliableLog(
         LOG_INFO,
-        "TOF boot cf=%u/%s cr=%u/%s pf=%u/%s pr=%u/%s io=%u/%u",
+        "TOF boot cf=%u/%s/%u cr=%u/%s/%u pf=%u/%s/%u pr=%u/%s/%u io=%u/%u",
         channelForwardOk,
         TOF_I2C_Status_Name(channelForward.status),
+        channelForward.received,
         channelReverseOk,
         TOF_I2C_Status_Name(channelReverse.status),
+        channelReverse.received,
         palletForwardOk,
         TOF_I2C_Status_Name(palletForward.status),
+        palletForward.received,
         palletReverseOk,
         TOF_I2C_Status_Name(palletReverse.status),
+        palletReverse.received,
         digitalRead(TOF_I2C_SDA),
         digitalRead(TOF_I2C_SCL));
+}
+
+static void logI2cDiagSummaryIfDue(uint32_t now)
+{
+#if I2C_DIAG_LOGS
+    static uint32_t lastLogMs = 0;
+    const uint16_t tofFaultMask = (uint16_t)FAULT_TOF_CH_F | (uint16_t)FAULT_TOF_CH_R |
+                                  (uint16_t)FAULT_TOF_PAL_F | (uint16_t)FAULT_TOF_PAL_R;
+    const bool hasI2cEvidence = ((alertMan.getWarningCode() & (uint16_t)WARN_I2C_RECOVERY) != 0U) ||
+                                ((alertMan.getErrorCode() & tofFaultMask) != 0U) || as5600ReadFailCount != 0U ||
+                                tofI2cRecoveryCount != 0U;
+    if (!hasI2cEvidence)
+    {
+        return;
+    }
+    if (lastLogMs != 0U && now - lastLogMs < kI2cDiagSummaryIntervalMs)
+    {
+        return;
+    }
+    lastLogMs = (now == 0U) ? 1U : now;
+
+    makeReliableLog(
+        LOG_INFO,
+        "I2C diag clk=%lu e=%04X w=%04X tof=%u/%u/%u/%u st=%s/%s/%s/%s b=%u/%u/%u/%u rec=%lu asf=%lu io=%u/%u",
+        (unsigned long)tofI2cClockHz,
+        alertMan.getErrorCode(),
+        alertMan.getWarningCode(),
+        tofSensorErrors[0],
+        tofSensorErrors[1],
+        tofSensorErrors[2],
+        tofSensorErrors[3],
+        TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[0]),
+        TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[1]),
+        TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[2]),
+        TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[3]),
+        tofBusErrors[0],
+        tofBusErrors[1],
+        tofBusErrors[2],
+        tofBusErrors[3],
+        (unsigned long)tofI2cRecoveryCount,
+        (unsigned long)as5600ReadFailCount,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+#else
+    (void)now;
+#endif
 }
 
 static BmsDdA5Firmware::Adapter batteryBms(SerialRS485, RS485, makeLogImpl, makeBatteryPollConfig());
@@ -1138,7 +1413,7 @@ void setup()
     initTofI2cBus();
     logTofI2cLines("after init");
 
-    // Инициируем магнитный энкодер
+    // Инициируем магнитный энкодер. Keep literal 4: existing proven AS5600 begin/control pin behavior.
     const bool encoderOk = as5600.begin(4);
     as5600.setDirection(AS5600_CLOCK_WISE);
     if (encoderOk)
@@ -1148,6 +1423,7 @@ void setup()
 
     initTofI2cBus();
     logTofI2cLines("after encoder");
+    logI2cBootScan();
     logTofBootSnapshot();
 
     makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
@@ -1189,6 +1465,7 @@ void setup()
         (unsigned long)lastBootResetMarkerFlags);
     delay(500);
     IWatchdog.begin(10000000);
+    logBootResetReplay();
 }
 
 // Основной цикл
@@ -2916,9 +3193,9 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
 
     if (!tofFailureWarnLogged[sensor] && tofSensorErrors[sensor] >= kTofFailureWarnCount)
     {
-        makeLog(
+        makeReliableLog(
             LOG_WARN,
-            "TOF %s degraded total=%u p=%u r=%u st=%s a=%02X reg=%02X he=%lu io=%u/%u",
+            "TOF %s degraded total=%u p=%u r=%u st=%s a=%02X reg=%02X ex=%u got=%u he=%s/%lu io=%u/%u",
             tofNameForSensor(sensor),
             tofSensorErrors[sensor],
             tofProbeErrors[sensor],
@@ -2926,6 +3203,9 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
             TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
             diag != nullptr ? diag->address : 0,
             diag != nullptr ? diag->reg : 0,
+            diag != nullptr ? diag->expected : 0,
+            diag != nullptr ? diag->received : 0,
+            tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
             diag != nullptr ? (unsigned long)diag->halError : 0UL,
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
@@ -2942,9 +3222,9 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
         setFault(tofFaultForSensor(sensor));
         if (!tofFaultLogged[sensor])
         {
-            makeLog(
+            makeReliableLog(
                 LOG_ERROR,
-                "TOF %s fail total=%u age=%lu p=%u r=%u t=%u b=%u st=%s io=%u/%u",
+                "TOF %s fail total=%u age=%lu p=%u r=%u t=%u b=%u st=%s ex=%u got=%u he=%s/%lu io=%u/%u",
                 tofNameForSensor(sensor),
                 tofSensorErrors[sensor],
                 (unsigned long)failAge,
@@ -2953,6 +3233,10 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
                 tofTimeoutErrors[sensor],
                 tofBusErrors[sensor],
                 TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
+                diag != nullptr ? diag->expected : 0,
+                diag != nullptr ? diag->received : 0,
+                tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
+                diag != nullptr ? (unsigned long)diag->halError : 0UL,
                 digitalRead(TOF_I2C_SDA),
                 digitalRead(TOF_I2C_SCL));
             tofFaultLogged[sensor] = true;
@@ -2963,6 +3247,23 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
             tofSensorErrors[2] >= kTofFailureFaultCount && tofSensorErrors[3] >= kTofFailureFaultCount;
         if (allSensorsFailed)
         {
+            if (!tofBusFailureLogged && tofDiagIsBusFailure(diag))
+            {
+                makeReliableLog(
+                    LOG_ERROR,
+                    "TOF bus fail total=%u/%u/%u/%u st=%s he=%s/%lu io=%u/%u rec=%lu",
+                    tofSensorErrors[0],
+                    tofSensorErrors[1],
+                    tofSensorErrors[2],
+                    tofSensorErrors[3],
+                    diag != nullptr ? TOF_I2C_Status_Name(diag->status) : "unknown",
+                    tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
+                    diag != nullptr ? (unsigned long)diag->halError : 0UL,
+                    digitalRead(TOF_I2C_SDA),
+                    digitalRead(TOF_I2C_SCL),
+                    (unsigned long)tofI2cRecoveryCount);
+                tofBusFailureLogged = true;
+            }
             recoveryRequested = recoverTofI2cBusIfDue();
         }
     }
@@ -2984,7 +3285,7 @@ static void recordTofSuccess(uint8_t sensor)
     const uint32_t now = millis();
     if (tofLastRecoverySummaryLogMs == 0 || now - tofLastRecoverySummaryLogMs >= 60000U)
     {
-        makeLog(
+        makeReliableLog(
             LOG_INFO,
             "TOF %s rec total=%u p=%u r=%u t=%u b=%u io=%u/%u",
             tofNameForSensor(sensor),
@@ -3007,6 +3308,7 @@ static void recordTofSuccess(uint8_t sensor)
     tofFirstFailureMs[sensor] = 0;
     tofFailureWarnLogged[sensor] = false;
     tofFaultLogged[sensor]       = false;
+    tofBusFailureLogged          = false;
 }
 
 // Опрос всех сенсоров расстояния
@@ -6086,6 +6388,7 @@ void SystemYield()
     batteryBms.tick(currentMillis, mapBatteryActivity());
     batteryCharge = batteryBms.socPercent();
     batterySafetyCheck(currentMillis);
+    logI2cDiagSummaryIfDue(currentMillis);
 
     if (currentMillis - timerTelemetry >= 300)
     {
@@ -7662,6 +7965,7 @@ static inline void resetTofDiagnostics()
     tofLastI2cRecoveryLogMs = 0;
     tofLastI2cRecoveryAttemptMs = 0;
     tofLastRecoverySummaryLogMs = 0;
+    tofBusFailureLogged         = false;
 }
 
 static inline void touchManualSession()
@@ -7715,20 +8019,62 @@ static bool writeTransportPayloadWait(Stream *port, const uint8_t *buffer, uint1
     }
 
     const uint32_t startedAt = millis();
-    while (transportAvailableForWrite(port) < length)
+    if (port == &SerialLora)
+    {
+        while (transportAvailableForWrite(port) < length)
+        {
+            if (millis() - startedAt >= timeoutMs)
+            {
+                return false;
+            }
+            if (IWatchdog.isEnabled())
+            {
+                IWatchdog.reload();
+            }
+            delay(1);
+        }
+        return writeTransportPayload(port, buffer, length, NULL) == length;
+    }
+
+    uint16_t written = 0;
+    while (written < length)
     {
         if (millis() - startedAt >= timeoutMs)
         {
             return false;
         }
-        if (IWatchdog.isEnabled())
+
+        int available = transportAvailableForWrite(port);
+        if (available <= 0)
         {
-            IWatchdog.reload();
+            if (IWatchdog.isEnabled())
+            {
+                IWatchdog.reload();
+            }
+            delay(1);
+            continue;
         }
-        delay(1);
+
+        uint16_t chunk = length - written;
+        if ((uint16_t)available < chunk)
+        {
+            chunk = (uint16_t)available;
+        }
+
+        const size_t sent = port->write(buffer + written, chunk);
+        if (sent == 0)
+        {
+            if (IWatchdog.isEnabled())
+            {
+                IWatchdog.reload();
+            }
+            delay(1);
+            continue;
+        }
+        written += (uint16_t)sent;
     }
 
-    return writeTransportPayload(port, buffer, length, NULL) == length;
+    return true;
 }
 
 static bool sendLogFrame(LogLevel level, const char *msg, Stream *port, bool waitForSpace)
@@ -7798,6 +8144,16 @@ void makeLogImpl(LogLevel level, const char *format, ...)
     va_end(args);
 
     sendLog(level, logStringBuffer, &SerialDisplay);
+}
+
+void makeReliableLogImpl(LogLevel level, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
+    va_end(args);
+
+    (void)sendLogFrame(level, logStringBuffer, &SerialDisplay, true);
 }
 
 void makeBootLog(LogLevel level, const char *format, ...)
@@ -7916,7 +8272,7 @@ void sendSensorPacket(Stream *port)
     pkt.distancePltF   = distance[3];
     pkt.distancePltR   = distance[2];
     writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 0);
-    pkt.angle          = as5600.readAngle();
+    pkt.angle          = readAs5600AngleForTelemetry();
     writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 1);
     pkt.lifterCurrent  = lifterCurrent;
     pkt.temperature_dC = (int16_t)(temp * 10);

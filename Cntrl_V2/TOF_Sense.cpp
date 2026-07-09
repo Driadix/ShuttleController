@@ -136,6 +136,8 @@ const char *TOF_I2C_Status_Name(TofI2cStatus status)
         return "timeout";
     case TOF_I2C_SHORT_READ:
         return "short";
+    case TOF_I2C_ID_MISMATCH:
+        return "id_mis";
     case TOF_I2C_BUS_STUCK:
         return "stuck";
     default:
@@ -215,7 +217,18 @@ bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag)
         diag->expected = id;
         diag->received = idReg;
     }
-    return ok;
+    if (!ok)
+    {
+        return false;
+    }
+
+    if (idReg != id)
+    {
+        tofSetDiag(diag, TOF_I2C_ID_MISMATCH, slave_addr, TOF_ADDR_ID, id, idReg, 0, 0);
+        return false;
+    }
+
+    return true;
 }
 
 bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,
