@@ -198,7 +198,6 @@ static bool                  recoverTofI2cBusIfNeeded();
 static bool                  tofDiagNeedsRecovery(const TofI2cDiagnostics &diag);
 static bool                  tofDiagIsBusFailure(const TofI2cDiagnostics *diag);
 static const char           *tofHalErrorName(uint32_t error);
-static void                  maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char *reason);
 static void                  logTofI2cLines(const char *tag);
 static void                  logI2cBootScan();
 static void                  logTofBootSnapshot();
@@ -381,8 +380,7 @@ constexpr uint32_t kBootLogSettleMs            = 250;
 constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
-constexpr uint32_t kTofI2cFastClockHz                = 400000U;
-constexpr uint32_t kTofI2cSlowClockHz                = 100000U;
+constexpr uint32_t tofI2cClockHz                = 400000U;
 constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 250U;
 constexpr uint8_t  kTofFailureWarnCount              = 8U;
 constexpr uint8_t  kTofFailureFaultCount             = 16U;
@@ -626,12 +624,10 @@ static uint32_t tofLastI2cRecoveryLogMs     = 0;
 static bool     tofI2cRecoveryLogged        = false;
 static uint32_t tofI2cRecoveryCount         = 0;
 static uint32_t tofLastRecoverySummaryLogMs = 0;
-static uint32_t tofI2cClockHz               = kTofI2cFastClockHz;
 static uint32_t tofLastI2cRecoveryAttemptMs = 0;
 static uint32_t tofFirstFailureMs[4]        = { 0, 0, 0, 0 };
 static bool     tofFailureWarnLogged[4]     = { false, false, false, false };
 static bool     tofFaultLogged[4]           = { false, false, false, false };
-static bool     tofI2cSlowClockLogged       = false;
 static bool     tofBusFailureLogged         = false;
 
 static uint16_t as5600LastGoodAngleRaw      = 0;
@@ -1058,36 +1054,6 @@ static void initTofI2cBus()
     Wire.setClock(tofI2cClockHz);
 }
 
-static void maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char *reason)
-{
-    if (diag == nullptr || tofI2cClockHz == kTofI2cSlowClockHz || !tofBusLinesReady())
-    {
-        return;
-    }
-
-    if (diag->status == TOF_I2C_OK || diag->status == TOF_I2C_INVALID_ARG ||
-        diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_BUS_STUCK)
-    {
-        return;
-    }
-
-    tofI2cClockHz = kTofI2cSlowClockHz;
-    initTofI2cBus();
-    if (!tofI2cSlowClockLogged)
-    {
-        makeReliableLog(
-            LOG_WARN,
-            "TOF I2C clk fallback %lu %s st=%s he=%s/%lu io=%u/%u",
-            (unsigned long)tofI2cClockHz,
-            reason,
-            TOF_I2C_Status_Name(diag->status),
-            tofHalErrorName(diag->halError),
-            (unsigned long)diag->halError,
-            digitalRead(TOF_I2C_SDA),
-            digitalRead(TOF_I2C_SCL));
-        tofI2cSlowClockLogged = true;
-    }
-}
 
 static void recoverTofI2cBus()
 {
@@ -3189,7 +3155,6 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
     }
 
     data[sensor][filterIndex] = 1500;
-    maybeFallbackToSlowTofI2c(diag, probeFailure ? "probe" : "read");
 
     if (!tofFailureWarnLogged[sensor] && tofSensorErrors[sensor] >= kTofFailureWarnCount)
     {
