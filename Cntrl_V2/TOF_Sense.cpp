@@ -209,7 +209,13 @@ bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag)
     uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
     uint8_t idReg      = 0;
 
-    return I2C_Read_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &idReg, TOF_SIZE_ID, diag);
+    const bool ok = I2C_Read_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &idReg, TOF_SIZE_ID, diag);
+    if (ok && diag != nullptr)
+    {
+        diag->expected = id;
+        diag->received = idReg;
+    }
+    return ok;
 }
 
 bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,

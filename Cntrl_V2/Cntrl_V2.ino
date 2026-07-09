@@ -99,6 +99,7 @@ struct BreadcrumbRecord
     } while (0)
 
 void                           makeLogImpl(LogLevel level, const char *format, ...);
+void                           makeBootLog(LogLevel level, const char *format, ...);
 static const char             *breadcrumbStageName(uint8_t stage);
 static bool                    readBreadcrumb(BreadcrumbRecord *out);
 static void                    writeBreadcrumb(BreadcrumbStage stage, uint8_t sensor = 0xFF, uint8_t status = 0, uint8_t detail = 0);
@@ -181,9 +182,13 @@ static void                  batterySafetyCheck(uint32_t now);
 static void                  batterySafetyReset(uint32_t now);
 static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
+static bool                  recoverTofI2cBusIfDue();
 static inline bool           tofBusLinesReady();
 static bool                  recoverTofI2cBusIfNeeded();
 static bool                  tofDiagNeedsRecovery(const TofI2cDiagnostics &diag);
+static void                  maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char *reason);
+static void                  logTofI2cLines(const char *tag);
+static void                  logTofBootSnapshot();
 static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
 static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
 static void                  logRadioEnsureFailure(
@@ -283,6 +288,8 @@ static volatile uint32_t *const bootloaderMagicWord = (volatile uint32_t *)BOOTL
 static volatile uint32_t *const bootloaderMagicConfirm = (volatile uint32_t *)BOOTLOADER_MAGIC_CONFIRM_ADDR;
 static volatile BreadcrumbRecord *const diagBreadcrumb = (volatile BreadcrumbRecord *)DIAG_BREADCRUMB_ADDR;
 static uint32_t breadcrumbSequence = 0;
+static uint32_t lastBootResetFlags = RESET_REASON_UNKNOWN;
+static uint32_t lastBootResetMarkerFlags = RESET_REASON_NONE;
 
 ProtocolParser               parserRadio;
 ProtocolParser               parserDisplay;
@@ -350,9 +357,19 @@ struct ConfigPageHeader
 #define SerialDisplay Serial1
 
 constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
+constexpr uint8_t  kFirmwareVersionMajor       = 2;
+constexpr uint8_t  kFirmwareVersionMinor       = 0;
+constexpr uint8_t  kFirmwareVersionPatch       = 3;
+constexpr uint32_t kBootLogSettleMs            = 250;
+constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
-constexpr uint32_t kTofI2cClockHz              = 400000U;
+constexpr uint32_t kTofI2cFastClockHz                = 400000U;
+constexpr uint32_t kTofI2cSlowClockHz                = 100000U;
+constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 250U;
+constexpr uint8_t  kTofFailureWarnCount              = 8U;
+constexpr uint8_t  kTofFailureFaultCount             = 16U;
+constexpr uint32_t kTofFailureFaultDelayMs           = 3000UL;
 constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
@@ -585,6 +602,12 @@ static uint32_t tofLastI2cRecoveryLogMs     = 0;
 static bool     tofI2cRecoveryLogged        = false;
 static uint32_t tofI2cRecoveryCount         = 0;
 static uint32_t tofLastRecoverySummaryLogMs = 0;
+static uint32_t tofI2cClockHz               = kTofI2cFastClockHz;
+static uint32_t tofLastI2cRecoveryAttemptMs = 0;
+static uint32_t tofFirstFailureMs[4]        = { 0, 0, 0, 0 };
+static bool     tofFailureWarnLogged[4]     = { false, false, false, false };
+static bool     tofFaultLogged[4]           = { false, false, false, false };
+static bool     tofI2cSlowClockLogged       = false;
 
 constexpr uint8_t CRASH_SRC_F1 = 0x01;
 constexpr uint8_t CRASH_SRC_F2 = 0x02;
@@ -792,17 +815,59 @@ static bool tofDiagNeedsRecovery(const TofI2cDiagnostics &diag)
            diag.status == TOF_I2C_NO_HANDLE || diag.status == TOF_I2C_BUS_STUCK;
 }
 
+static void logTofI2cLines(const char *tag)
+{
+    makeLog(
+        LOG_INFO,
+        "TOF I2C %s clk=%lu io=%u/%u",
+        tag != nullptr ? tag : "?",
+        (unsigned long)tofI2cClockHz,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+}
+
 static void initTofI2cBus()
 {
     Wire.setSDA(TOF_I2C_SDA);
     Wire.setSCL(TOF_I2C_SCL);
     Wire.begin();
-    Wire.setClock(kTofI2cClockHz);
+    Wire.setClock(tofI2cClockHz);
+}
+
+static void maybeFallbackToSlowTofI2c(const TofI2cDiagnostics *diag, const char *reason)
+{
+    if (diag == nullptr || tofI2cClockHz == kTofI2cSlowClockHz || !tofBusLinesReady())
+    {
+        return;
+    }
+
+    if (diag->status == TOF_I2C_OK || diag->status == TOF_I2C_INVALID_ARG ||
+        diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_BUS_STUCK)
+    {
+        return;
+    }
+
+    tofI2cClockHz = kTofI2cSlowClockHz;
+    initTofI2cBus();
+    if (!tofI2cSlowClockLogged)
+    {
+        makeLog(
+            LOG_WARN,
+            "TOF I2C clk fallback %lu %s st=%s he=%lu io=%u/%u",
+            (unsigned long)tofI2cClockHz,
+            reason,
+            TOF_I2C_Status_Name(diag->status),
+            (unsigned long)diag->halError,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        tofI2cSlowClockLogged = true;
+    }
 }
 
 static void recoverTofI2cBus()
 {
     uint32_t now = millis();
+    tofLastI2cRecoveryAttemptMs = now;
     writeBreadcrumb(BC_TOF_RECOVERY, 0xFF, 0, 0);
     tofI2cRecoveryCount++;
     const uint8_t sdaBefore = digitalRead(TOF_I2C_SDA);
@@ -851,8 +916,9 @@ static void recoverTofI2cBus()
     {
         makeLog(
             LOG_WARN,
-            "TOF I2C rec #%lu io=%u/%u>%u/%u t=%u/%u/%u/%u b=%u/%u/%u/%u",
+            "TOF I2C rec #%lu clk=%lu io=%u/%u>%u/%u t=%u/%u/%u/%u b=%u/%u/%u/%u",
             (unsigned long)tofI2cRecoveryCount,
+            (unsigned long)tofI2cClockHz,
             sdaBefore,
             sclBefore,
             sdaAfter,
@@ -870,6 +936,18 @@ static void recoverTofI2cBus()
     }
 }
 
+static bool recoverTofI2cBusIfDue()
+{
+    const uint32_t now = millis();
+    if (tofLastI2cRecoveryAttemptMs != 0 && now - tofLastI2cRecoveryAttemptMs < kTofI2cRecoveryMinIntervalMs)
+    {
+        return false;
+    }
+
+    recoverTofI2cBus();
+    return true;
+}
+
 static inline bool tofBusLinesReady()
 {
     return digitalRead(TOF_I2C_SDA) == HIGH && digitalRead(TOF_I2C_SCL) == HIGH;
@@ -883,8 +961,62 @@ static bool recoverTofI2cBusIfNeeded()
     }
 
     writeBreadcrumb(BC_TOF_PREFLIGHT, 0xFF, TOF_I2C_BUS_STUCK, 0);
-    recoverTofI2cBus();
+    (void)recoverTofI2cBusIfDue();
     return tofBusLinesReady();
+}
+
+static bool readTofBootPresence(uint8_t id, TofI2cDiagnostics &diag)
+{
+    diag                  = {};
+    diag.address          = TOF_BASE_I2C_ADDR + id;
+    diag.expected         = id;
+    if (!tofBusLinesReady())
+    {
+        diag.status = TOF_I2C_BUS_STUCK;
+        return false;
+    }
+
+    const bool ok = TOF_Is_Device_Present(id, &diag);
+    IWatchdog.reload();
+    return ok;
+}
+
+static void logTofBootSnapshot()
+{
+    if (!tofBusLinesReady())
+    {
+        makeLog(
+            LOG_WARN,
+            "TOF boot skip clk=%lu io=%u/%u",
+            (unsigned long)tofI2cClockHz,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        return;
+    }
+
+    TofI2cDiagnostics channelForward = {};
+    TofI2cDiagnostics channelReverse = {};
+    TofI2cDiagnostics palletForward  = {};
+    TofI2cDiagnostics palletReverse  = {};
+
+    const bool channelForwardOk = readTofBootPresence(2, channelForward);
+    const bool channelReverseOk = readTofBootPresence(1, channelReverse);
+    const bool palletForwardOk  = readTofBootPresence(4, palletForward);
+    const bool palletReverseOk  = readTofBootPresence(3, palletReverse);
+
+    makeLog(
+        LOG_INFO,
+        "TOF boot cf=%u/%s cr=%u/%s pf=%u/%s pr=%u/%s io=%u/%u",
+        channelForwardOk,
+        TOF_I2C_Status_Name(channelForward.status),
+        channelReverseOk,
+        TOF_I2C_Status_Name(channelReverse.status),
+        palletForwardOk,
+        TOF_I2C_Status_Name(palletForward.status),
+        palletReverseOk,
+        TOF_I2C_Status_Name(palletReverse.status),
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
 }
 
 static BmsDdA5Firmware::Adapter batteryBms(SerialRS485, RS485, makeLogImpl, makeBatteryPollConfig());
@@ -979,6 +1111,8 @@ void setup()
         delay(10);
     }
 
+    delay(kBootLogSettleMs);
+
     initStatsSRAM();
     recordBootResetCause();
     writeBreadcrumb(BC_BOOT, 0xFF, 0, 0);
@@ -988,7 +1122,13 @@ void setup()
     applyRadioConfigAtBoot();
     analogReadResolution(12);
 
-    makeLog(LOG_INFO, "Start init board...");
+    makeBootLog(LOG_INFO, "Start init board...");
+    makeBootLog(
+        LOG_INFO,
+        "FW Cntrl_V2 v%u.%u.%u",
+        kFirmwareVersionMajor,
+        kFirmwareVersionMinor,
+        kFirmwareVersionPatch);
 
     Can1.begin();
     Can1.setBaudRate(500000);
@@ -996,31 +1136,19 @@ void setup()
     CAN_RX_msg.flags.extended = 1;
 
     initTofI2cBus();
+    logTofI2cLines("after init");
 
     // Инициируем магнитный энкодер
-    as5600.begin(4);
+    const bool encoderOk = as5600.begin(4);
     as5600.setDirection(AS5600_CLOCK_WISE);
-    makeLog(LOG_INFO, "Init encoder success...");
+    if (encoderOk)
+        makeBootLog(LOG_INFO, "Init encoder success...");
+    else
+        makeBootLog(LOG_ERROR, "Init encoder failed...");
 
-    if (TOF_Is_Device_Present(2))
-        makeLog(LOG_INFO, "TOF channel sensor forward present...");
-    else
-        makeLog(LOG_ERROR, "TOF channel sensor forward failed!!!");
-    delay(10);
-    if (TOF_Is_Device_Present(1))
-        makeLog(LOG_INFO, "TOF channel sensor reverse present...");
-    else
-        makeLog(LOG_ERROR, "TOF channel sensor reverse failed!!!");
-    delay(10);
-    if (TOF_Is_Device_Present(4))
-        makeLog(LOG_INFO, "TOF pallete sensor forward present...");
-    else
-        makeLog(LOG_ERROR, "TOF pallete sensor forward failed!!!");
-    delay(10);
-    if (TOF_Is_Device_Present(3))
-        makeLog(LOG_INFO, "TOF pallete sensor reverse present...");
-    else
-        makeLog(LOG_ERROR, "TOF pallete sensor reverse failed!!!");
+    initTofI2cBus();
+    logTofI2cLines("after encoder");
+    logTofBootSnapshot();
 
     makeLog(LOG_DEBUG, "Total struct size = %d", sizeof(EEPROMData));
     delay(10);
@@ -1049,7 +1177,16 @@ void setup()
     uint8_t hour, minute, second, day, month, year, weekDay;
     rtc.getTime(&hour, &minute, &second, 0, nullptr);
     rtc.getDate(&weekDay, &day, &month, &year);
-    makeLog(LOG_INFO, "Boot: %02d:%02d:%02d %02d/%02d/%02d T=%.1f", hour, minute, second, day, month, year, temp);
+    makeBootLog(LOG_INFO, "Boot: %02d:%02d:%02d %02d/%02d/%02d T=%.1f", hour, minute, second, day, month, year, temp);
+    makeBootLog(
+        LOG_INFO,
+        "Boot complete FW v%u.%u.%u reset=%s flags=%08lX marker=%08lX",
+        kFirmwareVersionMajor,
+        kFirmwareVersionMinor,
+        kFirmwareVersionPatch,
+        primaryResetCategoryName(lastBootResetFlags),
+        (unsigned long)lastBootResetFlags,
+        (unsigned long)lastBootResetMarkerFlags);
     delay(500);
     IWatchdog.begin(10000000);
 }
@@ -2744,7 +2881,13 @@ static void incrementTofFailureCounter(uint8_t &counter)
 
 static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFailure, const TofI2cDiagnostics *diag)
 {
+    const uint32_t now = millis();
     incrementTofFailureCounter(tofSensorErrors[sensor]);
+    if (tofFirstFailureMs[sensor] == 0)
+    {
+        tofFirstFailureMs[sensor] = (now == 0) ? 1 : now;
+    }
+
     if (probeFailure)
     {
         incrementTofFailureCounter(tofProbeErrors[sensor]);
@@ -2769,38 +2912,64 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
     }
 
     data[sensor][filterIndex] = 1500;
+    maybeFallbackToSlowTofI2c(diag, probeFailure ? "probe" : "read");
+
+    if (!tofFailureWarnLogged[sensor] && tofSensorErrors[sensor] >= kTofFailureWarnCount)
+    {
+        makeLog(
+            LOG_WARN,
+            "TOF %s degraded total=%u p=%u r=%u st=%s a=%02X reg=%02X he=%lu io=%u/%u",
+            tofNameForSensor(sensor),
+            tofSensorErrors[sensor],
+            tofProbeErrors[sensor],
+            tofReadErrors[sensor],
+            TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
+            diag != nullptr ? diag->address : 0,
+            diag != nullptr ? diag->reg : 0,
+            diag != nullptr ? (unsigned long)diag->halError : 0UL,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        tofFailureWarnLogged[sensor] = true;
+    }
+
+    const uint32_t failAge = now - tofFirstFailureMs[sensor];
+    const bool failureSustained =
+        tofSensorErrors[sensor] >= kTofFailureFaultCount && failAge >= kTofFailureFaultDelayMs;
 
     bool recoveryRequested = false;
-    if (tofSensorErrors[sensor] >= 7)
+    if (failureSustained)
     {
         setFault(tofFaultForSensor(sensor));
-        if (tofSensorErrors[sensor] == 7)
+        if (!tofFaultLogged[sensor])
         {
             makeLog(
                 LOG_ERROR,
-                "TOF %s fail p=%u r=%u t=%u b=%u st=%u io=%u/%u",
+                "TOF %s fail total=%u age=%lu p=%u r=%u t=%u b=%u st=%s io=%u/%u",
                 tofNameForSensor(sensor),
+                tofSensorErrors[sensor],
+                (unsigned long)failAge,
                 tofProbeErrors[sensor],
                 tofReadErrors[sensor],
                 tofTimeoutErrors[sensor],
                 tofBusErrors[sensor],
-                tofLastDiagStatus[sensor],
+                TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
                 digitalRead(TOF_I2C_SDA),
                 digitalRead(TOF_I2C_SCL));
+            tofFaultLogged[sensor] = true;
         }
 
         const bool allSensorsFailed =
-            tofSensorErrors[0] >= 7 && tofSensorErrors[1] >= 7 && tofSensorErrors[2] >= 7 && tofSensorErrors[3] >= 7;
+            tofSensorErrors[0] >= kTofFailureFaultCount && tofSensorErrors[1] >= kTofFailureFaultCount &&
+            tofSensorErrors[2] >= kTofFailureFaultCount && tofSensorErrors[3] >= kTofFailureFaultCount;
         if (allSensorsFailed)
         {
-            recoverTofI2cBus();
-            recoveryRequested = true;
+            recoveryRequested = recoverTofI2cBusIfDue();
         }
     }
 
     if (!recoveryRequested && diag != nullptr && (tofDiagNeedsRecovery(*diag) || !tofBusLinesReady()))
     {
-        recoverTofI2cBus();
+        (void)recoverTofI2cBusIfDue();
     }
 }
 
@@ -2835,6 +3004,9 @@ static void recordTofSuccess(uint8_t sensor)
     tofTimeoutErrors[sensor] = 0;
     tofBusErrors[sensor]     = 0;
     tofLastDiagStatus[sensor] = TOF_I2C_OK;
+    tofFirstFailureMs[sensor] = 0;
+    tofFailureWarnLogged[sensor] = false;
+    tofFaultLogged[sensor]       = false;
 }
 
 // Опрос всех сенсоров расстояния
@@ -6201,6 +6373,9 @@ static void recordBootResetCause()
         flags = RESET_REASON_UNKNOWN;
     }
 
+    lastBootResetFlags       = flags;
+    lastBootResetMarkerFlags = markerFlags;
+
     STATS_ATOMIC_UPDATE(
         sramStats->payload.lastResetFlags = flags;
         if ((flags & RESET_REASON_WATCHDOG) != 0)
@@ -6224,7 +6399,7 @@ static void recordBootResetCause()
             sramStats->payload.resetOtherCount++;
         });
 
-    makeLog(
+    makeBootLog(
         LOG_INFO,
         "Reset %s flags=%08lX marker=%08lX cnt=%u/%u/%u/%u/%u",
         primaryResetCategoryName(flags),
@@ -7478,10 +7653,14 @@ static inline void resetTofDiagnostics()
         tofTimeoutErrors[i] = 0;
         tofBusErrors[i]     = 0;
         tofLastDiagStatus[i] = TOF_I2C_OK;
+        tofFirstFailureMs[i] = 0;
+        tofFailureWarnLogged[i] = false;
+        tofFaultLogged[i]       = false;
     }
     tofDistanceFault        = 0;
     tofI2cRecoveryLogged    = false;
     tofLastI2cRecoveryLogMs = 0;
+    tofLastI2cRecoveryAttemptMs = 0;
     tofLastRecoverySummaryLogMs = 0;
 }
 
@@ -7528,11 +7707,36 @@ static inline bool shouldAbortLoop()
     return (status == CMD_STOP || status == CMD_STOP_MANUAL || isErrorActive());
 }
 
-void sendLog(LogLevel level, const char *msg, Stream *port = &SerialDisplay)
+static bool writeTransportPayloadWait(Stream *port, const uint8_t *buffer, uint16_t length, uint32_t timeoutMs)
+{
+    if (!port || !buffer || length == 0)
+    {
+        return false;
+    }
+
+    const uint32_t startedAt = millis();
+    while (transportAvailableForWrite(port) < length)
+    {
+        if (millis() - startedAt >= timeoutMs)
+        {
+            return false;
+        }
+        if (IWatchdog.isEnabled())
+        {
+            IWatchdog.reload();
+        }
+        delay(1);
+    }
+
+    return writeTransportPayload(port, buffer, length, NULL) == length;
+}
+
+static bool sendLogFrame(LogLevel level, const char *msg, Stream *port, bool waitForSpace)
 {
     if (pendingBootloaderEntry || msg == NULL)
-        return;
+        return false;
 
+    bool sentAll = true;
     const char *cursor    = msg;
     size_t      remaining = strlen(msg);
 
@@ -7560,12 +7764,30 @@ void sendLog(LogLevel level, const char *msg, Stream *port = &SerialDisplay)
         uint16_t totalLen = sizeof(FrameHeader) + header->length;
         ProtocolUtils::appendCRC(logBuffer, totalLen);
 
-        if (writeTransportPayload(port, logBuffer, totalLen + 2, NULL) != totalLen + 2)
+        const size_t writeLen = totalLen + 2;
+        const bool sent = waitForSpace
+            ? writeTransportPayloadWait(port, logBuffer, writeLen, kBootLogWriteTimeoutMs)
+            : (writeTransportPayload(port, logBuffer, writeLen, NULL) == writeLen);
+        if (!sent)
+        {
+            sentAll = false;
             break;
+        }
 
         cursor += msgLen;
         remaining -= msgLen;
     } while (remaining > 0);
+
+    if (sentAll && waitForSpace && port != nullptr)
+    {
+        port->flush();
+    }
+    return sentAll;
+}
+
+void sendLog(LogLevel level, const char *msg, Stream *port = &SerialDisplay)
+{
+    (void)sendLogFrame(level, msg, port, false);
 }
 
 void makeLogImpl(LogLevel level, const char *format, ...)
@@ -7576,6 +7798,16 @@ void makeLogImpl(LogLevel level, const char *format, ...)
     va_end(args);
 
     sendLog(level, logStringBuffer, &SerialDisplay);
+}
+
+void makeBootLog(LogLevel level, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    vsnprintf(logStringBuffer, sizeof(logStringBuffer), format, args);
+    va_end(args);
+
+    (void)sendLogFrame(level, logStringBuffer, &SerialDisplay, true);
 }
 
 static inline void countTxFrame(Stream *port)
