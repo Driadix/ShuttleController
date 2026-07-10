@@ -68,6 +68,18 @@ static I2C_HandleTypeDef *tofWireHalHandle()
     return tofWireHalHandleFrom(Wire.getHandle());
 }
 
+static bool tofAddressForId(uint8_t id, uint8_t *address, TofI2cDiagnostics *diag)
+{
+    if (address == nullptr || id > (0x77U - TOF_BASE_I2C_ADDR))
+    {
+        tofSetDiag(diag, TOF_I2C_INVALID_ARG, 0, 0, id, 0, 0, 0);
+        return false;
+    }
+
+    *address = TOF_BASE_I2C_ADDR + id;
+    return true;
+}
+
 static bool I2C_Read_Nbyte_ByAddr(
     uint8_t slave_addr, uint8_t reg_addr, uint8_t *pdata, uint8_t len, TofI2cDiagnostics *diag)
 {
@@ -153,7 +165,13 @@ bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDi
         return false;
     }
 
-    uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
+    uint8_t slave_addr = 0;
+    if (!tofAddressForId(id, &slave_addr, diag))
+    {
+        memset(tof_data, 0, sizeof(TOF_Parameter));
+        return false;
+    }
+
     uint8_t read_buf[TOF_MEASUREMENT_BLOCK_SIZE] = {};
 
     if (!I2C_Read_Nbyte_ByAddr(slave_addr, TOF_MEASUREMENT_REG_START, read_buf, TOF_MEASUREMENT_BLOCK_SIZE, diag))
@@ -184,8 +202,8 @@ bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDi
         tof_data->dis = 0;
     }
 
-    tof_data->interface_mode = 0;
-    tof_data->id             = 0;
+    tof_data->interface_mode = 3;
+    tof_data->id             = id;
     tof_data->uart_baudrate  = 0;
 
     return true;
@@ -193,23 +211,34 @@ bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDi
 
 void IIC_Set_ID(uint8_t current_id, uint8_t new_id)
 {
-    uint8_t slave_addr = TOF_BASE_I2C_ADDR + current_id;
-    I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &new_id, TOF_SIZE_ID);
+    uint8_t slave_addr = 0;
+    if (tofAddressForId(current_id, &slave_addr, nullptr))
+    {
+        I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &new_id, TOF_SIZE_ID);
+    }
     delay(10);
 }
 
 void IIC_Change_Mode_To_UART(uint8_t id)
 {
     uint8_t data       = IIC_CHANGE_TO_UART_DATA;
-    uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
-    I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_MODE, &data, TOF_SIZE_MODE);
+    uint8_t slave_addr = 0;
+    if (tofAddressForId(id, &slave_addr, nullptr))
+    {
+        I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_MODE, &data, TOF_SIZE_MODE);
+    }
     delay(10);
 }
 
 bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag)
 {
-    uint8_t slave_addr = TOF_BASE_I2C_ADDR + id;
+    uint8_t slave_addr = 0;
     uint8_t idReg      = 0;
+
+    if (!tofAddressForId(id, &slave_addr, diag))
+    {
+        return false;
+    }
 
     const bool ok = I2C_Read_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &idReg, TOF_SIZE_ID, diag);
     if (ok && diag != nullptr)
@@ -231,36 +260,3 @@ bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag)
     return true;
 }
 
-bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,
-                             uint32_t idle_threshold_ms,
-                             TofI2cDiagnostics *diag)
-{
-    if (tof_data == nullptr)
-    {
-        if (diag != nullptr)
-        {
-            tofSetDiag(diag, TOF_I2C_INVALID_ARG, 0, 0, 0, 0, 0, 0);
-        }
-        return false;
-    }
-
-    if (id < TOF_MAX_SENSORS)
-    {
-        static uint32_t last_read_ms[TOF_MAX_SENSORS] = {0};
-
-        if (millis() - last_read_ms[id] >= idle_threshold_ms)
-        {
-            TOF_Parameter discard;
-            (void)TOF_Inquire_I2C_Decoding_ByID(id, &discard, nullptr);
-        }
-
-        const bool ok = TOF_Inquire_I2C_Decoding_ByID(id, tof_data, diag);
-        if (ok)
-        {
-            last_read_ms[id] = millis();
-        }
-        return ok;
-    }
-
-    return TOF_Inquire_I2C_Decoding_ByID(id, tof_data, diag);
-}

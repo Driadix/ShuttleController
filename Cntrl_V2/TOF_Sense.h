@@ -10,7 +10,7 @@ typedef struct
     uint8_t  id;              // ID датчика
     uint32_t system_time;     // Время с момента включения, мс
     uint32_t dis;             // Расстояние, мм
-    uint8_t  dis_status;      // Статус измерения
+    uint16_t dis_status;      // Статус измерения
     uint16_t signal_strength; // Сила сигнала
     uint8_t  range_precision; // Точность измерения, см (для TOFSense-F)
     uint8_t  interface_mode;  // Режим интерфейса: 0-UART, 1-CAN, 2-I/O, 3-I2C
@@ -50,7 +50,6 @@ typedef struct
 // Размер блока данных для одного чтения измерения (system_time + distance + status + signal + precision)
 #define TOF_MEASUREMENT_REG_START  0x20   // первый регистр данных измерения
 #define TOF_MEASUREMENT_BLOCK_SIZE 13     // 0x20..0x2C включительно
-#define TOF_MAX_SENSORS            16     // максимальное количество сенсоров на шине
 
 #define IIC_CHANGE_TO_UART_DATA 0x00
 
@@ -85,12 +84,6 @@ void IIC_Set_ID(uint8_t current_id, uint8_t new_id);
 void IIC_Change_Mode_To_UART(uint8_t id);
 bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag = nullptr);
 
-// Если с момента последнего успешного чтения прошло > idle_threshold_ms,
-// делает preflight read перед основным чтением.
-// idle_threshold_ms = 0 → preflight при каждом вызове.
-bool TOF_ReadWithStaleGuard(uint8_t id, TOF_Parameter *tof_data,
-                             uint32_t idle_threshold_ms = 500,
-                             TofI2cDiagnostics *diag = nullptr);
 
 #endif
 

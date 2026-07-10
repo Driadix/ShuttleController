@@ -21,7 +21,7 @@
 #endif
 
 #ifndef I2C_DIAG_LOGS
-#define I2C_DIAG_LOGS 1
+#define I2C_DIAG_LOGS 0
 #endif
 
 constexpr size_t LOG_FORMAT_MAX_PRINTABLE_CHARS = 255;
@@ -194,8 +194,8 @@ static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
 static bool                  recoverTofI2cBusIfDue();
 static inline bool           tofBusLinesReady();
-static bool                  recoverTofI2cBusIfNeeded();
-static bool                  tofDiagNeedsRecovery(const TofI2cDiagnostics &diag);
+static bool                  tofAllSensorsFaulted();
+static bool                  tofAllSensorsLookLikeBusFailure();
 static bool                  tofDiagIsBusFailure(const TofI2cDiagnostics *diag);
 static const char           *tofHalErrorName(uint32_t error);
 static void                  logTofI2cLines(const char *tag);
@@ -203,6 +203,8 @@ static void                  logI2cBootScan();
 static void                  logTofBootSnapshot();
 static void                  logI2cDiagSummaryIfDue(uint32_t now);
 static bool                  readAs5600AngleChecked(uint16_t *rawAngle);
+static bool                  readAs5600AngleForMotion(uint16_t *rawAngle);
+static bool                  readAs5600AngleFresh(int *angleOut);
 static uint16_t              readAs5600AngleForTelemetry();
 static void                  logBootResetReplay();
 static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
@@ -381,7 +383,7 @@ constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
 constexpr uint32_t tofI2cClockHz                = 400000U;
-constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 250U;
+constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 5000U;
 constexpr uint8_t  kTofFailureWarnCount              = 8U;
 constexpr uint8_t  kTofFailureFaultCount             = 16U;
 constexpr uint32_t kTofFailureFaultDelayMs           = 3000UL;
@@ -394,8 +396,8 @@ constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
 constexpr uint32_t kRadioRuntimeAuxWaitMs             = 20UL;
-constexpr uint32_t kAs5600FailLogIntervalMs           = 5000UL;
-constexpr uint32_t kI2cDiagSummaryIntervalMs          = 5000UL;
+constexpr uint32_t kAs5600FailLogIntervalMs           = 30000UL;
+constexpr uint32_t kI2cDiagSummaryIntervalMs          = 30000UL;
 
 #pragma endregion
 
@@ -835,10 +837,33 @@ static void logBreadcrumbSummaryIfDue(uint32_t now)
 #endif
 }
 
-static bool tofDiagNeedsRecovery(const TofI2cDiagnostics &diag)
+static bool tofStatusIsBusFailure(TofI2cStatus status)
 {
-    return diag.status == TOF_I2C_HAL_TIMEOUT || diag.status == TOF_I2C_HAL_BUSY ||
-           diag.status == TOF_I2C_NO_HANDLE || diag.status == TOF_I2C_BUS_STUCK;
+    return status == TOF_I2C_HAL_TIMEOUT || status == TOF_I2C_HAL_BUSY || status == TOF_I2C_NO_HANDLE ||
+           status == TOF_I2C_HAL_ERROR || status == TOF_I2C_BUS_STUCK;
+}
+
+static bool tofAllSensorsFaulted()
+{
+    return tofSensorErrors[0] >= kTofFailureFaultCount && tofSensorErrors[1] >= kTofFailureFaultCount &&
+           tofSensorErrors[2] >= kTofFailureFaultCount && tofSensorErrors[3] >= kTofFailureFaultCount;
+}
+
+static bool tofAllSensorsLookLikeBusFailure()
+{
+    if (!tofBusLinesReady())
+    {
+        return true;
+    }
+
+    for (uint8_t i = 0; i < 4; ++i)
+    {
+        if (!tofStatusIsBusFailure((TofI2cStatus)tofLastDiagStatus[i]))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool tofDiagIsBusFailure(const TofI2cDiagnostics *diag)
@@ -852,9 +877,7 @@ static bool tofDiagIsBusFailure(const TofI2cDiagnostics *diag)
         return false;
     }
 
-    return diag->status == TOF_I2C_HAL_TIMEOUT || diag->status == TOF_I2C_HAL_BUSY ||
-           diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_HAL_ERROR ||
-           diag->status == TOF_I2C_BUS_STUCK;
+    return tofStatusIsBusFailure(diag->status);
 }
 
 static const char *tofHalErrorName(uint32_t error)
@@ -1013,6 +1036,42 @@ static bool readAs5600AngleChecked(uint16_t *rawAngle)
     return false;
 }
 
+static bool readAs5600AngleForMotion(uint16_t *rawAngle)
+{
+    if (rawAngle == nullptr)
+    {
+        return false;
+    }
+    if (readAs5600AngleChecked(rawAngle))
+    {
+        return true;
+    }
+    if (!as5600LastGoodAngleValid)
+    {
+        return false;
+    }
+
+    *rawAngle = as5600LastGoodAngleRaw;
+    return true;
+}
+
+static bool readAs5600AngleFresh(int *angleOut)
+{
+    if (angleOut == nullptr)
+    {
+        return false;
+    }
+
+    uint16_t rawAngle = 0;
+    if (!readAs5600AngleChecked(&rawAngle))
+    {
+        return false;
+    }
+
+    *angleOut = rawAngle;
+    return true;
+}
+
 static uint16_t readAs5600AngleForTelemetry()
 {
     uint16_t rawAngle = as5600LastGoodAngleRaw;
@@ -1144,17 +1203,6 @@ static inline bool tofBusLinesReady()
     return digitalRead(TOF_I2C_SDA) == HIGH && digitalRead(TOF_I2C_SCL) == HIGH;
 }
 
-static bool recoverTofI2cBusIfNeeded()
-{
-    if (tofBusLinesReady())
-    {
-        return true;
-    }
-
-    writeBreadcrumb(BC_TOF_PREFLIGHT, 0xFF, TOF_I2C_BUS_STUCK, 0);
-    (void)recoverTofI2cBusIfDue();
-    return tofBusLinesReady();
-}
 
 static bool readTofBootPresence(uint8_t id, TofI2cDiagnostics &diag)
 {
@@ -3181,7 +3229,6 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
     const bool failureSustained =
         tofSensorErrors[sensor] >= kTofFailureFaultCount && failAge >= kTofFailureFaultDelayMs;
 
-    bool recoveryRequested = false;
     if (failureSustained)
     {
         setFault(tofFaultForSensor(sensor));
@@ -3207,10 +3254,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
             tofFaultLogged[sensor] = true;
         }
 
-        const bool allSensorsFailed =
-            tofSensorErrors[0] >= kTofFailureFaultCount && tofSensorErrors[1] >= kTofFailureFaultCount &&
-            tofSensorErrors[2] >= kTofFailureFaultCount && tofSensorErrors[3] >= kTofFailureFaultCount;
-        if (allSensorsFailed)
+        if (tofAllSensorsFaulted() && tofAllSensorsLookLikeBusFailure())
         {
             if (!tofBusFailureLogged && tofDiagIsBusFailure(diag))
             {
@@ -3229,18 +3273,15 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
                     (unsigned long)tofI2cRecoveryCount);
                 tofBusFailureLogged = true;
             }
-            recoveryRequested = recoverTofI2cBusIfDue();
+            (void)recoverTofI2cBusIfDue();
         }
-    }
-
-    if (!recoveryRequested && diag != nullptr && (tofDiagNeedsRecovery(*diag) || !tofBusLinesReady()))
-    {
-        (void)recoverTofI2cBusIfDue();
     }
 }
 
 static void recordTofSuccess(uint8_t sensor)
 {
+    alertMan.clearFault(tofFaultForSensor(sensor));
+
     if (tofSensorErrors[sensor] == 0 && tofProbeErrors[sensor] == 0 && tofReadErrors[sensor] == 0 &&
         tofTimeoutErrors[sensor] == 0 && tofBusErrors[sensor] == 0)
     {
@@ -3292,37 +3333,16 @@ void get_Distance()
 
     const uint8_t sensorId = currentSensor + 1;
     writeBreadcrumb(BC_TOF_POLL, currentSensor, 0, filterCount);
-
-    if (!recoverTofI2cBusIfNeeded())
-    {
-        TofI2cDiagnostics diag = {};
-        diag.status            = TOF_I2C_BUS_STUCK;
-        diag.address           = TOF_BASE_I2C_ADDR + sensorId;
-        writeBreadcrumb(BC_TOF_PREFLIGHT, currentSensor, diag.status, filterCount);
-        recordTofFailure(currentSensor, filterCount, true, &diag);
-        return;
-    }
-
     TofI2cDiagnostics diag = {};
-    writeBreadcrumb(BC_TOF_PROBE, currentSensor, 0, filterCount);
-    if (!TOF_Is_Device_Present(sensorId, &diag))
+    if (!tofBusLinesReady())
     {
-        writeBreadcrumb(BC_TOF_PROBE, currentSensor, diag.status, (uint8_t)diag.halError);
-        recordTofFailure(currentSensor, filterCount, true, &diag);
-        return;
-    }
-
-    if (!recoverTofI2cBusIfNeeded())
-    {
-        diag                   = {};
-        diag.status            = TOF_I2C_BUS_STUCK;
-        diag.address           = TOF_BASE_I2C_ADDR + sensorId;
+        diag.status  = TOF_I2C_BUS_STUCK;
+        diag.address = TOF_BASE_I2C_ADDR + sensorId;
         writeBreadcrumb(BC_TOF_PREFLIGHT, currentSensor, diag.status, filterCount);
         recordTofFailure(currentSensor, filterCount, false, &diag);
         return;
     }
 
-    diag = {};
     writeBreadcrumb(BC_TOF_READ, currentSensor, 0, filterCount);
     if (!TOF_Inquire_I2C_Decoding_ByID(sensorId, &sensor, &diag))
     {
@@ -3397,9 +3417,12 @@ uint16_t filter_Distance(uint16_t arr[5])
 // Определяет текущую позицию шаттла в канале по переднему фронту (передней панели)
 void set_Position()
 {
-    angle = as5600.readAngle();
-    while (angle > 4096 || angle < 0)
-        angle = as5600.readAngle();
+    uint16_t rawAngle = 0;
+    if (!readAs5600AngleForMotion(&rawAngle))
+    {
+        return;
+    }
+    angle = rawAngle;
     int diff = 0;
     if ((motorReverse == 0) ^ inverse)
     {
@@ -4282,9 +4305,12 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)
         return;
     }
     makeLog(LOG_INFO, "Moove F distance = %d Pos = %d", dist, currentPosition);
-    uint16_t startAngle = as5600.readAngle();
-    while (startAngle > 4096)
-        startAngle = as5600.readAngle();
+    uint16_t startAngle = 0;
+    if (!readAs5600AngleForMotion(&startAngle))
+    {
+        setFault(FAULT_MOVE_TIMEOUT);
+        return;
+    }
     uint16_t currentAngle = startAngle;
     uint8_t  moove        = 1;
     count                 = millis();
@@ -4320,9 +4346,13 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)
         if (millis() - count > 50)
         {
             set_Position();
-            currentAngle = as5600.readAngle();
-            while (currentAngle > 4096)
-                currentAngle = as5600.readAngle();
+            if (!readAs5600AngleForMotion(&currentAngle))
+            {
+                setFault(FAULT_MOVE_TIMEOUT);
+                motor_Stop();
+                status = CMD_STOP;
+                return;
+            }
             int diff = 0;
             if (!inverse)
             {
@@ -4478,9 +4508,12 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)
         return;
     }
     makeLog(LOG_INFO, "Moove R distance = %d Pos = %d", dist, currentPosition);
-    uint16_t startAngle = as5600.readAngle();
-    while (startAngle > 4096)
-        startAngle = as5600.readAngle();
+    uint16_t startAngle = 0;
+    if (!readAs5600AngleForMotion(&startAngle))
+    {
+        setFault(FAULT_MOVE_TIMEOUT);
+        return;
+    }
     uint16_t currentAngle = startAngle;
     uint8_t  moove        = 1;
     count                 = millis();
@@ -4516,9 +4549,13 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)
         if (millis() - count > 50)
         {
             set_Position();
-            currentAngle = as5600.readAngle();
-            while (currentAngle > 4096)
-                currentAngle = as5600.readAngle();
+            if (!readAs5600AngleForMotion(&currentAngle))
+            {
+                setFault(FAULT_MOVE_TIMEOUT);
+                motor_Stop();
+                status = CMD_STOP;
+                return;
+            }
             int diff = 0;
             if (inverse)
             {
@@ -6685,7 +6722,12 @@ static void recordBootResetCause()
 void calibrate_Encoder_R()
 {
     makeLog(LOG_INFO, "Start calibrating encoder to Reverse");
-    as5600.readAngle();
+    if (!readAs5600AngleFresh(&angle))
+    {
+        setFault(FAULT_MOVE_TIMEOUT);
+        motor_Stop();
+        return;
+    }
 
     if (inverse)
     {
@@ -6703,13 +6745,31 @@ void calibrate_Encoder_R()
         return;
     }
     // Выставляем 0 на энкодере
-    angle = as5600.readAngle();
+    if (!readAs5600AngleFresh(&angle))
+    {
+        setFault(FAULT_MOVE_TIMEOUT);
+        motor_Stop();
+        return;
+    }
     motor_Start_Reverse();
     motor_Speed(5);
     int cnt = millis();
     count   = millis();
+    const uint32_t zeroStartMs = millis();
     while (!(angle > 4086 || angle < 10))
     {
+        SystemYield();
+        if (shouldAbortLoop())
+        {
+            motor_Stop();
+            return;
+        }
+        if (millis() - zeroStartMs > 30000UL)
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         if (millis() - count > 100)
         {
             motor_Speed(5);
@@ -6717,7 +6777,12 @@ void calibrate_Encoder_R()
         }
         if (millis() - cnt > 5)
         {
-            angle = as5600.readAngle();
+            if (!readAs5600AngleFresh(&angle))
+            {
+                setFault(FAULT_MOVE_TIMEOUT);
+                motor_Stop();
+                return;
+            }
             cnt   = millis();
         }
     }
@@ -6725,15 +6790,27 @@ void calibrate_Encoder_R()
     // Запускаем цикл измерений
     uint8_t i = 0;
     cnt       = millis();
+    const uint32_t calibrationStartMs = millis();
     while (i < 8)
     {
+        if (millis() - calibrationStartMs > 120000UL)
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         delay(3);
         if (millis() - count > 100)
         {
             motor_Speed(5);
             count = millis();
         }
-        angle = as5600.readAngle();
+        if (!readAs5600AngleFresh(&angle))
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         if (angle > (7 - i) * 512 - 10 && angle < (7 - i) * 512 + 10)
         {
             calibrateEncoder_R[7 - i] = millis() - cnt;
@@ -6786,13 +6863,31 @@ void calibrate_Encoder_F()
         return;
     }
     // Выставляем 0 на энкодере
-    angle = as5600.readAngle();
+    if (!readAs5600AngleFresh(&angle))
+    {
+        setFault(FAULT_MOVE_TIMEOUT);
+        motor_Stop();
+        return;
+    }
     motor_Start_Forward();
     motor_Speed(5);
     int cnt = millis();
     count   = millis();
+    const uint32_t zeroStartMs = millis();
     while (!(angle > 4086 || angle < 10))
     {
+        SystemYield();
+        if (shouldAbortLoop())
+        {
+            motor_Stop();
+            return;
+        }
+        if (millis() - zeroStartMs > 30000UL)
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         if (millis() - count > 100)
         {
             motor_Speed(5);
@@ -6800,7 +6895,12 @@ void calibrate_Encoder_F()
         }
         if (millis() - cnt > 5)
         {
-            angle = as5600.readAngle();
+            if (!readAs5600AngleFresh(&angle))
+            {
+                setFault(FAULT_MOVE_TIMEOUT);
+                motor_Stop();
+                return;
+            }
             cnt   = millis();
         }
     }
@@ -6808,15 +6908,27 @@ void calibrate_Encoder_F()
     // Запускаем цикл измерений
     uint8_t i = 0;
     cnt       = millis();
+    const uint32_t calibrationStartMs = millis();
     while (i < 8)
     {
+        if (millis() - calibrationStartMs > 120000UL)
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         delay(3);
         if (millis() - count > 100)
         {
             motor_Speed(5);
             count = millis();
         }
-        angle = as5600.readAngle();
+        if (!readAs5600AngleFresh(&angle))
+        {
+            setFault(FAULT_MOVE_TIMEOUT);
+            motor_Stop();
+            return;
+        }
         if (angle > ((i + 1) * 512) - 10 && angle < (i + 1) * 512 + 10)
         {
             calibrateEncoder_F[i] = millis() - cnt;
