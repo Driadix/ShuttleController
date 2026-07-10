@@ -194,6 +194,10 @@ static void                  initTofI2cBus();
 static void                  recoverTofI2cBus();
 static bool                  recoverTofI2cBusIfDue();
 static inline bool           tofBusLinesReady();
+static void                  setTofI2cClock(uint32_t clockHz);
+static uint8_t               i2cProbeAddress(uint8_t address);
+static uint8_t               scanTofAddressMask();
+static void                  logI2cBootScanAtClock(uint32_t clockHz);
 static bool                  tofAllSensorsFaulted();
 static bool                  tofAllSensorsLookLikeBusFailure();
 static bool                  tofDiagIsBusFailure(const TofI2cDiagnostics *diag);
@@ -382,7 +386,9 @@ constexpr uint32_t kBootLogSettleMs            = 250;
 constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
 constexpr uint32_t kManualRadioHoldWatchdogMs  = 3000;
-constexpr uint32_t tofI2cClockHz                = 400000U;
+constexpr uint32_t tofI2cClockHz                = 100000U;
+constexpr uint32_t kTofI2cSlowProbeClockHz      = 100000U;
+constexpr uint32_t kTofI2cFastProbeClockHz      = 400000U;
 constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 5000U;
 constexpr uint8_t  kTofFailureWarnCount              = 8U;
 constexpr uint8_t  kTofFailureFaultCount             = 16U;
@@ -840,7 +846,7 @@ static void logBreadcrumbSummaryIfDue(uint32_t now)
 static bool tofStatusIsBusFailure(TofI2cStatus status)
 {
     return status == TOF_I2C_HAL_TIMEOUT || status == TOF_I2C_HAL_BUSY || status == TOF_I2C_NO_HANDLE ||
-           status == TOF_I2C_HAL_ERROR || status == TOF_I2C_BUS_STUCK;
+           status == TOF_I2C_HAL_ERROR || status == TOF_I2C_NO_ACK || status == TOF_I2C_BUS_STUCK;
 }
 
 static bool tofAllSensorsFaulted()
@@ -937,34 +943,60 @@ static const char *tofHalErrorName(uint32_t error)
     return "hal";
 }
 
-static void logI2cBootScan()
+static void setTofI2cClock(uint32_t clockHz)
 {
+    Wire.setClock(clockHz);
+    delayMicroseconds(50);
+}
+
+static uint8_t i2cProbeAddress(uint8_t address)
+{
+    if (!tofBusLinesReady())
+    {
+        return 0xFFU;
+    }
+
+    Wire.beginTransmission(address);
+    return Wire.endTransmission();
+}
+
+static uint8_t scanTofAddressMask()
+{
+    uint8_t mask = 0;
+    for (uint8_t id = 1U; id <= 4U; ++id)
+    {
+        if (i2cProbeAddress((uint8_t)(TOF_BASE_I2C_ADDR + id)) == 0U)
+        {
+            mask |= (uint8_t)(1U << (id - 1U));
+        }
+    }
+    return mask;
+}
+
+static void logI2cBootScanAtClock(uint32_t clockHz)
+{
+    setTofI2cClock(clockHz);
     if (!tofBusLinesReady())
     {
         makeReliableLog(
             LOG_WARN,
             "I2C scan skip clk=%lu io=%u/%u",
-            (unsigned long)tofI2cClockHz,
+            (unsigned long)clockHz,
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
         return;
     }
 
-    Wire.beginTransmission((uint8_t)0x09U);
-    const uint8_t err09 = Wire.endTransmission();
-    Wire.beginTransmission((uint8_t)0x0AU);
-    const uint8_t err0A = Wire.endTransmission();
-    Wire.beginTransmission((uint8_t)0x0BU);
-    const uint8_t err0B = Wire.endTransmission();
-    Wire.beginTransmission((uint8_t)0x0CU);
-    const uint8_t err0C = Wire.endTransmission();
-    Wire.beginTransmission(kAs5600I2cAddress);
-    const uint8_t err36 = Wire.endTransmission();
+    const uint8_t err09 = i2cProbeAddress((uint8_t)0x09U);
+    const uint8_t err0A = i2cProbeAddress((uint8_t)0x0AU);
+    const uint8_t err0B = i2cProbeAddress((uint8_t)0x0BU);
+    const uint8_t err0C = i2cProbeAddress((uint8_t)0x0CU);
+    const uint8_t err36 = i2cProbeAddress(kAs5600I2cAddress);
 
     makeReliableLog(
         LOG_INFO,
         "I2C scan clk=%lu 09=%s/%u 0A=%s/%u 0B=%s/%u 0C=%s/%u 36=%s/%u io=%u/%u",
-        (unsigned long)tofI2cClockHz,
+        (unsigned long)clockHz,
         (err09 == 0U) ? "ack" : "miss",
         err09,
         (err0A == 0U) ? "ack" : "miss",
@@ -977,6 +1009,16 @@ static void logI2cBootScan()
         err36,
         digitalRead(TOF_I2C_SDA),
         digitalRead(TOF_I2C_SCL));
+}
+
+static void logI2cBootScan()
+{
+    logI2cBootScanAtClock(kTofI2cSlowProbeClockHz);
+    if (kTofI2cFastProbeClockHz != kTofI2cSlowProbeClockHz)
+    {
+        logI2cBootScanAtClock(kTofI2cFastProbeClockHz);
+    }
+    setTofI2cClock(tofI2cClockHz);
 }
 
 static bool readAs5600AngleChecked(uint16_t *rawAngle)
@@ -1110,7 +1152,7 @@ static void initTofI2cBus()
     Wire.setSDA(TOF_I2C_SDA);
     Wire.setSCL(TOF_I2C_SCL);
     Wire.begin();
-    Wire.setClock(tofI2cClockHz);
+    setTofI2cClock(tofI2cClockHz);
 }
 
 
@@ -1219,6 +1261,20 @@ static bool readTofBootPresence(uint8_t id, TofI2cDiagnostics &diag)
     IWatchdog.reload();
     return ok;
 }
+static bool readTofBootPresenceIfAck(uint8_t id, uint8_t ackMask, TofI2cDiagnostics &diag)
+{
+    diag          = {};
+    diag.address  = TOF_BASE_I2C_ADDR + id;
+    diag.expected = id;
+
+    if ((ackMask & (uint8_t)(1U << (id - 1U))) == 0U)
+    {
+        diag.status = TOF_I2C_NO_ACK;
+        return false;
+    }
+
+    return readTofBootPresence(id, diag);
+}
 
 static void logTofBootSnapshot()
 {
@@ -1233,19 +1289,32 @@ static void logTofBootSnapshot()
         return;
     }
 
+    const uint8_t tofAckMask = scanTofAddressMask();
+    if (tofAckMask == 0U)
+    {
+        makeReliableLog(
+            LOG_WARN,
+            "TOF boot noack clk=%lu io=%u/%u",
+            (unsigned long)tofI2cClockHz,
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+        return;
+    }
+
     TofI2cDiagnostics channelForward = {};
     TofI2cDiagnostics channelReverse = {};
     TofI2cDiagnostics palletForward  = {};
     TofI2cDiagnostics palletReverse  = {};
 
-    const bool channelForwardOk = readTofBootPresence(2, channelForward);
-    const bool channelReverseOk = readTofBootPresence(1, channelReverse);
-    const bool palletForwardOk  = readTofBootPresence(4, palletForward);
-    const bool palletReverseOk  = readTofBootPresence(3, palletReverse);
+    const bool channelForwardOk = readTofBootPresenceIfAck(2, tofAckMask, channelForward);
+    const bool channelReverseOk = readTofBootPresenceIfAck(1, tofAckMask, channelReverse);
+    const bool palletForwardOk  = readTofBootPresenceIfAck(4, tofAckMask, palletForward);
+    const bool palletReverseOk  = readTofBootPresenceIfAck(3, tofAckMask, palletReverse);
 
     makeReliableLog(
         LOG_INFO,
-        "TOF boot cf=%u/%s/%u cr=%u/%s/%u pf=%u/%s/%u pr=%u/%s/%u io=%u/%u",
+        "TOF boot m=%02X cf=%u/%s/%u cr=%u/%s/%u pf=%u/%s/%u pr=%u/%s/%u io=%u/%u",
+        tofAckMask,
         channelForwardOk,
         TOF_I2C_Status_Name(channelForward.status),
         channelForward.received,
@@ -3196,7 +3265,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, bool probeFail
             incrementTofFailureCounter(tofTimeoutErrors[sensor]);
         }
         if (diag->status == TOF_I2C_BUS_STUCK || diag->status == TOF_I2C_HAL_BUSY ||
-            diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_HAL_ERROR)
+            diag->status == TOF_I2C_NO_HANDLE || diag->status == TOF_I2C_HAL_ERROR || diag->status == TOF_I2C_NO_ACK)
         {
             incrementTofFailureCounter(tofBusErrors[sensor]);
         }

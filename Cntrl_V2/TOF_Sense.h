@@ -63,6 +63,7 @@ enum TofI2cStatus : uint8_t
     TOF_I2C_HAL_TIMEOUT,
     TOF_I2C_SHORT_READ,
     TOF_I2C_ID_MISMATCH,
+    TOF_I2C_NO_ACK,
     TOF_I2C_BUS_STUCK
 };
 

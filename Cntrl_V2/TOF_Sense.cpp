@@ -9,7 +9,7 @@
 
 static constexpr uint32_t kTofI2cHalTimeoutMs = 30U;
 
-static TofI2cStatus tofStatusFromHal(HAL_StatusTypeDef status)
+static TofI2cStatus tofStatusFromHal(HAL_StatusTypeDef status, uint32_t halError)
 {
     switch (status)
     {
@@ -21,6 +21,14 @@ static TofI2cStatus tofStatusFromHal(HAL_StatusTypeDef status)
         return TOF_I2C_HAL_TIMEOUT;
     case HAL_ERROR:
     default:
+#if defined(HAL_I2C_ERROR_AF)
+        if ((halError & HAL_I2C_ERROR_AF) != 0U)
+        {
+            return TOF_I2C_NO_ACK;
+        }
+#else
+        (void)halError;
+#endif
         return TOF_I2C_HAL_ERROR;
     }
 }
@@ -100,7 +108,7 @@ static bool I2C_Read_Nbyte_ByAddr(
     const HAL_StatusTypeDef status =
         HAL_I2C_Mem_Read(handle, deviceAddr, reg_addr, I2C_MEMADD_SIZE_8BIT, pdata, len, kTofI2cHalTimeoutMs);
     const uint32_t      halError  = HAL_I2C_GetError(handle);
-    const TofI2cStatus tofStatus = tofStatusFromHal(status);
+    const TofI2cStatus tofStatus = tofStatusFromHal(status, halError);
     tofSetDiag(diag, tofStatus, slave_addr, reg_addr, len, (tofStatus == TOF_I2C_OK) ? len : 0, status, halError);
     return tofStatus == TOF_I2C_OK;
 }
@@ -150,6 +158,8 @@ const char *TOF_I2C_Status_Name(TofI2cStatus status)
         return "short";
     case TOF_I2C_ID_MISMATCH:
         return "id_mis";
+    case TOF_I2C_NO_ACK:
+        return "noack";
     case TOF_I2C_BUS_STUCK:
         return "stuck";
     default:
