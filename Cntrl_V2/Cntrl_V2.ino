@@ -201,7 +201,6 @@ static void                  logI2cBootScanAtClock(uint32_t clockHz);
 static bool                  tofAllSensorsFaulted();
 static bool                  tofAllSensorsLookLikeBusFailure();
 static bool                  tofDiagIsBusFailure(const TofI2cDiagnostics *diag);
-static const char           *tofHalErrorName(uint32_t error);
 static void                  logTofI2cLines(const char *tag);
 static void                  logI2cBootScan();
 static void                  logTofBootSnapshot();
@@ -876,85 +875,11 @@ static bool tofDiagIsBusFailure(const TofI2cDiagnostics *diag)
         return false;
     }
 
-    if (diag->status == TOF_I2C_BUS_STUCK || diag->status == TOF_I2C_HAL_TIMEOUT)
-    {
-        return true;
-    }
-    if (diag->status != TOF_I2C_HAL_ERROR)
-    {
-        return false;
-    }
-
-#if defined(HAL_I2C_ERROR_BERR)
-    if ((diag->halError & HAL_I2C_ERROR_BERR) != 0U)
-    {
-        return true;
-    }
-#endif
-#if defined(HAL_I2C_ERROR_ARLO)
-    if ((diag->halError & HAL_I2C_ERROR_ARLO) != 0U)
-    {
-        return true;
-    }
-#endif
-    return false;
-}
-
-static const char *tofHalErrorName(uint32_t error)
-{
-    if (error == 0U)
-    {
-        return "none";
-    }
-#if defined(HAL_I2C_ERROR_BERR)
-    if ((error & HAL_I2C_ERROR_BERR) != 0U)
-    {
-        return "berr";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_ARLO)
-    if ((error & HAL_I2C_ERROR_ARLO) != 0U)
-    {
-        return "arlo";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_AF)
-    if ((error & HAL_I2C_ERROR_AF) != 0U)
-    {
-        return "nack";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_OVR)
-    if ((error & HAL_I2C_ERROR_OVR) != 0U)
-    {
-        return "ovr";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_DMA)
-    if ((error & HAL_I2C_ERROR_DMA) != 0U)
-    {
-        return "dma";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_TIMEOUT)
-    if ((error & HAL_I2C_ERROR_TIMEOUT) != 0U)
-    {
-        return "timeout";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_SIZE)
-    if ((error & HAL_I2C_ERROR_SIZE) != 0U)
-    {
-        return "size";
-    }
-#endif
-#if defined(HAL_I2C_ERROR_DMA_PARAM)
-    if ((error & HAL_I2C_ERROR_DMA_PARAM) != 0U)
-    {
-        return "dma_param";
-    }
-#endif
-    return "hal";
+    // Wire distinguishes local NACKs (handled as TOF_I2C_NO_ACK) from its
+    // remaining transport error.  With this single-master controller, the
+    // latter is shared-bus/peripheral evidence and warrants one recovery.
+    return diag->status == TOF_I2C_BUS_STUCK || diag->status == TOF_I2C_WIRE_TIMEOUT ||
+           diag->status == TOF_I2C_WIRE_ERROR;
 }
 
 static void setTofI2cClock(uint32_t clockHz)
@@ -3274,7 +3199,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
     if (diag != nullptr)
     {
         tofLastDiagStatus[sensor] = (uint8_t)diag->status;
-        if (diag->status == TOF_I2C_HAL_TIMEOUT)
+        if (diag->status == TOF_I2C_WIRE_TIMEOUT)
         {
             incrementTofFailureCounter(tofTimeoutErrors[sensor]);
         }
@@ -3284,9 +3209,9 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
         }
     }
 
-    // NACK identifies one missing/unpowered sensor.  Only a line-stuck,
-    // timeout, or explicit HAL bus/arbitration error can justify resetting
-    // the shared I2C peripheral and toggling SCL.
+    // NACK identifies one missing/unpowered sensor.  Only stuck lines or a
+    // non-NACK Wire transport failure can justify resetting the shared I2C
+    // peripheral and toggling SCL.
     if (sharedBusFailure)
     {
         (void)recoverTofI2cBusIfDue();
@@ -3298,7 +3223,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
     {
         makeReliableLog(
             LOG_WARN,
-            "TOF %s degraded total=%u r=%u st=%s a=%02X reg=%02X ex=%u got=%u he=%s/%lu io=%u/%u",
+            "TOF %s degraded total=%u r=%u st=%s a=%02X reg=%02X ex=%u got=%u wr=%u io=%u/%u",
             tofNameForSensor(sensor),
             tofSensorErrors[sensor],
             tofReadErrors[sensor],
@@ -3307,8 +3232,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
             diag != nullptr ? diag->reg : 0,
             diag != nullptr ? diag->expected : 0,
             diag != nullptr ? diag->received : 0,
-            tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
-            diag != nullptr ? (unsigned long)diag->halError : 0UL,
+            diag != nullptr ? diag->wireStatus : 0U,
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
         tofFailureWarnLogged[sensor] = true;
@@ -3325,7 +3249,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
         {
             makeReliableLog(
                 LOG_ERROR,
-                "TOF %s fail total=%u age=%lu r=%u t=%u b=%u st=%s ex=%u got=%u he=%s/%lu io=%u/%u",
+                "TOF %s fail total=%u age=%lu r=%u t=%u b=%u st=%s ex=%u got=%u wr=%u io=%u/%u",
                 tofNameForSensor(sensor),
                 tofSensorErrors[sensor],
                 (unsigned long)failAge,
@@ -3335,8 +3259,7 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
                 TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
                 diag != nullptr ? diag->expected : 0,
                 diag != nullptr ? diag->received : 0,
-                tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
-                diag != nullptr ? (unsigned long)diag->halError : 0UL,
+                diag != nullptr ? diag->wireStatus : 0U,
                 digitalRead(TOF_I2C_SDA),
                 digitalRead(TOF_I2C_SCL));
             tofFaultLogged[sensor] = true;
@@ -3349,14 +3272,13 @@ static void recordTofFailure(uint8_t sensor, uint8_t filterIndex, const TofI2cDi
                 {
                     makeReliableLog(
                         LOG_ERROR,
-                        "TOF bus fail total=%u/%u/%u/%u st=%s he=%s/%lu io=%u/%u rec=%lu",
+                        "TOF bus fail total=%u/%u/%u/%u st=%s wr=%u io=%u/%u rec=%lu",
                         tofSensorErrors[0],
                         tofSensorErrors[1],
                         tofSensorErrors[2],
                         tofSensorErrors[3],
                         diag != nullptr ? TOF_I2C_Status_Name(diag->status) : "unknown",
-                        tofHalErrorName(diag != nullptr ? diag->halError : 0UL),
-                        diag != nullptr ? (unsigned long)diag->halError : 0UL,
+                        diag != nullptr ? diag->wireStatus : 0U,
                         digitalRead(TOF_I2C_SDA),
                         digitalRead(TOF_I2C_SCL),
                         (unsigned long)tofI2cRecoveryCount);
@@ -3431,7 +3353,7 @@ void get_Distance()
     writeBreadcrumb(BC_TOF_READ, currentSensor, 0, filterCount);
     if (!TOF_Inquire_I2C_Decoding_ByID(sensorId, &sensor, &diag))
     {
-        writeBreadcrumb(BC_TOF_READ, currentSensor, diag.status, (uint8_t)diag.halError);
+        writeBreadcrumb(BC_TOF_READ, currentSensor, diag.status, diag.wireStatus);
         recordTofFailure(currentSensor, filterCount, &diag);
         return;
     }

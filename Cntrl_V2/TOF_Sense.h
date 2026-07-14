@@ -57,10 +57,8 @@ enum TofI2cStatus : uint8_t
 {
     TOF_I2C_OK = 0,
     TOF_I2C_INVALID_ARG,
-    TOF_I2C_NO_HANDLE,
-    TOF_I2C_HAL_ERROR,
-    TOF_I2C_HAL_BUSY,
-    TOF_I2C_HAL_TIMEOUT,
+    TOF_I2C_WIRE_ERROR,
+    TOF_I2C_WIRE_TIMEOUT,
     TOF_I2C_SHORT_READ,
     TOF_I2C_ID_MISMATCH,
     TOF_I2C_NO_ACK,
@@ -74,8 +72,7 @@ struct TofI2cDiagnostics
     uint8_t      reg;
     uint8_t      expected;
     uint8_t      received;
-    uint32_t     halStatus;
-    uint32_t     halError;
+    uint8_t      wireStatus; // Raw Wire.endTransmission() status (0 = success).
 };
 
 // Функции
