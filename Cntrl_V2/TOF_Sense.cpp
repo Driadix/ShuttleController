@@ -207,11 +207,6 @@ bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDi
         (uint16_t)((uint16_t)read_buf[10] | ((uint16_t)read_buf[11] << 8));
     tof_data->range_precision = read_buf[12];
 
-    if (tof_data->dis_status == 0)
-    {
-        tof_data->dis = 0;
-    }
-
     tof_data->interface_mode = 3;
     tof_data->id             = id;
     tof_data->uart_baudrate  = 0;

@@ -10,7 +10,7 @@ typedef struct
     uint8_t  id;              // ID датчика
     uint32_t system_time;     // Время с момента включения, мс
     uint32_t dis;             // Расстояние, мм
-    uint16_t dis_status;      // Статус измерения
+    uint16_t dis_status;      // Статус измерения: 0-invalid, 1-valid
     uint16_t signal_strength; // Сила сигнала
     uint8_t  range_precision; // Точность измерения, см (для TOFSense-F)
     uint8_t  interface_mode;  // Режим интерфейса: 0-UART, 1-CAN, 2-I/O, 3-I2C
@@ -87,4 +87,3 @@ bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag = nullptr);
 
 
 #endif
-
