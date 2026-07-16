@@ -196,6 +196,8 @@ static bool                  performTofSdaClockRecovery(const char *reason);
 static bool                  performTofWireReinit(const char *reason);
 static bool                  serviceTofBusMonitor(uint32_t now);
 static inline bool           tofBusLinesHighNow();
+static void                  beginTofSchedulerPause(uint32_t now);
+static void                  endTofSchedulerPause(uint32_t now, const char *reason);
 static void                  setTofI2cClock(uint32_t clockHz);
 static uint8_t               i2cProbeAddress(uint8_t address);
 static uint8_t               scanTofAddressMask();
@@ -641,6 +643,8 @@ static uint8_t  tofConsecutiveTransportFailures[4] = { 0, 0, 0, 0 };
 static uint32_t tofLastFailureLogMs[4]       = { 0, 0, 0, 0 };
 static uint32_t tofRuntimeStartMs            = 0;
 static bool     tofRuntimeStarted            = false;
+static bool     tofSchedulerPaused           = false;
+static uint32_t tofSchedulerPauseStartedMs    = 0U;
 static uint8_t  tofBusVoteMask               = 0U;
 static bool     tofBusVoteAs5600Failed       = false;
 
@@ -3469,7 +3473,7 @@ static void recordTofFailure(uint8_t sensor, const TofI2cDiagnostics *diag)
 
 static void checkTofStale(uint32_t now)
 {
-    if (!tofRuntimeStarted)
+    if (!tofRuntimeStarted || tofSchedulerPaused)
     {
         return;
     }
@@ -3498,6 +3502,43 @@ static void checkTofStale(uint32_t now)
             }
         }
     }
+}
+
+static void beginTofSchedulerPause(uint32_t now)
+{
+    if (tofSchedulerPaused)
+    {
+        return;
+    }
+    tofSchedulerPaused        = true;
+    tofSchedulerPauseStartedMs = now;
+}
+
+static void endTofSchedulerPause(uint32_t now, const char *reason)
+{
+    if (!tofSchedulerPaused)
+    {
+        return;
+    }
+
+    const uint32_t pausedMs = now - tofSchedulerPauseStartedMs;
+    tofSchedulerPaused      = false;
+    if (tofRuntimeStarted)
+    {
+        // Exclude only this explicit maintenance interval.  Age accumulated
+        // before it is preserved, so a genuinely failing sensor still becomes
+        // stale after its remaining part of the 300 ms timeout.
+        tofRuntimeStartMs += pausedMs;
+        for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
+        {
+            tofLastTransportSuccessMs[sensor] += pausedMs;
+        }
+    }
+    makeLog(
+        LOG_DEBUG,
+        "TOF scheduler resume %s pause=%lums",
+        reason != nullptr ? reason : "?",
+        (unsigned long)pausedMs);
 }
 
 static void recordTofSuccess(uint8_t sensor)
@@ -7929,7 +7970,8 @@ static void logRadioEnsureFailure(
 
 static void retryRadioConfigIfIdle(uint32_t now)
 {
-    if (radioConfigOk || pendingBootloaderEntry || !isPhysicallyStationary())
+    if (radioConfigOk || pendingBootloaderEntry || !isPhysicallyStationary() || currentMode != CoreOpMode::IDLE ||
+        !isShuttleIdle())
     {
         return;
     }
@@ -7944,7 +7986,9 @@ static void retryRadioConfigIfIdle(uint32_t now)
 
     radioLastConfigRetryMs = now;
     makeLog(LOG_WARN, "E22 idle config retry");
+    beginTofSchedulerPause(now);
     applyRadioConfigAtBoot();
+    endTofSchedulerPause(millis(), "E22 retry");
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd)
@@ -8224,6 +8268,8 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
 static inline void resetTofDiagnostics()
 {
     const uint32_t now = millis();
+    tofSchedulerPaused        = false;
+    tofSchedulerPauseStartedMs = 0U;
     for (uint8_t i = 0; i < 4; ++i)
     {
         tofSensorErrors[i] = 0;
