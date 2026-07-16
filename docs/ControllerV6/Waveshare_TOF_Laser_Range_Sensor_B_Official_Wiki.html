@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<title>TOF Laser Range Sensor (B) - Waveshare Wiki</title>
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":!1,"wgSeparatorTransformTable":["",""],"wgDigitTransformTable":["",""],"wgDefaultDateFormat":"dmy","wgMonthNames":["","January","February","March","April","May","June","July","August","September","October","November","December"],"wgRequestId":"ecfbb79426dbf89c77e6dda5","wgCSPNonce":!1,"wgCanonicalNamespace":"","wgCanonicalSpecialPageName":!1,"wgNamespaceNumber":0,"wgPageName":"TOF_Laser_Range_Sensor_(B)","wgTitle":"TOF Laser Range Sensor (B)","wgCurRevisionId":79047,"wgRevisionId":79047,"wgArticleId":9361,"wgIsArticle":!0,"wgIsRedirect":!1,"wgAction":"view","wgUserName":null,"wgUserGroups":["*"],"wgCategories":["CAN interface","UART interface"],"wgPageContentLanguage":"en","wgPageContentModel":"wikitext","wgRelevantPageName":"TOF_Laser_Range_Sensor_(B)","wgRelevantArticleId":9361,"wgIsProbablyEditable":!1,"wgRelevantPageIsProbablyEditable":!1,"wgRestrictionEdit":[],"wgRestrictionMove":[]};RLSTATE
+={"ext.gadget.tabber":"ready","site.styles":"ready","noscript":"ready","user.styles":"ready","user":"ready","user.options":"loading","mediawiki.toc.styles":"ready","skins.tweeki.styles":"ready","skins.tweeki.bootstraptheme.styles":"ready","skins.tweeki.externallinks.styles":"ready","skins.tweeki.awesome.styles":"ready"};RLPAGEMODULES=["site","mediawiki.page.startup","mediawiki.page.ready","mediawiki.toc","ext.FancyBoxThumbs","ext.HighlightjsIntegration","skins.tweeki.messages","skins.tweeki.scripts"];</script>
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.implement("user.options@1hzgi",function($,jQuery,require,module){/*@nomin*/mw.user.tokens.set({"patrolToken":"+\\","watchToken":"+\\","csrfToken":"+\\"});
+});});</script>
+<link rel="stylesheet" href="/w/Uy8Yw0y/aAdkk0o.php?lang=en&amp;modules=mediawiki.toc.styles%7Cskins.tweeki.awesome.styles%7Cskins.tweeki.bootstraptheme.styles%7Cskins.tweeki.externallinks.styles%7Cskins.tweeki.styles&amp;only=styles&amp;skin=tweeki"/>
+<script async="" src="/w/Uy8Yw0y/aAdkk0o.php?lang=en&amp;modules=startup&amp;only=scripts&amp;raw=1&amp;skin=tweeki"></script>
+<meta name="ResourceLoaderDynamicStyles" content=""/>
+<link rel="stylesheet" href="/w/Uy8Yw0y/aAdkk0o.php?lang=en&amp;modules=ext.gadget.tabber&amp;only=styles&amp;skin=tweeki"/>
+<link rel="stylesheet" href="/w/Uy8Yw0y/aAdkk0o.php?lang=en&amp;modules=site.styles&amp;only=styles&amp;skin=tweeki"/>
+<meta name="generator" content="MediaWiki 1.35.5"/>
+<meta property="og:image" content="https://www.waveshare.com/w/upload/thumb/e/e4/TOF-Laser-Range-Sensor-B-1.jpg/1200px-TOF-Laser-Range-Sensor-B-1.jpg"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="shortcut icon" href="/w/favicon.ico"/>
+<link rel="search" type="application/opensearchdescription+xml" href="/w/opensearch_desc.php" title="Waveshare Wiki (en)"/>
+<link rel="EditURI" type="application/rsd+xml" href="https://www.waveshare.com/w/api.php?action=rsd"/>
+<link rel="alternate" type="application/atom+xml" title="Waveshare Wiki Atom feed" href="/w/index.php?title=Special:RecentChanges&amp;feed=atom"/>
+<!--[if lt IE 9]><script src="/w/resources/lib/html5shiv/html5shiv.js"></script><![endif]-->
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-TOF_Laser_Range_Sensor_B rootpage-TOF_Laser_Range_Sensor_B skin-tweeki action-view tweeki-animateLayout tweeki-non-advanced tweeki-user-anon">			<!-- navbar -->
+			<div id="mw-navigation" class="navbar navbar-default navbar-fixed-top navbar-expand-lg fixed-top navbar-light bg-light" role="navigation">
+				<h2>Navigation menu</h2>
+				<div id="mw-head" class="navbar-inner">
+					<div class="container">
+
+						<div class="navbar-header">
+							<button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse">
+								<span class="sr-only">Toggle navigation</span>
+								<span class="icon-bar"></span>
+								<span class="icon-bar"></span>
+								<span class="icon-bar"></span>
+							</button>
+
+							<a href="/wiki/Main_Page" class="navbar-brand"><img src="https://www.waveshare.com/w/upload/a/a7/Ws-watermark-en.svg" alt="Waveshare Wiki" /></a>
+						</div>
+
+						<div id="navbar" class="navbar-collapse collapse">
+													<ul class="nav navbar-nav">
+							<li class="nav"><a href="#" id="n-raspberry-pi" class="dropdown-toggle" data-toggle="dropdown">Raspberry Pi <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523rpi-boards"><a href="/wiki/Main_Page#RPi-Boards" tabindex="-1">Boards/Kits</a></li><li id="n-main_page.2523rpi-displays"><a href="/wiki/Main_Page#RPi-Displays" tabindex="-1">Displays</a></li><li id="n-main_page.2523rpi-cameras"><a href="/wiki/Main_Page#RPi-Cameras" tabindex="-1">Cameras</a></li><li id="n-main_page.2523rpi-expansions"><a href="/wiki/Main_Page#RPi-Expansions" tabindex="-1">Expansions</a></li><li id="n-main_page.2523rpi-laptops"><a href="/wiki/Main_Page#RPi-Laptops" tabindex="-1">All-in-one</a></li><li id="n-main_page.2523rpi-robots"><a href="/wiki/Main_Page#RPi-Robots" tabindex="-1">Robots</a></li><li id="n-main_page.2523rpi-games"><a href="/wiki/Main_Page#RPi-Games" tabindex="-1">Portable Gaming</a></li><li id="n-main_page.2523rpi-acces"><a href="/wiki/Main_Page#RPi-Acces" tabindex="-1">Accessories</a></li><li id="n-main_page.2523android-linux-boards"><a href="/wiki/Main_Page#Android-Linux-Boards" tabindex="-1">Other Android/Linux Boards</a></li></ul></li><li class="nav"><a href="#" id="n-ai" class="dropdown-toggle" data-toggle="dropdown">AI <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523jetson-ai-boards"><a href="/wiki/Main_Page#Jetson-AI-Boards" tabindex="-1">Boards/Kits</a></li><li id="n-main_page.2523jetson-ai-displays"><a href="/wiki/Main_Page#Jetson-AI-Displays" tabindex="-1">Displays</a></li><li id="n-main_page.2523jetson-ai-cameras"><a href="/wiki/Main_Page#Jetson-AI-Cameras" tabindex="-1">Cameras</a></li><li id="n-main_page.2523jetson-ai-hat"><a href="/wiki/Main_Page#Jetson-AI-HAT" tabindex="-1">Expansions</a></li><li id="n-main_page.2523jetson-ai-robots"><a href="/wiki/Main_Page#Jetson-AI-Robots" tabindex="-1">Robots</a></li></ul></li><li class="nav"><a href="#" id="n-displays" class="dropdown-toggle" data-toggle="dropdown">Displays <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523display-lcd-oleds"><a href="/wiki/Main_Page#Display-LCD-OLEDs" tabindex="-1">LCD/OLED</a></li><li id="n-main_page.2523display-e-paper"><a href="/wiki/Main_Page#Display-e-Paper" tabindex="-1">e-Paper</a></li></ul></li><li class="nav"><a href="#" id="n-iot" class="dropdown-toggle" data-toggle="dropdown">IoT <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523long-range-wireless-comm"><a href="/wiki/Main_Page#Long-range-wireless-comm" tabindex="-1">Long Range Wireless</a></li><li id="n-main_page.2523short-range-wireless-comm"><a href="/wiki/Main_Page#Short-range-wireless-comm" tabindex="-1">Short Range Wireless</a></li><li id="n-main_page.2523wired-communication"><a href="/wiki/Main_Page#Wired-communication" tabindex="-1">Wired Comm / Converter</a></li><li id="n-main_page.2523misc-cameras-av"><a href="/wiki/Main_Page#Misc-cameras-av" tabindex="-1">Cameras / Audio / Video</a></li><li id="n-main_page.2523misc-sensor-modules"><a href="/wiki/Main_Page#Misc-sensor-modules" tabindex="-1">Sensors</a></li><li id="n-main_page.2523misc-servos-motors"><a href="/wiki/Main_Page#Misc-servos-motors" tabindex="-1">Motors / Servos</a></li><li id="n-main_page.2523misc-other-modules"><a href="/wiki/Main_Page#Misc-other-modules" tabindex="-1">others</a></li></ul></li><li class="nav"><a href="#" id="n-robotics" class="dropdown-toggle" data-toggle="dropdown">Robotics <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523robotics-cars"><a href="/wiki/Main_Page#Robotics-cars" tabindex="-1">Mobile Robots</a></li><li id="n-main_page.2523dog-like-robots"><a href="/wiki/Main_Page#Dog-like-Robots" tabindex="-1">Dog-like Robots</a></li><li id="n-main_page.2523robotics-drivers-sensors"><a href="/wiki/Main_Page#Robotics-drivers-sensors" tabindex="-1">Drivers / Sensors</a></li><li id="n-main_page.2523robotics-robot-arms"><a href="/wiki/Main_Page#Robotics-robot-arms" tabindex="-1">Robot Arm / Control</a></li></ul></li><li class="nav"><a href="#" id="n-mcu.252Ffpga" class="dropdown-toggle" data-toggle="dropdown">MCU/FPGA <b class="caret"></b></a><ul class="dropdown-menu " role="menu"><li id="n-main_page.2523arduino-main-boards"><a href="/wiki/Main_Page#Arduino-main-boards" tabindex="-1">Arduino</a></li><li id="n-main_page.2523micro.253Abit"><a href="/wiki/Main_Page#micro:bit" tabindex="-1">micro:bit</a></li><li id="n-main_page.2523mcu.2farm" class="LPC"><a href="/wiki/Main_Page#MCU.2FARM" tabindex="-1">STM32</a></li><li id="n-main_page.2523fpga"><a href="/wiki/Main_Page#FPGA" tabindex="-1">FPGA</a></li></ul></li><li class="nav"><a href="https://service.waveshare.com" id="n-https.253A.252F.252Fservice.waveshare.com" rel="nofollow" target="_blank">Support</a></li>							</ul>
+						
+													<ul class="nav navbar-nav navbar-right">
+							</ul>
+				<form class="navbar-form navbar-right" action="/w/index.php" id="searchform">
+					<div class="form-group"><input type="search" name="search" placeholder="Product name search" title="Search Waveshare Wiki [f]" accesskey="f" id="searchInput" class="search-query form-control"/><input type="submit" name="go" value="Go" title="Go to a page with this exact name if it exists" id="mw-searchButton" class="searchButton btn hidden"/>
+					</div>
+				</form><ul class="nav navbar-nav navbar-right">							</ul>
+						</div>
+						
+					</div>
+				</div>
+			</div>
+			<!-- /navbar -->
+					<div id="mw-page-base"></div>
+			<div id="mw-head-base"></div>
+			<a id="top"></a>
+
+			<!-- content -->
+			<div id="contentwrapper" class="user-loggedout not-editable container with-navbar with-navbar-fixed">
+
+				
+				<div class="row">
+					<div class="col-md-offset-2 col-md-10" role="main">
+								<div class="mw-body" id="content">
+			<div id="mw-js-message" style="display:none;"></div>
+									<h1 id="firstHeading" class="firstHeading page-header" lang="en"><span dir="auto">TOF Laser Range Sensor (B)</span></h1>
+									<!-- bodyContent -->
+			<div id="bodyContent">
+								<div id="siteSub">From Waveshare Wiki</div>
+								<div id="contentSub"></div>
+												<div id="jump-to-nav" class="mw-jump">
+					Jump to:					<a href="#mw-navigation">navigation</a>, 					<a href="#p-search">search</a>
+				</div>
+				<div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><div class="mw-parser-output"><div class="wiki-pages jet-green-color">
+<table id="infotable" class="a-r at-c roundy bgd-green bl-white" style="margin-left: 5px; margin-bottom: 5px; width: 30%;">
+
+<tbody><tr>
+<td>
+<table class="at-c roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>TOF Laser Range Sensor (B)</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><a href="https://www.waveshare.com/tof-laser-range-sensor-b.htm" title="TOF Laser Range Sensor B" target="_blank" rel="nofollow noreferrer noopener"><img alt="TOF Laser Range Sensor B" src="/w/upload/thumb/e/e4/TOF-Laser-Range-Sensor-B-1.jpg/300px-TOF-Laser-Range-Sensor-B-1.jpg" decoding="async" loading="lazy" width="300" height="225" srcset="/w/upload/thumb/e/e4/TOF-Laser-Range-Sensor-B-1.jpg/450px-TOF-Laser-Range-Sensor-B-1.jpg 1.5x, /w/upload/thumb/e/e4/TOF-Laser-Range-Sensor-B-1.jpg/600px-TOF-Laser-Range-Sensor-B-1.jpg 2x" /></a><br /><br /><small>VL53L1X Distance Sensor</small>
+</td></tr></tbody></table>
+</td></tr>
+<tr style="display:none;">
+<td>
+<table class="roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>{{{name2}}}</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><br />
+</td></tr></tbody></table>
+</td></tr>
+<tr style="display:none;">
+<td>
+<table class="roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>{{{name3}}}</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><br />
+</td></tr></tbody></table>
+</td></tr>
+<tr style="display:none;">
+<td>
+<table class="roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>{{{name4}}}</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><br />
+</td></tr></tbody></table>
+</td></tr>
+<tr style="display:none;">
+<td>
+<table class="roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>{{{name5}}}</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><br />
+</td></tr></tbody></table>
+</td></tr>
+<tr style="display:none;">
+<td>
+<table class="roundy" style="background: transparent;width:100%;">
+
+<tbody><tr>
+<td class="at-c textwhite"><b>{{{name6}}}</b>
+</td></tr>
+<tr>
+<td class="at-c bgwhite" style="margin:5px;"><br />
+</td></tr></tbody></table>
+</td></tr>
+<tr>
+<td>
+<table class="roundy" style="display:none;">
+<tbody><tr>
+<td style="width:2%;">
+</td>
+<td style="width:3%;">
+</td>
+<th colspan="2" width="90%" class="at-c roundytop bgl-white">Primary Attribute
+</th>
+<td style="width:3%;">
+</td>
+<td style="width:2%;">
+</td></tr>
+<tr>
+<td colspan="6" width="90px" class="at-c roundytl roundytr bgwhite b-green" style="border-width: 0 0 1px 0;"><b>Category:</b> <a href="/wiki/Category:Modules" title="Category:Modules">Modules</a>, <a href="/wiki/Category:Sensors" title="Category:Sensors">Sensors</a>, <a href="/wiki/Category:Light" title="Category:Light">Light</a>
+</td></tr>
+<tr style="display:none;">
+<th colspan="3" width="90px" class="at-r bgwhite b-green" style="border-width: 0 0 1px 0;">{{{userDefinedInfo}}}:
+</th>
+<td colspan="3" class="at-l b-green bgwhite" style="border-width: 0 0 1px 0;">{{{userdefinedvalue}}}
+</td></tr>
+<tr style="display:none;">
+<td colspan="6" width="90px" class="at-c roundybl roundybr bgwhite"><b>Brand:</b> Waveshare
+</td></tr></tbody></table>
+</td></tr>
+<tr>
+<td>
+<table class="a-r roundy" style="display:none;">
+<tbody><tr>
+<td style="width:2%;">
+</td>
+<td style="width:3%;">
+</td>
+<th colspan="2" width="90%" class="at-c roundytop bgl-white">Website
+</th>
+<td style="width:3%;">
+</td>
+<td style="width:2%;">
+</td></tr>
+<tr>
+<td colspan="6" width="90px" class="at-c roundytl roundytr bgwhite b-green" style="border-width: 0 0 1px 0;"><b>International:</b> <a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="http://www.waveshare.com/TOF-Laser-Range-Sensor.htm">Website</a>
+</td></tr>
+<tr>
+<td colspan="6" width="90px" class="at-c roundybl roundybr bgwhite"><b>Chinese:</b> <a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="http://www.waveshare.net/shop/TOF-Laser-Range-Sensor.htm">网站</a>
+</td></tr></tbody></table>
+</td></tr>
+<tr>
+<td>
+<table class="a-r roundy" style="background: transparent; border-collapse:collapse;width:100%;display:none;">
+<tbody><tr>
+<td style="width:2%;">
+</td>
+<td style="width:3%;">
+</td>
+<th colspan="2" width="90%" class="at-c roundytop bgl-white">Onboard Interfaces
+</th>
+<td style="width:3%;">
+</td>
+<td style="width:2%;">
+</td></tr>
+<tr>
+<td colspan="6" width="90px" class="at-l roundy bgwhite b-green" style="border-width: 0 0 1px 0;">
+<table class="roundy bgwhite fulltable" style="text-align:center;">
+
+<tbody><tr>
+<td class="roundy bl-gray bw-1" style="width:25%;;"><small><b><a href="/wiki/Category:CAN_interface" title="Category:CAN interface">CAN</a></b></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;;"><small><b><a href="/wiki/Category:UART_interface" title="Category:UART interface">UART</a></b></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td></tr>
+<tr>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td></tr>
+<tr>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td></tr>
+<tr>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td></tr>
+<tr>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td>
+<td class="roundy bl-gray bw-1" style="width:25%;display:none;"><small></small>
+</td></tr></tbody></table>
+</td></tr></tbody></table>
+</td></tr>
+<tr>
+<td>
+<table class="a-r roundy" style="background: transparent; border-collapse:collapse;width:100%;;display:none;">
+<tbody><tr>
+<td style="width:2%;">
+</td>
+<td style="width:3%;">
+</td>
+<th colspan="2" width="90%" class="at-c roundytop bgl-white">Related Products
+</th>
+<td style="width:3%;">
+</td>
+<td style="width:2%;">
+</td></tr>
+<tr>
+<td colspan="6" width="90px" class="at-l roundy bgwhite b-green" style="border-width: 0 0 1px 0;">
+<ul><li><a href="/wiki/TCS34725_Color_Sensor" title="TCS34725 Color Sensor">TCS34725 Color Sensor</a></li>
+<li><a href="/wiki/TSL25911_Light_Sensor" title="TSL25911 Light Sensor">TSL25911 Light Sensor</a></li>
+<li><a href="/wiki/Photo_Interrupter_Sensor" title="Photo Interrupter Sensor">Photo Interrupter Sensor</a></li>
+<li><a href="/wiki/Infrared_Proximity_Sensor" title="Infrared Proximity Sensor">Infrared Proximity Sensor</a></li>
+<li><a href="/wiki/Tracker_Sensor" title="Tracker Sensor">Tracker Sensor</a></li>
+<li><a href="/wiki/Infrared_Reflective_Sensor" title="Infrared Reflective Sensor">Infrared Reflective Sensor</a></li>
+<li><a href="/wiki/PAJ7620U2_Gesture_Sensor" title="PAJ7620U2 Gesture Sensor">PAJ7620U2 Gesture Sensor</a></li>
+<li><a href="/wiki/UV_Sensor" title="UV Sensor">UV Sensor</a></li>
+<li><a href="/wiki/Laser_Sensor" title="Laser Sensor">Laser Sensor</a></li>
+<li><a href="/wiki/TOF_Laser_Range_Sensor" title="TOF Laser Range Sensor">TOF Laser Range Sensor</a></li>
+<li><a class="mw-selflink selflink">TOF Laser Range Sensor (B)</a></li>
+<li><a href="/wiki/VL53L1X_Distance_Sensor" title="VL53L1X Distance Sensor">VL53L1X Distance Sensor</a></li>
+<li><a href="/wiki/VL53L0X_Distance_Sensor" title="VL53L0X Distance Sensor">VL53L0X Distance Sensor</a></li></ul>
+</td></tr></tbody></table>
+</td></tr></tbody></table>
+<div id="toc" class="toc" role="navigation" aria-labelledby="mw-toc-heading"><input type="checkbox" role="button" id="toctogglecheckbox" class="toctogglecheckbox" style="display:none" /><div class="toctitle" lang="en" dir="ltr"><h2 id="mw-toc-heading">Contents</h2><span class="toctogglespan"><label class="toctogglelabel" for="toctogglecheckbox"></label></span></div>
+<ul>
+<li class="toclevel-1 tocsection-1"><a href="#Overview"><span class="tocnumber">1</span> <span class="toctext">Overview</span></a>
+<ul>
+<li class="toclevel-2"><a href="#Introduction"><span class="tocnumber">1.1</span> <span class="toctext">Introduction</span></a></li>
+<li class="toclevel-2"><a href="#Specification"><span class="tocnumber">1.2</span> <span class="toctext">Specification</span></a></li>
+<li class="toclevel-2"><a href="#Applications"><span class="tocnumber">1.3</span> <span class="toctext">Applications</span></a></li>
+<li class="toclevel-2"><a href="#Technology_Overview"><span class="tocnumber">1.4</span> <span class="toctext">Technology Overview</span></a></li>
+<li class="toclevel-2"><a href="#Function_Description"><span class="tocnumber">1.5</span> <span class="toctext">Function Description</span></a>
+<ul>
+<li class="toclevel-3"><a href="#.E3.80.90ID.E3.80.91"><span class="tocnumber">1.5.1</span> <span class="toctext">【ID】</span></a></li>
+<li class="toclevel-3"><a href="#.E3.80.90Interface_.26_Baudrate.E3.80.91"><span class="tocnumber">1.5.2</span> <span class="toctext">【Interface &amp; Baudrate】</span></a>
+<ul>
+<li class="toclevel-4"><a href="#UART"><span class="tocnumber">1.5.2.1</span> <span class="toctext">UART</span></a></li>
+<li class="toclevel-4"><a href="#I2C"><span class="tocnumber">1.5.2.2</span> <span class="toctext">I2C</span></a></li>
+<li class="toclevel-4"><a href="#I.2FO_output"><span class="tocnumber">1.5.2.3</span> <span class="toctext">I/O output</span></a></li>
+</ul>
+</li>
+<li class="toclevel-3"><a href="#.E3.80.90Distance_Status.E3.80.91"><span class="tocnumber">1.5.3</span> <span class="toctext">【Distance Status】</span></a></li>
+<li class="toclevel-3"><a href="#.E3.80.90Signal_Strength.E3.80.91"><span class="tocnumber">1.5.4</span> <span class="toctext">【Signal Strength】</span></a></li>
+<li class="toclevel-3"><a href="#.E3.80.90Range_Precision.E3.80.91"><span class="tocnumber">1.5.5</span> <span class="toctext">【Range Precision】</span></a></li>
+<li class="toclevel-3"><a href="#.E3.80.90FOV.E3.80.91"><span class="tocnumber">1.5.6</span> <span class="toctext">【FOV】</span></a></li>
+<li class="toclevel-3"><a href="#.E3.80.90Mode_Switch.E3.80.91"><span class="tocnumber">1.5.7</span> <span class="toctext">【Mode Switch】</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2"><a href="#Protocol_Analysis"><span class="tocnumber">1.6</span> <span class="toctext">Protocol Analysis</span></a>
+<ul>
+<li class="toclevel-3"><a href="#NLink_TOFSense_Frame0"><span class="tocnumber">1.6.1</span> <span class="toctext">NLink_TOFSense_Frame0</span></a></li>
+<li class="toclevel-3"><a href="#NLink_TOFSense_Read_Frame0"><span class="tocnumber">1.6.2</span> <span class="toctext">NLink_TOFSense_Read_Frame0</span></a></li>
+<li class="toclevel-3"><a href="#NLink_TOFSense_IIC_Frame0"><span class="tocnumber">1.6.3</span> <span class="toctext">NLink_TOFSense_IIC_Frame0</span></a>
+<ul>
+<li class="toclevel-4"><a href="#I2C_communication"><span class="tocnumber">1.6.3.1</span> <span class="toctext">I2C communication</span></a></li>
+</ul>
+</li>
+<li class="toclevel-3"><a href="#NLink_TOFSense_Setting_Frame0"><span class="tocnumber">1.6.4</span> <span class="toctext">NLink_TOFSense_Setting_Frame0</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2"><a href="#Software"><span class="tocnumber">1.7</span> <span class="toctext">Software</span></a></li>
+<li class="toclevel-2"><a href="#Dimensions"><span class="tocnumber">1.8</span> <span class="toctext">Dimensions</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1"><a href="#Work_with_Raspberry_Pi"><span class="tocnumber">2</span> <span class="toctext">Work with Raspberry Pi</span></a>
+<ul>
+<li class="toclevel-2"><a href="#Enable_UART_Interface"><span class="tocnumber">2.1</span> <span class="toctext">Enable UART Interface</span></a>
+<ul>
+<li class="toclevel-3"><a href="#Enable_I2C_Interface"><span class="tocnumber">2.1.1</span> <span class="toctext">Enable I2C Interface</span></a></li>
+</ul>
+</li>
+<li class="toclevel-2"><a href="#Module_parameter_Settings"><span class="tocnumber">2.2</span> <span class="toctext">Module parameter Settings</span></a></li>
+<li class="toclevel-2"><a href="#Hardware_Connection"><span class="tocnumber">2.3</span> <span class="toctext">Hardware Connection</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1"><a href="#Working_with_Jetson_Nano"><span class="tocnumber">3</span> <span class="toctext">Working with Jetson Nano</span></a>
+<ul>
+<li class="toclevel-2"><a href="#Hardware_Connection_2"><span class="tocnumber">3.1</span> <span class="toctext">Hardware Connection</span></a></li>
+<li class="toclevel-2"><a href="#Software_Settings"><span class="tocnumber">3.2</span> <span class="toctext">Software Settings</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1"><a href="#Working_with_Arduino"><span class="tocnumber">4</span> <span class="toctext">Working with Arduino</span></a>
+<ul>
+<li class="toclevel-2"><a href="#Hardware_Connection_3"><span class="tocnumber">4.1</span> <span class="toctext">Hardware Connection</span></a></li>
+<li class="toclevel-2"><a href="#Software_Settings_2"><span class="tocnumber">4.2</span> <span class="toctext">Software Settings</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-2"><a href="#Resource"><span class="tocnumber">5</span> <span class="toctext">Resource</span></a>
+<ul>
+<li class="toclevel-2 tocsection-3"><a href="#Demo_code"><span class="tocnumber">5.1</span> <span class="toctext">Demo code</span></a></li>
+<li class="toclevel-2 tocsection-4"><a href="#Software_2"><span class="tocnumber">5.2</span> <span class="toctext">Software</span></a></li>
+</ul>
+</li>
+<li class="toclevel-1 tocsection-5"><a href="#FAQ"><span class="tocnumber">6</span> <span class="toctext">FAQ</span></a></li>
+<li class="toclevel-1 tocsection-6"><a href="#Support"><span class="tocnumber">7</span> <span class="toctext">Support</span></a></li>
+</ul>
+</div>
+
+<h1><span class="mw-headline" id="Overview">Overview</span></h1>
+<h2><span class="mw-headline" id="Introduction">Introduction</span></h2>
+<p>The TOF Laser Range Sensor (B) is a TOF-based (time of flight) laser ranging sensor with an embedded MCU and ranging algorithm, which is capable of offering up to 15m measuring range, ±2% accuracy, and 1mm resolution. It supports UART or I2C communication bus, featuring a longer measuring distance and higher light interference resistance capability due to its ultra-narrow FOV, suitable for either indoor or outdoor conditions. <br />
+This sensor can be widely used in applications like common distance measuring, robot obstacle avoidance/route planning, as well as ceiling detection, and more... <br />
+</p>
+<h2><span class="mw-headline" id="Specification">Specification</span></h2>
+<table class="list table table-striped table-bordered">
+
+<tbody><tr>
+<th>
+</th>
+<th>TOF Laser Range Sensor
+</th>
+<th>TOF Laser Range Sensor (B)
+</th></tr>
+<tr>
+<th rowspan="3">Typical measuring range
+</th>
+<td>Short range: 0.012 ~ 2.16m
+</td>
+<td rowspan="3">0.10 ~ 15.0m
+</td></tr>
+<tr>
+<td>Mid range: 0.012 ~ 3.60m
+</td></tr>
+<tr>
+<td>Long range: 0.01 ~ 5.00m
+</td></tr>
+<tr>
+<th rowspan="3">Typical measuring accuracy
+</th>
+<td>Short range: accuracy ±1.0cm, standard deviation&lt;0.3cm
+</td>
+<td rowspan="3">0.10 ~ 2m ±2cm；2 ~ 15m ±2%
+</td></tr>
+<tr>
+<td>Mid range: accuracy ±1.0cm, standard deviation&lt;1.5cm
+</td></tr>
+<tr>
+<td>Long range: accuracy ±1.5cm, standard deviation&lt;<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="1f2f312a7c725f2f312f2e">[email&#160;protected]</a>~3m, <br />standard deviation&lt;8cm@3~5m
+</td></tr>
+<tr>
+<th>Resolution
+</th>
+<td colspan="2">1mm
+</td></tr>
+<tr>
+<th>Power supply
+</th>
+<td colspan="2">3.7 ~ 5.2V (reverse-proof)
+</td></tr>
+<tr>
+<th>Operating temperature
+</th>
+<td colspan="2">-10°C ~ 60°C
+</td></tr>
+<tr>
+<th>Wavelength
+</th>
+<td>940nm (Class1 standard compliant)
+</td>
+<td>750 ~ 830nm compliant with IEC 60825-1:2014 version 3 Class2 standard
+</td></tr>
+<tr>
+<th>Field of view (FOV)
+</th>
+<td>15° ~ 27° (adjustable)
+</td>
+<td>1° ~ 2°
+</td></tr>
+<tr>
+<th rowspan="2">Communication interface
+</th>
+<td colspan="2">UART (3.3V TTL signal level)
+</td></tr>
+<tr>
+<td>CAN (both of the two ports can be used as CAN simultaneously)
+</td>
+<td>I2C (cascading support, the slave address is 0x08+module ID)
+</td></tr>
+<tr>
+<th rowspan="2">Baudrate
+</th>
+<td colspan="2">UART: 115200 ~ 3000000bps (921600bps by default)
+</td></tr>
+<tr>
+<td>UART: 115.2Kbps ~ 3000Kbps (921.6Kbps by default)
+</td>
+<td>I2C: up to 400Kbps
+</td></tr>
+<tr>
+<th>Cascade support
+</th>
+<td>UART: supports up to 8x cascades, CAN: supports up to 7x cascades
+</td>
+<td>I2C: supports up to 8x cascades
+</td></tr>
+<tr>
+<th>Ambient light resistance
+</th>
+<td>weak resistance, indoor only
+</td>
+<td>about 100K LUX resistance, suits both indoor and outdoor
+</td></tr>
+<tr>
+<th>Power consumption
+</th>
+<td>290mW (UART active output, long-range mode, 5.0V power supply, 58mA current)
+</td>
+<td>610mW (UART active output, 5.0V power supply, 122mA current)
+</td></tr>
+<tr>
+<th>Weight
+</th>
+<td>2.7g
+</td>
+<td>7.7g
+</td></tr>
+<tr>
+<th>Dimensions (L × W × H)
+</th>
+<td>35.58 × 12 × 8.05mm
+</td>
+<td>22.7 × 28 × 13.6mm
+</td></tr></tbody></table>
+<h2><span class="mw-headline" id="Applications">Applications</span></h2>
+<ul><li>Ceiling detection</li>
+<li>Robot obstacle avoidance</li>
+<li>Measuring and detecting</li>
+<li>Intelligent gesture control</li>
+<li>1-dimension gesture identification</li></ul>
+<h2><span class="mw-headline" id="Technology_Overview">Technology Overview</span></h2>
+<p>TOF is an absolute distance detection technology, where the sensor emits calibrated near-infrared light, which is reflected upon encountering an object. By calculating the time or phase difference between light emission and reflection, the sensor converts it into distance information about the captured scene, thus generating depth information. Compared to stereo vision and 3D structured light approaches, TOF offers advantages such as longer working distances, broader applicability, and higher accuracy at longer distances. Therefore, it is commonly used in applications such as proximity detection of individuals, obstacle avoidance for robots, and automatic focusing in cameras. However, in outdoor environments, near-infrared light from sunlight can affect the measurement accuracy of the module.
+</p><p><a href="/wiki/File:TOF-Laser-Range-Sensor-work.jpg" class="image"><img alt="TOF-Laser-Range-Sensor-work.jpg" src="/w/upload/4/44/TOF-Laser-Range-Sensor-work.jpg" decoding="async" loading="lazy" width="600" height="316" /></a>
+</p>
+<h2><span class="mw-headline" id="Function_Description">Function Description</span></h2>
+<h3><span id="【ID】"></span><span class="mw-headline" id=".E3.80.90ID.E3.80.91">【ID】</span></h3>
+<ul><li>ID is one variable designed for distinguishing the different sensors, which is used to identify each sensor during the cascade connection.</li></ul>
+<h3><span id="【Interface_&amp;_Baudrate】"></span><span class="mw-headline" id=".E3.80.90Interface_.26_Baudrate.E3.80.91">【Interface &amp; Baudrate】</span></h3>
+<p>TOF Laser Range Sensor (B) supports UART, I2C, and I/O.<br />
+</p>
+<h4><span class="mw-headline" id="UART">UART</span></h4>
+<p>The communication baud rate setting range is as follows：
+</p>
+<table class="wikitable" style="padding:5px;">
+
+<tbody><tr>
+<th>UART Baud Rate</th>
+<th>Note
+</th></tr>
+<tr>
+<td>115200,230400,460800,921600,1000000,1200000,2000000,3000000</td>
+<td>921600 (by default)
+</td></tr></tbody></table>
+<p>The UART interface mode supports "active output" and "query output":<br />
+PC Download:<br />
+</p>
+<ul><li><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://files.waveshare.com/upload/2/23/Waveshare_TOFAssistant.zip">TOF Assistant (For Windows 7/10 64 bits)</a><br /></li>
+<li><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://files.waveshare.com/upload/e/e4/TOFAssistant4.2.3.2_x86.zip">TOF Assistant (For Windows 7/10 32 bits)</a><br /></li>
+<li>Active Output:
+<ul><li>The active output mode can only be used with a single module. In this mode, the module actively outputs measurement information at a frequency of 50 Hz, the format of output data is based on the NLink_TOFSense_Frame0 protocol.</li>
+<li>Users can connect the Sensor to Windows PC by USB to TTL module and configure the module by Waveshare TOFAssistant software. Just like the picture below. You need to click the "Write Parameter" button to save the setting and don't forget to check them by "Read Parameter".</li></ul></li></ul>
+<dl><dd><a href="/wiki/File:TOF-B-UART-Active-inquire.jpg" class="image"><img alt="TOF-B-UART-Active-inquire.jpg" src="/w/upload/8/8e/TOF-B-UART-Active-inquire.jpg" decoding="async" loading="lazy" width="500" height="443" /></a></dd></dl>
+<ul><li>Query Output:
+<ul><li>The query output mode can be used in a single module. In this mode, the controller sends a query command containing the module ID to the desired query module, and the module can output one frame of measurement information. The query command is based on NLink_TOFSense _Read_Frame0 protocol, and the output data from the module is based on the NLink_TOFSense_Frame0 protocol.</li>
+<li>Connect the TOF series products to the Waveshare TOFAssistant software through the USB TO TTL module (line sequence and power supply voltage reference data sheet), click to enter the setting page after the identification is successful, the UART query output mode configuration is as shown in the figure below, after configuring the parameters, you need to click the write parameter button To save the parameters after the parameters are written successfully, you can read the parameters once to confirm whether the parameters are written successfully. (After changing the baud rate parameter of the module, you need to re-plug the USB TO TTL module to automatically identify the module):</li></ul></li></ul>
+<dl><dd><a href="/wiki/File:TOF-B-UART-Inquire.jpg" class="image"><img alt="TOF-B-UART-Inquire.jpg" src="/w/upload/c/ce/TOF-B-UART-Inquire.jpg" decoding="async" loading="lazy" width="500" height="443" /></a></dd></dl>
+<h4><span class="mw-headline" id="I2C">I2C</span></h4>
+<ul><li>The baudrate rate</li></ul>
+<table class="wikitable" style="text-align:center">
+<tbody><tr>
+<th>I2C baudrate</th>
+<th>Description
+</th></tr>
+<tr>
+<td>Max 400KHz</td>
+<td>Max 4000KHz, it is defined by the host device
+</td></tr></tbody></table>
+<ul><li>I2C address</li></ul>
+<table class="wikitable" style="text-align:center">
+<tbody><tr>
+<th>I2C address</th>
+<th>Description
+</th></tr>
+<tr>
+<td>0x08 ~ 0x77
+</td>
+<td>The default address is 0x08 (7 bits), and the slaver address of the module is 0x08 + ID, you can change the device address by modifying the module ID. Please take care of offset and the behavior bit while communicating. for example, if the device address is 0x08, if you need to write data, you need to add the write bit and the byte sent should be 0x10, if you need to read data, you need to add the read bit and the byte sent should be 0x11.
+</td></tr></tbody></table>
+<dl><dd>In the I2C communication mode, the controller sends a reading frame to the expected query module of the specified slave address, and then the information such as the distance of the module can be obtained. In addition, various parameters such as the output mode of the module can also be changed through I2C communication. The reading frame and write frame format follow the protocol NLink_TOFSense_IIC_Frame0. You can connect the sensor to the PC by USB to the TTL module and change the device address (0x08 + ID, the ID should be in the range 0 ~111) by the Waveshare TOFAssistant software. Note that, the Waveshare ToFAssitant software can only support UART mode.</dd>
+<dd><a href="/wiki/File:TOF-B-I2C.jpg" class="image"><img alt="TOF-B-I2C.jpg" src="/w/upload/2/28/TOF-B-I2C.jpg" decoding="async" loading="lazy" width="500" height="443" /></a></dd></dl>
+<h4><span id="I/O_output"></span><span class="mw-headline" id="I.2FO_output">I/O output</span></h4>
+<ul><li>In I/O output mode, it doesn't output distance data. The voltage of I/O is toggled when the distance is over the threshold.</li></ul>
+<dl><dd>When the module is in UART mode, users can connect it to the Windows PC by USB to TTL module and configure the band data by the Waveshare TOFAssistant software. The distance value is converted to high and low-level output through hysteresis comparison. TX/SCL and RX/SDA output complementary levels. The hysteresis comparison diagram is shown in Figure 5. After configuring the parameters, you need to click the Write Parameters button to save the parameters. Note: After switching to I/O mode, you can refer to the FAQ chapter to change back to UART mode. <br /></dd>
+<dd>For example, Band_Start and Bandwidth are both set to 500, which corresponds to 0.5 meters. When the distance measurement value is 0.3 meters, RX is high, TX is low, the distance measurement value increases to 0.8 meters, RX is high, TX is low, and when the distance measurement value exceeds 1 meter, the level is reversed and RX is low, TX is high. When the distance measurement value drops from more than 1 meter to 0.8 meters, RX is low and TX is high. When the distance measurement value drops below 0.5 meters, the level is reversed, RX is high and TX is low.</dd>
+<dd><a href="/wiki/File:TOF-B-IO.jpg" class="image"><img alt="TOF-B-IO.jpg" src="/w/upload/thumb/1/1f/TOF-B-IO.jpg/400px-TOF-B-IO.jpg" decoding="async" loading="lazy" width="400" height="354" srcset="/w/upload/1/1f/TOF-B-IO.jpg 1.5x" /></a></dd></dl>
+<ul><li>The range of Band_Start, Bandwidth is 0~15000 and 0~25000.</li></ul>
+<dl><dd><a href="/wiki/File:TOF-B-Bandwidth.jpg" class="image"><img alt="TOF-B-Bandwidth.jpg" src="/w/upload/thumb/b/bd/TOF-B-Bandwidth.jpg/400px-TOF-B-Bandwidth.jpg" decoding="async" loading="lazy" width="400" height="308" srcset="/w/upload/thumb/b/bd/TOF-B-Bandwidth.jpg/600px-TOF-B-Bandwidth.jpg 1.5x, /w/upload/b/bd/TOF-B-Bandwidth.jpg 2x" /></a></dd></dl>
+<h3><span id="【Distance_Status】"></span><span class="mw-headline" id=".E3.80.90Distance_Status.E3.80.91">【Distance Status】</span></h3>
+<p>The module can output the current distance status, the user can perform the data processing with the
+combination of distance status. The meaning of distance status is as follows:
+</p>
+<table class="wikitable" style="padding:5px;">
+
+<tbody><tr>
+<th>Value</th>
+<th>Note
+</th></tr>
+<tr>
+<td>0</td>
+<td>Measuring distance is invalid
+</td></tr>
+<tr>
+<td>1</td>
+<td>Measuring distance is valid
+</td></tr></tbody></table>
+<h3><span id="【Signal_Strength】"></span><span class="mw-headline" id=".E3.80.90Signal_Strength.E3.80.91">【Signal Strength】</span></h3>
+<p>Indicate the strength of the current return signal, and the larger this value indicates the stronger the
+return signal.
+</p>
+<h3><span id="【Range_Precision】"></span><span class="mw-headline" id=".E3.80.90Range_Precision.E3.80.91">【Range Precision】</span></h3>
+<p>Indicate the precision of the current signal, the smaller the data, the higher the prevision.
+</p>
+<h3><span id="【FOV】"></span><span class="mw-headline" id=".E3.80.90FOV.E3.80.91">【FOV】</span></h3>
+<p>The field angle FOV determines the vision scope of TOFSense. The FoV of the ToF Sensor (B) is  1~2°.
+</p>
+<h3><span id="【Mode_Switch】"></span><span class="mw-headline" id=".E3.80.90Mode_Switch.E3.80.91">【Mode Switch】</span></h3>
+<p>If the sensor is in UART mode, users can connect it to the PC and change it to I2C or I/O mode by the Waveshare TOFAssistant software. If the sensor is in I2C mode, users can send commands to switch the mode to UART. Users can check the FAQ chapter about how to change to UART from I/O mode.
+</p>
+<h2><span class="mw-headline" id="Protocol_Analysis">Protocol Analysis</span></h2>
+<ul><li>The protocol is composed of Frame Header, Function Mark, Data, and Sum Check.
+<ul><li>The Frame Header and Function Mark are fixed values;</li>
+<li>Data is the content of the transmitted data;</li>
+<li>Sum Check is the lowest byte after the addition of Frame Header, Function Mark, and Data (that is, the addition of all the previous bytes).</li></ul></li>
+<li>Agreement composition:</li></ul>
+<pre> Frame Header + Function Mark + Data + Sum Check
+</pre>
+<p><i>Note: Protocol packets follow the principle of little-endian mode, that is, the low byte is first and the high byte is last.</i>
+</p>
+<ul><li>The frame:</li></ul>
+<table class="wikitable" style="text-align:center">
+<tbody><tr>
+<th>Protocol</th>
+<th>Type</th>
+<th>Description
+</th></tr>
+<tr>
+<td>NLINK_TOFSENSE_FRAME0</td>
+<td>Fixed length</td>
+<td>UART output data, contains the timestamp, distance, distance status, and signal strength, etc.
+</td></tr>
+<tr>
+<td>NLINK_TOFSENSE_READ _FRAME0</td>
+<td>Fixed length</td>
+<td>UART read, contain device ID
+</td></tr>
+<tr>
+<td>NLINK_TOFSENSE_IIC_FRAME0</td>
+<td>Flexible length</td>
+<td>I2C data, contain distance, distance status, and signal strength, etc.
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="NLink_TOFSense_Frame0">NLink_TOFSense_Frame0</span></h3>
+<ul><li><ul><li><b> Data Sources:</b> Connect the module to the host computer and configure the UART as active output mode.</li>
+<li><b>Raw data:</b></li></ul></li></ul>
+<pre> 57 00 ff 00 9e 8f 00 00 ad 08 00 00 03 00 06 41
+</pre>
+<dl><dd><ul><li><b>Analysis table:</b><br /></li></ul></dd></dl>
+<table class="wikitable">
+
+<tbody><tr>
+<th>Data</th>
+<th>Type</th>
+<th>Length (Bytes)</th>
+<th>Hex</th>
+<th>Result
+</th></tr>
+<tr style="background:#ddd;">
+<td>Frame Header</td>
+<td>uint8</td>
+<td>1</td>
+<td>57</td>
+<td>0x57
+</td></tr>
+<tr style="background:#ddd;">
+<td>Function Mark</td>
+<td>uint8</td>
+<td>1</td>
+<td>00</td>
+<td>0x00
+</td></tr>
+<tr>
+<td>reserved</td>
+<td>uint8</td>
+<td>1</td>
+<td>ff</td>
+<td>*
+</td></tr>
+<tr>
+<td>id</td>
+<td>uint8</td>
+<td>1</td>
+<td>00</td>
+<td>0
+</td></tr>
+<tr>
+<td>System_time</td>
+<td>uint32</td>
+<td>4</td>
+<td>9e 8f 00 00</td>
+<td>36766ms
+</td></tr>
+<tr>
+<td>dis*1000</td>
+<td>uint24</td>
+<td>3</td>
+<td>ad 08 00</td>
+<td>2.221m
+</td></tr>
+<tr>
+<td>dis_status</td>
+<td>uint8</td>
+<td>1</td>
+<td>00</td>
+<td>0
+</td></tr>
+<tr>
+<td>signal_strength</td>
+<td>uint16</td>
+<td>2</td>
+<td>03 00</td>
+<td>3
+</td></tr>
+<tr>
+<td>range_precision</td>
+<td>uint8</td>
+<td>1</td>
+<td>06</td>
+<td>6cm
+</td></tr>
+<tr style="background:#ddd;">
+<td>Sum Check</td>
+<td>uint8</td>
+<td>1</td>
+<td>41</td>
+<td>0x41
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="NLink_TOFSense_Read_Frame0">NLink_TOFSense_Read_Frame0</span></h3>
+<ul><li><ul><li><b> Data Sources:</b> Connect the module to the host computer, and configure it as UART query output mode. The host device sends the command to query the data</li></ul></li></ul>
+<ul><li><ul><li><b>Raw data:</b></li></ul></li></ul>
+<pre>57 10 FF FF 00 FF FF 63
+</pre>
+<dl><dd><ul><li><b>Analysis table:</b><br /></li></ul></dd></dl>
+<table class="wikitable">
+
+<tbody><tr>
+<th>Data</th>
+<th>Type</th>
+<th>Length (Bytes)</th>
+<th>Hex</th>
+<th>Result
+</th></tr>
+<tr>
+<td>Frame Header</td>
+<td>uint8</td>
+<td>1</td>
+<td>57</td>
+<td>0x57
+</td></tr>
+<tr>
+<td>Function Mark</td>
+<td>uint8</td>
+<td>1</td>
+<td>10</td>
+<td>0x10
+</td></tr>
+<tr>
+<td>reserved</td>
+<td>uint8</td>
+<td>2</td>
+<td>ff</td>
+<td>*
+</td></tr>
+<tr>
+<td>id</td>
+<td>uint8</td>
+<td>1</td>
+<td>00</td>
+<td>0
+</td></tr>
+<tr>
+<td>reserved</td>
+<td>uint8</td>
+<td>2</td>
+<td>ff</td>
+<td>*
+</td></tr>
+<tr>
+<td>Sum Check</td>
+<td>uint8</td>
+<td>1</td>
+<td>63</td>
+<td>0x63
+</td></tr></tbody></table>
+<h3><span class="mw-headline" id="NLink_TOFSense_IIC_Frame0">NLink_TOFSense_IIC_Frame0</span></h3>
+<ul><li><b> Device Address</b>: The sensor works as a slaver device, the default device address is 0x08 (7bits), the whole device address is 0x08 + ID, user can change the device address by modifying the ID.</li></ul>
+<ul><li><b>Register address：</b>  If the register is NULL, the output is 0xff by default</li></ul>
+<pre>AD 08 00 00 03 00 FF FF
+</pre>
+<dl><dd><ul><li><b>Analysis table:</b><br /></li></ul></dd></dl>
+<dl><dd><a href="/wiki/File:NLink_TOFSense_IIC_Frame.png" class="image"><img alt="NLink TOFSense IIC Frame.png" src="/w/upload/thumb/6/63/NLink_TOFSense_IIC_Frame.png/700px-NLink_TOFSense_IIC_Frame.png" decoding="async" loading="lazy" width="700" height="1161" srcset="/w/upload/6/63/NLink_TOFSense_IIC_Frame.png 1.5x" /></a></dd></dl>
+<h4><span class="mw-headline" id="I2C_communication">I2C communication</span></h4>
+<p><a href="/wiki/File:NLink_TOFSense_IIC_comunication4.png" class="image"><img alt="NLink TOFSense IIC comunication4.png" src="/w/upload/7/79/NLink_TOFSense_IIC_comunication4.png" decoding="async" loading="lazy" width="800" height="675" /></a>
+<br />
+</p>
+<h3><span class="mw-headline" id="NLink_TOFSense_Setting_Frame0">NLink_TOFSense_Setting_Frame0</span></h3>
+<ul><li><ul><li><b>Data Sources:</b>: Setting Commands</li></ul></li></ul>
+<dl><dd><ul><li><b>Analysis table:</b><br /></li></ul></dd></dl>
+<p><a href="/wiki/File:TOFSense-B-Setting-Frame.png" class="image"><img alt="TOFSense-B-Setting-Frame.png" src="/w/upload/thumb/e/e6/TOFSense-B-Setting-Frame.png/800px-TOFSense-B-Setting-Frame.png" decoding="async" loading="lazy" width="800" height="755" srcset="/w/upload/e/e6/TOFSense-B-Setting-Frame.png 1.5x" /></a>
+</p>
+<h2><span class="mw-headline" id="Software">Software</span></h2>
+<p>TOF Assistant is the debugging software supporting the TOF laser ranging module. Its main functions are configuration debugging, status display, function application, and firmware upgrade:<br />
+</p>
+<ul><li><b> Configuration and debugging:</b> used to configure node-related parameters, such as ID, working mode, baud rate, etc.</li>
+<li><b> Functional application: </b> used for application development, such as data import and export, motion track storage, historical track playback, etc.</li>
+<li><b> Firmware upgrade:</b> used to upgrade the product by wired firmware.</li></ul>
+<h2><span class="mw-headline" id="Dimensions">Dimensions</span></h2>
+<ul><li><a href="/wiki/File:TOF-Laser-Range-Sensor-B-details-size.jpg" class="image"><img alt="TOF-Laser-Range-Sensor-B-details-size.jpg" src="/w/upload/thumb/0/0c/TOF-Laser-Range-Sensor-B-details-size.jpg/600px-TOF-Laser-Range-Sensor-B-details-size.jpg" decoding="async" loading="lazy" width="600" height="250" srcset="/w/upload/thumb/0/0c/TOF-Laser-Range-Sensor-B-details-size.jpg/900px-TOF-Laser-Range-Sensor-B-details-size.jpg 1.5x, /w/upload/0/0c/TOF-Laser-Range-Sensor-B-details-size.jpg 2x" /></a></li></ul>
+<h1><span class="mw-headline" id="Work_with_Raspberry_Pi">Work with Raspberry Pi</span></h1>
+<h2><span class="mw-headline" id="Enable_UART_Interface">Enable UART Interface</span></h2>
+<p>Open the Raspberry Pi terminal and enter the following command to enter the configuration interface <br />
+</p>
+<pre>sudo raspi-config
+Select Interfacing Options -&gt; Serial, disable shell access, and enable the hardware serial port
+</pre>
+<div class="center"><div class="floatnone"><a href="/wiki/File:L76X_GPS_Module_rpi_serial.png" class="image"><img alt="L76X GPS Module rpi serial.png" src="/w/upload/3/31/L76X_GPS_Module_rpi_serial.png" decoding="async" loading="lazy" width="810" height="278" /></a></div></div>
+<h3><span class="mw-headline" id="Enable_I2C_Interface">Enable I2C Interface</span></h3>
+<ul><li>Open the Raspberry Pi terminal and input the following command to enter the configuration interface: <br /></li></ul>
+<pre>sudo raspi-config 
+Select Interacting Options -&gt;I2C -&gt;yes to start the I2C kernel driver
+</pre>
+<p><a href="/wiki/File:RPI_open_i2c.png" class="image"><img alt="RPI open i2c.png" src="/w/upload/5/5c/RPI_open_i2c.png" decoding="async" loading="lazy" width="518" height="661" /></a><br />
+Then restart Raspberry Pi:<br />
+</p>
+<pre>sudo reboot
+</pre>
+<h2><span class="mw-headline" id="Module_parameter_Settings">Module parameter Settings</span></h2>
+<p>The UART baud rate of the TOF Laser Range Sensor module needs to be set to 115200 through the host computer;<br />
+The effect of using the TOF Laser Range Sensor module on Raspberry Pi is as follows:<br />
+<a href="/wiki/File:Tof-module-para.png" class="image"><img alt="Tof-module-para.png" src="/w/upload/f/f8/Tof-module-para.png" decoding="async" loading="lazy" width="644" height="513" /></a><br />
+</p>
+<h2><span class="mw-headline" id="Hardware_Connection">Hardware Connection</span></h2>
+<p>Connect to UART<br />
+<a href="/wiki/File:Tof-Uart.png" class="image"><img alt="Tof-Uart.png" src="/w/upload/8/8e/Tof-Uart.png" decoding="async" loading="lazy" width="654" height="379" /></a><br />
+Connect to I2C<br />
+<a href="/wiki/File:Tof-I2c.png" class="image"><img alt="Tof-I2c.png" src="/w/upload/2/27/Tof-I2c.png" decoding="async" loading="lazy" width="960" height="580" /></a><br />
+</p>
+<h1><span class="mw-headline" id="Working_with_Jetson_Nano">Working with Jetson Nano</span></h1>
+<h3><span class="mw-headline" id="Hardware_Connection_2">Hardware Connection</span></h3>
+<p><a href="/wiki/File:Tof-jetson.png" class="image"><img alt="Tof-jetson.png" src="/w/upload/5/54/Tof-jetson.png" decoding="async" loading="lazy" width="498" height="382" /></a><br />
+</p>
+<h3><span class="mw-headline" id="Software_Settings">Software Settings</span></h3>
+<p>The UART baud rate of the TOF Laser Range Sensor module needs to be set to 115200 by the host computer;<br />
+<a href="/wiki/File:Tof-software-set.png" class="image"><img alt="Tof-software-set.png" src="/w/upload/6/6b/Tof-software-set.png" decoding="async" loading="lazy" width="681" height="718" /></a><br />
+</p><p>The effect of Jetson nano using TOF Laser Range Sensor module is as follows: <br />
+<a href="/wiki/File:Tof-jetson-sensor.png" class="image"><img alt="Tof-jetson-sensor.png" src="/w/upload/7/73/Tof-jetson-sensor.png" decoding="async" loading="lazy" width="625" height="782" /></a><br />
+</p>
+<h1><span class="mw-headline" id="Working_with_Arduino">Working with Arduino</span></h1>
+<h2><span class="mw-headline" id="Hardware_Connection_3">Hardware Connection</span></h2>
+<dl><dd><a href="/wiki/File:TOF-Laser-Range-Sensor-Arduino-connected.jpg" class="image"><img alt="TOF-Laser-Range-Sensor-Arduino-connected.jpg" src="/w/upload/thumb/d/d7/TOF-Laser-Range-Sensor-Arduino-connected.jpg/400px-TOF-Laser-Range-Sensor-Arduino-connected.jpg" decoding="async" loading="lazy" width="400" height="280" srcset="/w/upload/thumb/d/d7/TOF-Laser-Range-Sensor-Arduino-connected.jpg/600px-TOF-Laser-Range-Sensor-Arduino-connected.jpg 1.5x, /w/upload/thumb/d/d7/TOF-Laser-Range-Sensor-Arduino-connected.jpg/800px-TOF-Laser-Range-Sensor-Arduino-connected.jpg 2x" /></a></dd></dl>
+<h2><span class="mw-headline" id="Software_Settings_2">Software Settings</span></h2>
+<ul><li>The UART baud rate of the TOF Laser Range Sensor module needs to be set to: 115200 by the host computer;</li></ul>
+<dl><dd><a href="/wiki/File:Tof-software-set.png" class="image"><img alt="Tof-software-set.png" src="/w/upload/6/6b/Tof-software-set.png" decoding="async" loading="lazy" width="681" height="718" /></a></dd>
+<dd><a href="/wiki/File:TOF-Arduino-Test.jpg" class="image"><img alt="TOF-Arduino-Test.jpg" src="/w/upload/thumb/b/b9/TOF-Arduino-Test.jpg/400px-TOF-Arduino-Test.jpg" decoding="async" loading="lazy" width="400" height="210" srcset="/w/upload/thumb/b/b9/TOF-Arduino-Test.jpg/600px-TOF-Arduino-Test.jpg 1.5x, /w/upload/thumb/b/b9/TOF-Arduino-Test.jpg/800px-TOF-Arduino-Test.jpg 2x" /></a></dd></dl>
+<h1><span class="mw-headline" id="Resource">Resource</span></h1>
+<h2><span class="mw-headline" id="Demo_code">Demo code</span></h2>
+<ul><li><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://files.waveshare.com/upload/0/01/TOF-Laser-Range-Sensor-B-Demo.zip">Demo code</a></li></ul>
+<h2><span class="mw-headline" id="Software_2">Software</span></h2>
+<ul><li><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://files.waveshare.com/upload/2/23/Waveshare_TOFAssistant.zip">TOF Assistant PC Assistant (Windows 7/10 64-bit machine)</a></li>
+<li><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://files.waveshare.com/upload/0/00/TOFAssistant4.4.0.4_x86.zip">TOF Assistant PC Assistant (Windows 7/10 32-bit machine)</a></li></ul>
+<h1><span class="mw-headline" id="FAQ">FAQ</span></h1>
+<div class="tabbertab" title="FAQ">
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion1">
+								Question: Can it be used under outdoor (strong light) conditions?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion1" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>The module is able to use outdoor.
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion2">
+								Question: Is there interference in the work of multiple modules?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion2" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>No interference. When multiple modules work at the same time, even if the infrared rays between each other cross or hit the same position, it will not affect the actual measurement.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion3">
+								Question: Why is there no data output in TOFSense?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion3" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>Each module is shipped after strict testing. If there is no data, please check whether the mode, wiring, baud rate, and other configurations are correct; for I2C mode, please check if you have to use the correct device address; for I/O mode, please check the Introduction part</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion4">
+								Question: What should I pay attention to when installing?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion4" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>When installing, avoid obstruction in the FOV angle. In addition, attention should be paid to the height of the ground, and similar reflective surfaces such as ground occlusion in the FOV should be avoided.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion5">
+								Question:  Is the module's UART. I2C and I/O the same interface?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion5" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>All the interfaces of the module share the same physical interface, and the corresponding line sequence can be changed for different communication modes.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion6">
+								Question: Why couldn't the Waveshare TOFAssistant software recognize the mode?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion6" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>The TOFAssistant software can only support UART mode. If you have set the Sensor to other modes, please switch it back to UART mode first.
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion7">
+								Question: After switching to IIC or I/O mode, why does NAssistant software not recognize the module?How to switch between different communication modes?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion7" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>
+<ul><li>Currently, the NAssistant software only supports the recognition of modules in UART mode. InUART mode, the host computer can enter the setting page to configure the module as an IICor I/Ocommunication mode after successful recognition through the software. In IIC communication mode, the module can be switched back to UART or I/O mode by sending instructions to the module according to the IIC communication protocol. Additionally, if there is no IIC test environment or if it is switched to I/O mode, it can be switched back to UART mode as follows:
+<ul><li>The user needs to prepare a USB to TTL module that supports 921600 baud rate (CP2102 is recommended) and install the corresponding driver, connect the USB to TTL module's TX, RX, andGND to the corresponding pins of the TOF module, and temporarily not connect the VCC pin. Thenplug the USB to TTL module into the computer.</li>
+<li>Open the NAssistant software, click on the icon to enter the serial port debugging assistant, change the baud rate to 921600, select the COM port corresponding to the USB to TTL module, andthen click the connect button to connect to the COM port (most situations will automatically connect). In the one-way send text box, enter 54 20 00 ff 00 ff ff ff ff 00 ff ff 00 10 0e ff ff ff ff ff ff ff ff ff ff ff 00 ff ff ff ff 7c, change the send interval in the timer send column to 20ms, and then check the timer send.</li>
+<li>At this point, connect the USB to TTL module's 5V to the TOF module's VCC pin. The module will switch to UART mode and start outputting data. Then uncheck the timer send button, disconnect the USB to TTL module, and then power on the module. Finally, click the recognition button on the main page to recognize the module.</li>
+<li>If the switch fails, pull out the USB to TTL module and repeat the entire step. Do not plug andunplug the VCC pin repeatedly while sending commands. If the module can be recognized normallybut the serial port output data is abnormal, you can manually change to UART mode in the settingpage</li>
+<li>PS: If the TOF module's VCC pin is connected to the USB to TTL module's 5V and the module continuously sends protocol data such as 80 00 80 00..., first click the connect button to temporarilydisconnect the COM port, change the baud rate to 115200, and then click the connect button toreconnect to the COM port. If the data in the serial port debugging assistant starts with b3 b1 at this point, enter de ed 00 00 05 04 3b 01 00 00 10 in the one-way send text box and click send. Thendisconnect the USB to TTL module, power on the module, and click the recognition button on the mainpage to recognize the module. If the data still starts with b3 b1 after re-plugging, repeat the PS steps.</li></ul></li></ul>
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion8">
+								Question: What kind of data will the Sensor output if the measured distance is larger than 15m?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion8" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>If the measured distance is larger than 15m, the output data is random and it will be 0 if the distance is larger than 20m
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion9">
+								Question: Does the module support output point cloud information?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion9" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>The module can only output one distance at a time and does not support the output of point cloud information temporarily.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion10">
+								Question:  What kind of connector does the sensor use?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion10" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>The connector is  GH1.25.
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion11">
+								Question:  How to transfer the data to distance in a meter?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion11" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>For example, if the data received is ad 08 00. Because the data is saved in little-endian mode, it should be taken as 0x0008ad, convert it to DEC mode it should be 2221, and divide with 1000 you can get the distance data 2.221m.
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion12">
+								Question:  How to calculate the CHK?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion12" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>The checksum is to add all the previous bytes and take the lowest byte of data. For example, the checksum of 
+<pre>55 01 00 ef 03 is 0x55+0x01+0x00+0xef+0x03=0x0148
+</pre>
+<p>then the checksum is 48, so The complete data of this frame is 55 01 00 ef 03 48.
+</p>
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion13">
+								Question: Why cannot the Sensor work in I2C mode?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion13" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>In IIC mode, the device's SDA and SCL pins are recommended to be output in open-drain mode. At this time, a pull-up resistor is required on the bus. During communication, functions such as start, stop, read, write, and response should be programmed according to the standard IIC communication sequence. When communicating with the TOF module, refer to the NLink_TOFSense_IIC_Frame0 protocol in the user manual to read and write the registers. Pay special attention to the shift of the 7-bit slave address and increase the read/write bit to send 
+</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion14">
+								Question: If reports an error "The MSVC***.dll file cannot be found...". It may be that the computer lacks the corresponding runtime components of Microsoft.?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion14" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div> <a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://support.microsoft.com/en-us/help/2977003/the-latest-supported-visual-c-downloads">Visual C ++ Redistributable for Visual Studio 2017</a>, if the above installation fails or shows success, but opening the assistant program still prompts that the DLL file is missing. Note, please select the patch for the computer system.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<div class="panel-group">
+				<div class="panel panel-default">
+					<div class="panel-heading">
+						<h4 class="panel-title">
+							<a data-toggle="collapse" data-parent="#accordion" href="#accordion15">
+								Question:  The software report an error "Because Qt***.dll cannot be found..."?
+
+							</a>
+						</h4>
+					</div>
+					<div id="accordion15" class="panel-collapse collapse in">
+						<div class="panel-body">
+<div>&#160;<b>Answer:</b></div>
+<div>Please check whether the installation file is silently intercepted by the security software, please exit the security software and reinstall it. Also, run with administrator rights.</div>
+<div style="display:none;">{{{3}}}</div>
+<div style="display:none;">{{{4}}}</div>
+<p><font color="red" style="display:none;">{{{5}}}</font>
+</p>
+						</div>
+					</div>
+				</div>
+</div>
+<p><br />
+</p>
+<h1><span class="mw-headline" id="Support">Support</span></h1>
+<p><br />
+<br />
+</p>
+<div style="background:linear-gradient(to bottom right,#91C942,#7DB036); border-radius:15px; width:100%;min-width:750px;">
+<div style="display:flex;flex-direction: row;align-items: flex-start;">
+<div style="flex:l; font-size:15px; width:70%; margin-top:20px; margin-bottom:20px; margin-right:40px;padding-left:40px;">
+<p style="font-size:20px; font-weight:bold;">
+Technical Support
+</p>
+<p>
+If you need technical support or have any feedback/review, please click the <b>Submit Now</b> button to submit a ticket, Our support team will check and reply to you within 1 to 2 working days. Please be patient as we make every effort to help you to resolve the issue. 
+<br /> 
+Working Time: 9 AM - 6 PM GMT+8 (Monday to Friday)
+</p>
+</div>
+<div style="margin-top:94px;">
+<div id="service" style="display:flex; flex:r; background-color:#393939; color:white; text-align:center; font-size:20px; border-radius:20px;">
+<p><a target="_blank" rel="nofollow noreferrer noopener" class="external text" href="https://service.waveshare.com/">Submit Now</a>
+</p>
+</div>
+</div>
+</div>
+</div>
+</div></div>
+<!-- 
+NewPP limit report
+Cached time: 20260716054615
+Cache expiry: 0
+Dynamic content: true
+Complications: []
+CPU time usage: 0.477 seconds
+Real time usage: 0.620 seconds
+Preprocessor visited node count: 1073/1000000
+Post‐expand include size: 28034/2097152 bytes
+Template argument size: 13185/2097152 bytes
+Highest expansion depth: 8/40
+Expensive parser function count: 0/100
+Unstrip recursion depth: 1/20
+Unstrip post‐expand size: 15264/5000000 bytes
+-->
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%  161.546      1 -total
+ 30.64%   49.495      1 Template:TOF_Laser_Ranger_Sensor_B_FAQ
+ 29.45%   47.582      1 Template:Infobox_item
+ 22.50%   36.350      1 Template:TOF_Laser_Ranger_Sensor_B_Guides
+ 20.75%   33.529     15 Template:FAQ
+  8.89%   14.361      1 Template:Product_List
+  8.77%   14.160      1 Template:TOF_Laser_Range_Sensor_B_Spec
+  8.27%   13.360      1 Template:Servicebox1
+  7.44%   12.017      1 Template:Amazon_nolink
+  7.11%   11.490      1 Template:RPI_open_i2c
+-->
+</div></div>								<div class="printfooter">
+				Retrieved from "<a dir="ltr" href="https://www.waveshare.com/w/index.php?title=TOF_Laser_Range_Sensor_(B)&amp;oldid=79047">https://www.waveshare.com/w/index.php?title=TOF_Laser_Range_Sensor_(B)&amp;oldid=79047</a>"				</div>
+												<div id="catlinks" class="catlinks catlinks-allhidden" data-mw="interface"><div id="mw-hidden-catlinks" class="mw-hidden-catlinks mw-hidden-cats-hidden">Hidden categories: <ul><li><a href="/wiki/Category:CAN_interface" title="Category:CAN interface">CAN interface</a></li><li><a href="/wiki/Category:UART_interface" title="Category:UART interface">UART interface</a></li></ul></div></div>												<div class="visualClear"></div>
+							</div>
+			<!-- /bodyContent -->
+		</div>
+						</div>
+				</div>
+			</div>
+			<!-- /content -->
+
+			<!-- sidebar-left -->
+			<div class="sidebar-wrapper sidebar-left-wrapper">
+				<div class="sidebar-container container">
+					<div class="row">
+						<div id="sidebar-left" class="col-md-2 col-md-offset-0">
+							<div id="tweekiTOC"></div>						</div>
+					</div>
+				</div>
+			</div>
+			<!-- /sidebar-left -->
+					<!-- footer -->
+			<div id="footer" role="contentinfo" class="footer container footer-sticky bg-light">
+			<ul id="footer-custom"><li class="dropup"><a href="/w/index.php?title=Special:UserLogin&amp;returnto=TOF+Laser+Range+Sensor+%28B%29" title="You are encouraged to log in; however, it is not mandatory [o]" accesskey="o">Login / Create Account</a></li></ul><div style="clear:both"></div>			</div>
+			<!-- /footer -->
+		
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+var fbtFancyBoxOptions = {};
+</script>
+
+<script>(RLQ=window.RLQ||[]).push(function(){mw.config.set({"wgPageParseReport":{"limitreport":{"cputime":"0.477","walltime":"0.620","ppvisitednodes":{"value":1073,"limit":1000000},"postexpandincludesize":{"value":28034,"limit":2097152},"templateargumentsize":{"value":13185,"limit":2097152},"expansiondepth":{"value":8,"limit":40},"expensivefunctioncount":{"value":0,"limit":100},"unstrip-depth":{"value":1,"limit":20},"unstrip-size":{"value":15264,"limit":5000000},"timingprofile":["100.00%  161.546      1 -total"," 30.64%   49.495      1 Template:TOF_Laser_Ranger_Sensor_B_FAQ"," 29.45%   47.582      1 Template:Infobox_item"," 22.50%   36.350      1 Template:TOF_Laser_Ranger_Sensor_B_Guides"," 20.75%   33.529     15 Template:FAQ","  8.89%   14.361      1 Template:Product_List","  8.77%   14.160      1 Template:TOF_Laser_Range_Sensor_B_Spec","  8.27%   13.360      1 Template:Servicebox1","  7.44%   12.017      1 Template:Amazon_nolink","  7.11%   11.490      1 Template:RPI_open_i2c"]},"cachereport":{"timestamp":"20260716054615","ttl":0,"transientcontent":true}}});mw.config.set({"wgBackendResponseTime":1038});});</script>	<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a1beb48f7d22e442',t:'MTc4NDE4MDc3NA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
