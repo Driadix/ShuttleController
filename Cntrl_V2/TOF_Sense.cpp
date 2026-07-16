@@ -7,11 +7,10 @@
  * | Function    :   ToF driver with multi-device support
  ******************************************************************************/
 
-// STM32duino Wire uses the standard Arduino return values: 2/3 are NACKs,
-// 4 is another transport error, and some cores use 5 for a timeout.
+// STM32duino Wire uses the standard Arduino return values: 2/3 are NACKs;
+// every other non-zero write-phase result remains a generic Wire error here.
 static constexpr uint8_t kWireNackAddress = 2U;
 static constexpr uint8_t kWireNackData    = 3U;
-static constexpr uint8_t kWireTimeout     = 5U;
 static constexpr uint8_t kWireReadFailed  = 0xFEU;
 
 static void tofSetDiag(
@@ -58,10 +57,6 @@ static TofI2cStatus tofStatusFromWire(uint8_t wireStatus)
     {
         return TOF_I2C_NO_ACK;
     }
-    if (wireStatus == kWireTimeout)
-    {
-        return TOF_I2C_WIRE_TIMEOUT;
-    }
     return TOF_I2C_WIRE_ERROR;
 }
 
@@ -103,12 +98,18 @@ static bool I2C_Read_Nbyte_ByAddr(
         (void)Wire.read();
     }
 
+    if (requested == 0U)
+    {
+        // STM32duino deliberately collapses every read-phase failure to zero.
+        // Preserve that uncertainty: one such result is not evidence that the
+        // whole shared bus needs to be reset.
+        tofSetDiag(diag, TOF_I2C_READ_FAILED_UNKNOWN, slave_addr, reg_addr, len, received, kWireReadFailed);
+        return false;
+    }
+
     if (requested != len)
     {
-        // The STM32duino Wire API returns zero when the read transaction did
-        // not complete.  It does not expose the lower-level reason here, but
-        // this is shared transport evidence rather than an optical sample.
-        tofSetDiag(diag, TOF_I2C_WIRE_ERROR, slave_addr, reg_addr, len, received, kWireReadFailed);
+        tofSetDiag(diag, TOF_I2C_SHORT_READ, slave_addr, reg_addr, len, received, requested);
         return false;
     }
 
@@ -157,6 +158,8 @@ const char *TOF_I2C_Status_Name(TofI2cStatus status)
         return "noack";
     case TOF_I2C_BUS_STUCK:
         return "stuck";
+    case TOF_I2C_READ_FAILED_UNKNOWN:
+        return "read_unknown";
     default:
         return "unknown";
     }
@@ -213,17 +216,6 @@ void IIC_Set_ID(uint8_t current_id, uint8_t new_id)
     if (tofAddressForId(current_id, &slave_addr, nullptr))
     {
         (void)I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_ID, &new_id, TOF_SIZE_ID);
-    }
-    delay(10);
-}
-
-void IIC_Change_Mode_To_UART(uint8_t id)
-{
-    const uint8_t data = IIC_CHANGE_TO_UART_DATA;
-    uint8_t slave_addr = 0U;
-    if (tofAddressForId(id, &slave_addr, nullptr))
-    {
-        (void)I2C_Write_Nbyte_ByAddr(slave_addr, TOF_ADDR_MODE, &data, TOF_SIZE_MODE);
     }
     delay(10);
 }

@@ -64,12 +64,13 @@ namespace BmsDdA5
     {
         uint32_t txHoldMs          = 12U;
         uint32_t rxTimeoutMs       = 140U;
-        uint32_t basicIdleMs       = 1000U;
-        uint32_t basicActiveMs     = 3000U;
+        uint32_t startupBasicRetryMs = 1000U;
+        uint32_t basicIdleMs       = 5000U;
+        uint32_t basicActiveMs     = 15000U;
         uint32_t basicHighLoadMs   = 60000U;
-        uint32_t lowBatteryBasicMs = 300000U;
-        uint32_t cellIdleMs        = 30000U;
-        uint32_t deviceIdleMs      = 120000U;
+        uint32_t lowBatteryBasicMs = 5000U;
+        uint32_t cellIdleMs        = 60000U;
+        uint32_t deviceIdleMs      = 300000U;
         uint32_t staleWarnMs       = 15000U;
         uint32_t staleRepeatMs     = 60000U;
         uint8_t  maxStoredCells    = 24U;
@@ -208,30 +209,31 @@ namespace BmsDdA5
                 return events;
             }
 
-            if (activity == ActivityHint::LowBatteryFault)
+            uint32_t basicInterval = config_.startupBasicRetryMs;
+            if (snapshot_.hasBasic)
             {
-                if (elapsedSince(nowMs, lastBasicPollMs_) >= config_.lowBatteryBasicMs)
+                switch (activity)
                 {
-                    startRequest(RequestKind::BasicInfo, nowMs, &events);
-                    events |= updateFreshness(nowMs);
-                    return events;
+                case ActivityHint::Idle:
+                    basicInterval = config_.basicIdleMs;
+                    break;
+                case ActivityHint::Active:
+                    basicInterval = config_.basicActiveMs;
+                    break;
+                case ActivityHint::HighLoad:
+                    basicInterval = config_.basicHighLoadMs;
+                    break;
+                case ActivityHint::LowBatteryFault:
+                    basicInterval = config_.lowBatteryBasicMs;
+                    break;
                 }
-
-                events |= updateFreshness(nowMs);
-                return events;
             }
 
-            if (activity != ActivityHint::HighLoad)
+            if (elapsedSince(nowMs, lastBasicPollMs_) >= basicInterval)
             {
-                const uint32_t basicInterval =
-                    (activity == ActivityHint::Idle) ? config_.basicIdleMs : config_.basicActiveMs;
-
-                if (elapsedSince(nowMs, lastBasicPollMs_) >= basicInterval)
-                {
-                    startRequest(RequestKind::BasicInfo, nowMs, &events);
-                    events |= updateFreshness(nowMs);
-                    return events;
-                }
+                startRequest(RequestKind::BasicInfo, nowMs, &events);
+                events |= updateFreshness(nowMs);
+                return events;
             }
 
             if (activity == ActivityHint::Idle)
@@ -243,7 +245,7 @@ namespace BmsDdA5
                     return events;
                 }
 
-                if (deviceInfoBootPending_ || elapsedSince(nowMs, lastDevicePollMs_) >= config_.deviceIdleMs)
+                if (elapsedSince(nowMs, lastDevicePollMs_) >= config_.deviceIdleMs)
                 {
                     startRequest(RequestKind::DeviceInfo, nowMs, &events);
                     events |= updateFreshness(nowMs);
@@ -294,6 +296,11 @@ namespace BmsDdA5
         bool isTransactionActive() const
         {
             return state_ != TransportState::Idle;
+        }
+
+        bool isTxActive() const
+        {
+            return state_ == TransportState::TxSent;
         }
 
         RequestKind activeRequest() const
@@ -347,7 +354,6 @@ namespace BmsDdA5
         uint32_t lastCellPollMs_;
         uint32_t lastDevicePollMs_;
 
-        bool         deviceInfoBootPending_;
         bool         freshState_;
         ActivityHint currentActivity_;
 
@@ -403,11 +409,10 @@ namespace BmsDdA5
             txReleaseAtMs_ = 0U;
             rxTimeoutAtMs_ = 0U;
 
-            lastBasicPollMs_  = nowMs - config_.basicIdleMs;
-            lastCellPollMs_   = nowMs - config_.cellIdleMs;
-            lastDevicePollMs_ = nowMs - config_.deviceIdleMs;
+            lastBasicPollMs_  = nowMs;
+            lastCellPollMs_   = nowMs;
+            lastDevicePollMs_ = nowMs;
 
-            deviceInfoBootPending_  = true;
             snapshot_.deviceInfo[0] = '\0';
             currentActivity_        = ActivityHint::Idle;
 
@@ -557,8 +562,7 @@ namespace BmsDdA5
             }
             else if (kind == RequestKind::DeviceInfo)
             {
-                lastDevicePollMs_      = nowMs;
-                deviceInfoBootPending_ = false;
+                lastDevicePollMs_ = nowMs;
             }
 
             if (written != sizeof(txFrame_))

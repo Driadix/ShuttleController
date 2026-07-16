@@ -51,8 +51,6 @@ typedef struct
 #define TOF_MEASUREMENT_REG_START  0x20   // первый регистр данных измерения
 #define TOF_MEASUREMENT_BLOCK_SIZE 13     // 0x20..0x2C включительно
 
-#define IIC_CHANGE_TO_UART_DATA 0x00
-
 enum TofI2cStatus : uint8_t
 {
     TOF_I2C_OK = 0,
@@ -62,7 +60,10 @@ enum TofI2cStatus : uint8_t
     TOF_I2C_SHORT_READ,
     TOF_I2C_ID_MISMATCH,
     TOF_I2C_NO_ACK,
-    TOF_I2C_BUS_STUCK
+    TOF_I2C_BUS_STUCK,
+    // STM32duino Wire returns zero for a failed read phase without exposing
+    // whether the cause was NACK, timeout, busy or an electrical disturbance.
+    TOF_I2C_READ_FAILED_UNKNOWN
 };
 
 struct TofI2cDiagnostics
@@ -79,7 +80,6 @@ struct TofI2cDiagnostics
 const char *TOF_I2C_Status_Name(TofI2cStatus status);
 bool TOF_Inquire_I2C_Decoding_ByID(uint8_t id, TOF_Parameter *tof_data, TofI2cDiagnostics *diag = nullptr);
 void IIC_Set_ID(uint8_t current_id, uint8_t new_id);
-void IIC_Change_Mode_To_UART(uint8_t id);
 bool TOF_Is_Device_Present(uint8_t id, TofI2cDiagnostics *diag = nullptr);
 
 

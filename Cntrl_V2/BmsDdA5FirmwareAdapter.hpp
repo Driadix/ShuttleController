@@ -34,13 +34,17 @@ namespace BmsDdA5Firmware
             const BmsDdA5::Config &bmsConfig  = BmsDdA5::Config(),
             const WarnConfig &     warnConfig = WarnConfig())
             : port_(&port), dePin_(dePin), logFn_(logFn), hooks_(makeHooks(this)), client_(hooks_, bmsConfig),
-              warnConfig_(warnConfig)
+              warnConfig_(warnConfig), txActive_(false), lastTxFinishedMs_(0U)
         {
             resetWarnState();
         }
 
         void begin(uint32_t nowMs)
         {
+            pinMode(dePin_, OUTPUT);
+            digitalWrite(dePin_, LOW);
+            txActive_        = false;
+            lastTxFinishedMs_ = 0U;
             client_.begin(nowMs);
             resetWarnState();
         }
@@ -90,6 +94,16 @@ namespace BmsDdA5Firmware
         const BmsDdA5::Config &config() const
         {
             return client_.config();
+        }
+
+        bool isTxActive() const
+        {
+            return txActive_;
+        }
+
+        uint32_t lastTxFinishedMs() const
+        {
+            return lastTxFinishedMs_;
         }
 
       private:
@@ -145,11 +159,17 @@ namespace BmsDdA5Firmware
             {
                 pinMode(self->dePin_, OUTPUT);
                 digitalWrite(self->dePin_, HIGH);
+                self->txActive_ = true;
                 return;
             }
 
             digitalWrite(self->dePin_, LOW);
-            pinMode(self->dePin_, INPUT_PULLDOWN);
+            pinMode(self->dePin_, OUTPUT);
+            if (self->txActive_)
+            {
+                self->lastTxFinishedMs_ = millis();
+                self->txActive_          = false;
+            }
         }
 
         static bool due(uint32_t nowMs, uint32_t &lastMs, uint32_t intervalMs)
@@ -314,6 +334,8 @@ namespace BmsDdA5Firmware
         BmsDdA5::Client client_;
         WarnConfig      warnConfig_;
         WarnState       warnState_;
+        bool            txActive_;
+        uint32_t        lastTxFinishedMs_;
     };
 
 } // namespace BmsDdA5Firmware
