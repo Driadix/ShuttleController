@@ -51,17 +51,16 @@ class As5600Sensor
     static constexpr uint8_t kStatusMagnetHigh     = 0x08U;
     static constexpr uint8_t kStatusMagnetLow      = 0x10U;
     static constexpr uint8_t kStatusMagnetDetected = 0x20U;
-    static constexpr uint8_t kStatusValidMask      = 0x38U;
 
     enum LocalI2cStatus : uint8_t
     {
         I2C_INVALID_ARGUMENT = 0xF0U,
         I2C_BUS_UNAVAILABLE  = 0xF1U,
         I2C_POINTER_WRITE    = 0xF2U,
-        I2C_SHORT_READ       = 0xF3U,
-        I2C_REGISTER_SHAPE   = 0xF4U
+        I2C_SHORT_READ       = 0xF3U
     };
 
+    bool ensureBusReady(uint32_t nowMs) const;
     bool readRegisters(uint8_t reg, uint8_t *data, uint8_t length, uint8_t *i2cStatus);
     bool sampleHealth(uint32_t nowMs);
     void recordReadFailure(uint8_t i2cStatus);
@@ -77,4 +76,5 @@ class As5600Sensor
     uint8_t              _agc;
     bool                 _lastGoodAngleValid;
     bool                 _responding;
+    bool                 _diagnosticsValid;
 };

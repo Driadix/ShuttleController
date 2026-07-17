@@ -2,7 +2,8 @@
 
 As5600Sensor::As5600Sensor(TwoWire &wire, BusReadyCallback busReady)
     : _wire(wire), _busReady(busReady), _lastServiceMs(0U), _lastGoodAngleRaw(0U), _magnitude(0U),
-      _statusRegister(0U), _agc(0U), _lastGoodAngleValid(false), _responding(false)
+      _statusRegister(0U), _agc(0U), _lastGoodAngleValid(false), _responding(false),
+      _diagnosticsValid(false)
 {
 }
 
@@ -18,6 +19,7 @@ bool As5600Sensor::begin(uint32_t nowMs)
     _agc                 = 0U;
     _lastGoodAngleValid  = false;
     _responding          = false;
+    _diagnosticsValid    = false;
     return sampleHealth(nowMs);
 }
 
@@ -31,6 +33,11 @@ void As5600Sensor::service(uint32_t nowMs)
     (void)sampleHealth(nowMs);
 }
 
+bool As5600Sensor::ensureBusReady(uint32_t nowMs) const
+{
+    return _busReady == nullptr || _busReady(nowMs);
+}
+
 bool As5600Sensor::readRegisters(uint8_t reg, uint8_t *data, uint8_t length, uint8_t *i2cStatus)
 {
     if (data == nullptr || length == 0U)
@@ -39,13 +46,6 @@ bool As5600Sensor::readRegisters(uint8_t reg, uint8_t *data, uint8_t length, uin
             *i2cStatus = I2C_INVALID_ARGUMENT;
         return false;
     }
-    if (_busReady != nullptr && !_busReady(millis()))
-    {
-        if (i2cStatus != nullptr)
-            *i2cStatus = I2C_BUS_UNAVAILABLE;
-        return false;
-    }
-
     _wire.beginTransmission(kI2cAddress);
     if (_wire.write(reg) != 1U)
     {
@@ -99,25 +99,47 @@ bool As5600Sensor::sampleHealth(uint32_t nowMs)
     uint8_t magnitudeBytes[2] = { 0U, 0U };
     uint8_t i2cStatus         = 0U;
 
-    const bool transportOk = readRegisters(kAngleHighReg, angleBytes, 2U, &i2cStatus) &&
-                             readRegisters(kStatusReg, &statusValue, 1U, &i2cStatus) &&
-                             readRegisters(kAgcReg, &agcValue, 1U, &i2cStatus) &&
-                             readRegisters(kMagnitudeHighReg, magnitudeBytes, 2U, &i2cStatus);
-    const bool registerShapeOk = transportOk && (angleBytes[0] & 0xF0U) == 0U &&
-                                 (magnitudeBytes[0] & 0xF0U) == 0U &&
-                                 (statusValue & (uint8_t)~kStatusValidMask) == 0U;
-    if (!registerShapeOk)
+    // Qualify the shared bus once for the complete sample. Checking the physical
+    // line state between consecutive STOP/START operations can observe SDA while
+    // it is still settling and incorrectly reject the remaining register reads.
+    if (!ensureBusReady(nowMs))
     {
-        recordReadFailure(transportOk ? I2C_REGISTER_SHAPE : i2cStatus);
+        recordReadFailure(I2C_BUS_UNAVAILABLE);
         return false;
     }
 
-    _lastGoodAngleRaw   = (uint16_t)(((uint16_t)angleBytes[0] << 8) | angleBytes[1]);
+    if (!readRegisters(kAngleHighReg, angleBytes, 2U, &i2cStatus))
+    {
+        recordReadFailure(i2cStatus);
+        return false;
+    }
+
+    _lastGoodAngleRaw =
+        (uint16_t)((((uint16_t)angleBytes[0] << 8) | angleBytes[1]) & 0x0FFFU);
     _lastGoodAngleValid = true;
-    _statusRegister     = statusValue;
-    _agc                = agcValue;
-    _magnitude          = (uint16_t)(((uint16_t)magnitudeBytes[0] << 8) | magnitudeBytes[1]);
     _responding         = true;
+
+    // STATUS, AGC and MAGNITUDE are useful diagnostics, but angle availability
+    // is the operational requirement. Do not fault motion because an optional
+    // diagnostic read failed or because reserved diagnostic bits vary by device.
+    uint8_t diagnosticI2cStatus = 0U;
+    _diagnosticsValid = readRegisters(kStatusReg, &statusValue, 1U, &diagnosticI2cStatus) &&
+                        readRegisters(kAgcReg, &agcValue, 1U, &diagnosticI2cStatus) &&
+                        readRegisters(kMagnitudeHighReg, magnitudeBytes, 2U, &diagnosticI2cStatus);
+    if (_diagnosticsValid)
+    {
+        _statusRegister = statusValue;
+        _agc            = agcValue;
+        _magnitude      =
+            (uint16_t)((((uint16_t)magnitudeBytes[0] << 8) | magnitudeBytes[1]) & 0x0FFFU);
+    }
+    else
+    {
+        _statusRegister = 0U;
+        _agc            = 0U;
+        _magnitude      = 0U;
+    }
+
     _health.noteSuccess(nowMs);
     return true;
 }
@@ -125,14 +147,12 @@ bool As5600Sensor::sampleHealth(uint32_t nowMs)
 bool As5600Sensor::readAngleOnce(uint16_t *rawAngle, uint8_t *i2cStatus)
 {
     uint8_t bytes[2] = { 0U, 0U };
-    if (!readRegisters(kAngleHighReg, bytes, kAngleReadLength, i2cStatus) || (bytes[0] & 0xF0U) != 0U)
+    if (!readRegisters(kAngleHighReg, bytes, kAngleReadLength, i2cStatus))
     {
-        if (i2cStatus != nullptr && *i2cStatus == 0U)
-            *i2cStatus = I2C_REGISTER_SHAPE;
         return false;
     }
 
-    *rawAngle              = (uint16_t)(((uint16_t)bytes[0] << 8) | bytes[1]);
+    *rawAngle = (uint16_t)((((uint16_t)bytes[0] << 8) | bytes[1]) & 0x0FFFU);
     _lastGoodAngleRaw      = *rawAngle;
     _lastGoodAngleValid    = true;
     _responding            = true;
@@ -143,6 +163,11 @@ bool As5600Sensor::readAngle(uint16_t *rawAngle)
 {
     if (rawAngle == nullptr)
     {
+        return false;
+    }
+    if (!ensureBusReady(millis()))
+    {
+        recordReadFailure(I2C_BUS_UNAVAILABLE);
         return false;
     }
 
@@ -173,7 +198,7 @@ bool As5600Sensor::verifyRecovery(uint32_t nowMs)
 
 uint8_t As5600Sensor::probeAddress(uint32_t nowMs)
 {
-    if (_busReady != nullptr && !_busReady(nowMs))
+    if (!ensureBusReady(nowMs))
     {
         return I2C_BUS_UNAVAILABLE;
     }
@@ -184,6 +209,11 @@ uint8_t As5600Sensor::probeAddress(uint32_t nowMs)
 
 bool As5600Sensor::probeForBusVote()
 {
+    if (!ensureBusReady(millis()))
+    {
+        return false;
+    }
+
     uint16_t angle     = 0U;
     uint8_t  i2cStatus = 0U;
     return readAngleOnce(&angle, &i2cStatus);
@@ -267,11 +297,11 @@ void As5600Sensor::populateHealthPacket(As5600HealthPacket *packet, uint32_t now
         packet->flags |= AS5600_FLAG_RESPONDING;
     if (angleValid(nowMs))
         packet->flags |= AS5600_FLAG_ANGLE_VALID;
-    if ((_statusRegister & kStatusMagnetDetected) != 0U)
+    if (_diagnosticsValid && (_statusRegister & kStatusMagnetDetected) != 0U)
         packet->flags |= AS5600_FLAG_MAGNET_DETECTED;
-    if ((_statusRegister & kStatusMagnetLow) != 0U)
+    if (_diagnosticsValid && (_statusRegister & kStatusMagnetLow) != 0U)
         packet->flags |= AS5600_FLAG_MAGNET_TOO_WEAK;
-    if ((_statusRegister & kStatusMagnetHigh) != 0U)
+    if (_diagnosticsValid && (_statusRegister & kStatusMagnetHigh) != 0U)
         packet->flags |= AS5600_FLAG_MAGNET_TOO_STRONG;
     if (faultLatched)
         packet->flags |= AS5600_FLAG_FAULT_LATCHED;
