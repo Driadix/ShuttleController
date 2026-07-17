@@ -98,6 +98,7 @@ static void testRecoveryRequiresFullHealthyWindow()
     now += 32U;
     health.noteMeasurement(now, 160U, 1U, 500U);
     assert(health.recoveryQualified(now));
+    assert(health.recoveryReason(now) == TofRecoveryReason::MeasurementQuality);
     assert(!health.outputValid(now));
 
     health.confirmRecovery();
@@ -122,6 +123,7 @@ static void testRecoveryRatesAllowLimitedInvalidReadings()
     assert(health.usableRatePercent() == 75U);
     assert(health.usableStreak() == 12U);
     assert(health.recoveryQualified(now));
+    assert(health.recoveryReason(now) == TofRecoveryReason::MeasurementQuality);
 
     TofHealthMonitor weak;
     weak.reset(0U);
@@ -183,6 +185,103 @@ static void testFreshInvalidFramesDegradeWithoutFalseSensorFault()
     assert(!health.outputValid(now));
 }
 
+static void testMeasurementReadyRequiresStableQualityWindow()
+{
+    TofHealthMonitor health;
+    health.reset(0U);
+
+    uint32_t now = 0U;
+    for (uint8_t i = 0U; i < TofHealthMonitor::kWindowSize - 1U; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, static_cast<uint32_t>(i + 1U) * 10U, 1U, 500U);
+        assert(!health.measurementReady(now));
+    }
+    now += 32U;
+    health.noteMeasurement(now, 160U, 1U, 500U);
+    assert(health.measurementReady(now));
+}
+
+static void testTransportFaultCanRecoverByConfirmedLiveness()
+{
+    TofHealthMonitor health;
+    health.reset(0U);
+    health.markFaulted(100U, TofFaultCause::Transport);
+
+    uint32_t now = 100U;
+    for (uint8_t i = 0U; i < TofHealthMonitor::kLivenessFreshStreak - 1U; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, static_cast<uint32_t>(i + 1U) * 10U, 0U, 0U, 0U);
+        assert(!health.recoveryQualified(now));
+    }
+    now += 32U;
+    health.noteMeasurement(now, 320U, 0U, 0U, 0U);
+    assert(health.freshStreak() == TofHealthMonitor::kLivenessFreshStreak);
+    assert(health.recoveryReason(now) == TofRecoveryReason::TransportLiveness);
+    assert(health.invalidMeasurementsSinceFault() == TofHealthMonitor::kLivenessFreshStreak);
+
+    health.confirmRecovery();
+    assert(health.state() == TofHealthState::Degraded);
+    assert(!health.measurementReady(now));
+}
+
+static void testMeasurementFaultRequiresValidMeasurements()
+{
+    TofHealthMonitor health;
+    health.reset(0U);
+    health.markFaulted(100U, TofFaultCause::Measurement);
+
+    uint32_t now = 100U;
+    for (uint8_t i = 0U; i < TofHealthMonitor::kLivenessFreshStreak; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, static_cast<uint32_t>(i + 1U) * 10U, 0U, 0U);
+    }
+    assert(health.freshStreak() == TofHealthMonitor::kLivenessFreshStreak);
+    assert(health.recoveryReason(now) == TofRecoveryReason::None);
+}
+
+static void testTransportFailureRestartsLivenessEvidence()
+{
+    TofHealthMonitor health;
+    health.reset(0U);
+    health.markFaulted(100U, TofFaultCause::Transport);
+
+    uint32_t now = 100U;
+    for (uint8_t i = 0U; i < 20U; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, static_cast<uint32_t>(i + 1U) * 10U, 0U, 0U);
+    }
+    health.noteTransportFailure(++now);
+    assert(health.freshStreak() == 0U);
+    assert(health.transportFailuresSinceFault() == 1U);
+
+    for (uint8_t i = 0U; i < TofHealthMonitor::kLivenessFreshStreak; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, 1000U + static_cast<uint32_t>(i) * 10U, 0U, 0U);
+    }
+    assert(health.recoveryReason(now) == TofRecoveryReason::TransportLiveness);
+}
+
+static void testImplausibleStatusCannotProveLiveness()
+{
+    TofHealthMonitor health;
+    health.reset(0U);
+    health.markFaulted(100U, TofFaultCause::Transport);
+
+    uint32_t now = 100U;
+    for (uint8_t i = 0U; i < TofHealthMonitor::kLivenessFreshStreak; ++i)
+    {
+        now += 32U;
+        health.noteMeasurement(now, static_cast<uint32_t>(i + 1U) * 10U, 2U, 500U);
+    }
+    assert(health.freshStreak() == TofHealthMonitor::kLivenessFreshStreak);
+    assert(health.recoveryReason(now) == TofRecoveryReason::None);
+}
+
 static void testPausedTimeIsExcluded()
 {
     TofHealthMonitor health;
@@ -204,6 +303,11 @@ int main()
     testRecoveryRatesAllowLimitedInvalidReadings();
     testRecoveryFreshRateRejectsRepeatedTransportLosses();
     testFreshInvalidFramesDegradeWithoutFalseSensorFault();
+    testMeasurementReadyRequiresStableQualityWindow();
+    testTransportFaultCanRecoverByConfirmedLiveness();
+    testMeasurementFaultRequiresValidMeasurements();
+    testTransportFailureRestartsLivenessEvidence();
+    testImplausibleStatusCannotProveLiveness();
     testPausedTimeIsExcluded();
     return 0;
 }

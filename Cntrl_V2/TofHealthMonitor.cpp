@@ -16,11 +16,18 @@ void TofHealthMonitor::reset(uint32_t nowMs)
     _hasUsableSample          = false;
     _hasSensorTime            = false;
     _faultLatched             = false;
+    _faultCause               = TofFaultCause::None;
+    _lastMeasurementStatus    = 0U;
+    _lastSignalStrength       = 0U;
     _totalPolls               = 0U;
     _totalTransportFailures   = 0U;
     _totalInvalidMeasurements = 0U;
     _totalSensorRestarts      = 0U;
     _totalRecoveries          = 0U;
+    _pollsAtFault               = 0U;
+    _transportFailuresAtFault   = 0U;
+    _invalidMeasurementsAtFault = 0U;
+    _sensorRestartsAtFault      = 0U;
     clearWindow();
     clearFilter();
 }
@@ -48,7 +55,12 @@ void TofHealthMonitor::noteTransportFailure(uint32_t nowMs)
 }
 
 TofSampleResult
-TofHealthMonitor::noteMeasurement(uint32_t nowMs, uint32_t sensorTimeMs, uint16_t status, uint32_t distanceMm)
+TofHealthMonitor::noteMeasurement(
+    uint32_t nowMs,
+    uint32_t sensorTimeMs,
+    uint16_t status,
+    uint32_t distanceMm,
+    uint16_t signalStrength)
 {
     TofSampleResult result = {};
     ++_totalPolls;
@@ -74,7 +86,9 @@ TofHealthMonitor::noteMeasurement(uint32_t nowMs, uint32_t sensorTimeMs, uint16_
         result.freshFrame = true;
     }
 
-    _lastSensorTimeMs = sensorTimeMs;
+    _lastSensorTimeMs      = sensorTimeMs;
+    _lastMeasurementStatus = status;
+    _lastSignalStrength    = signalStrength;
     if (result.freshFrame)
     {
         _lastFreshFrameMs = nowMs;
@@ -103,6 +117,14 @@ TofHealthMonitor::noteMeasurement(uint32_t nowMs, uint32_t sensorTimeMs, uint16_
     }
 
     pushWindow(result.freshFrame, result.usable);
+    if (!result.freshFrame || status > 1U)
+    {
+        _plausibleStreak = 0U;
+    }
+    else if (_plausibleStreak < 0xFFU)
+    {
+        ++_plausibleStreak;
+    }
     updateState();
     return result;
 }
@@ -120,9 +142,17 @@ bool TofHealthMonitor::shouldDeclareFault(uint32_t nowMs) const
     return nowMs - _lastFreshFrameMs >= kFreshFrameTimeoutMs;
 }
 
-void TofHealthMonitor::markFaulted(uint32_t nowMs)
+void TofHealthMonitor::markFaulted(uint32_t nowMs, TofFaultCause cause)
 {
+    if (!_faultLatched)
+    {
+        _pollsAtFault               = _totalPolls;
+        _transportFailuresAtFault   = _totalTransportFailures;
+        _invalidMeasurementsAtFault = _totalInvalidMeasurements;
+        _sensorRestartsAtFault      = _totalSensorRestarts;
+    }
     _faultLatched = true;
+    _faultCause   = cause;
     _state        = TofHealthState::Faulted;
     _startedAtMs  = nowMs;
     clearWindow();
@@ -132,13 +162,31 @@ void TofHealthMonitor::markFaulted(uint32_t nowMs)
 
 bool TofHealthMonitor::recoveryQualified(uint32_t nowMs) const
 {
-    if (!_faultLatched || _windowSamples < kWindowSize || !_hasUsableSample)
+    return recoveryReason(nowMs) != TofRecoveryReason::None;
+}
+
+TofRecoveryReason TofHealthMonitor::recoveryReason(uint32_t nowMs) const
+{
+    if (!_faultLatched)
     {
-        return false;
+        return TofRecoveryReason::None;
     }
-    return populationCount(_freshWindow) >= kRecoveryFreshMinimum &&
-           populationCount(_usableWindow) >= kRecoveryUsableMinimum && _usableStreak >= kRecoveryUsableStreak &&
-           nowMs - _lastUsableSampleMs <= kRecoveryUsableMaxAgeMs;
+
+    const bool measurementQualityReady =
+        _windowSamples >= kWindowSize && _hasUsableSample &&
+        populationCount(_freshWindow) >= kRecoveryFreshMinimum &&
+        populationCount(_usableWindow) >= kRecoveryUsableMinimum && _usableStreak >= kRecoveryUsableStreak &&
+        nowMs - _lastUsableSampleMs <= kRecoveryUsableMaxAgeMs;
+    if (measurementQualityReady)
+    {
+        return TofRecoveryReason::MeasurementQuality;
+    }
+
+    const bool transportAlive = _faultCause == TofFaultCause::Transport &&
+                                _freshStreak >= kLivenessFreshStreak &&
+                                _plausibleStreak >= kLivenessFreshStreak && _hasFreshFrame &&
+                                nowMs - _lastFreshFrameMs <= kRecoveryUsableMaxAgeMs;
+    return transportAlive ? TofRecoveryReason::TransportLiveness : TofRecoveryReason::None;
 }
 
 void TofHealthMonitor::confirmRecovery()
@@ -148,12 +196,20 @@ void TofHealthMonitor::confirmRecovery()
         ++_totalRecoveries;
     }
     _faultLatched = false;
-    _state        = TofHealthState::Healthy;
+    _faultCause   = TofFaultCause::None;
+    updateState();
 }
 
 bool TofHealthMonitor::outputValid(uint32_t nowMs) const
 {
     return !_faultLatched && _filterPrimed && _hasUsableSample && nowMs - _lastUsableSampleMs <= kOutputFreshTimeoutMs;
+}
+
+bool TofHealthMonitor::measurementReady(uint32_t nowMs) const
+{
+    return outputValid(nowMs) && _windowSamples >= kWindowSize &&
+           populationCount(_freshWindow) >= kRecoveryFreshMinimum &&
+           populationCount(_usableWindow) >= kRecoveryUsableMinimum && _usableStreak >= kRecoveryUsableStreak;
 }
 
 uint16_t TofHealthMonitor::filteredDistanceMm() const
@@ -164,6 +220,11 @@ uint16_t TofHealthMonitor::filteredDistanceMm() const
 TofHealthState TofHealthMonitor::state() const
 {
     return _state;
+}
+
+TofFaultCause TofHealthMonitor::faultCause() const
+{
+    return _faultCause;
 }
 
 uint8_t TofHealthMonitor::freshRatePercent() const
@@ -181,6 +242,11 @@ uint8_t TofHealthMonitor::usableStreak() const
     return _usableStreak;
 }
 
+uint8_t TofHealthMonitor::freshStreak() const
+{
+    return _freshStreak;
+}
+
 uint32_t TofHealthMonitor::freshFrameAgeMs(uint32_t nowMs) const
 {
     return _hasFreshFrame ? nowMs - _lastFreshFrameMs : nowMs - _startedAtMs;
@@ -189,6 +255,16 @@ uint32_t TofHealthMonitor::freshFrameAgeMs(uint32_t nowMs) const
 uint32_t TofHealthMonitor::usableSampleAgeMs(uint32_t nowMs) const
 {
     return _hasUsableSample ? nowMs - _lastUsableSampleMs : nowMs - _startedAtMs;
+}
+
+uint16_t TofHealthMonitor::lastMeasurementStatus() const
+{
+    return _lastMeasurementStatus;
+}
+
+uint16_t TofHealthMonitor::lastSignalStrength() const
+{
+    return _lastSignalStrength;
 }
 
 uint32_t TofHealthMonitor::totalPolls() const
@@ -216,6 +292,26 @@ uint32_t TofHealthMonitor::totalRecoveries() const
     return _totalRecoveries;
 }
 
+uint32_t TofHealthMonitor::pollsSinceFault() const
+{
+    return _totalPolls - _pollsAtFault;
+}
+
+uint32_t TofHealthMonitor::transportFailuresSinceFault() const
+{
+    return _totalTransportFailures - _transportFailuresAtFault;
+}
+
+uint32_t TofHealthMonitor::invalidMeasurementsSinceFault() const
+{
+    return _totalInvalidMeasurements - _invalidMeasurementsAtFault;
+}
+
+uint32_t TofHealthMonitor::sensorRestartsSinceFault() const
+{
+    return _totalSensorRestarts - _sensorRestartsAtFault;
+}
+
 uint8_t TofHealthMonitor::populationCount(uint16_t value)
 {
     uint8_t count = 0U;
@@ -238,6 +334,8 @@ void TofHealthMonitor::clearWindow()
     _usableWindow  = 0U;
     _windowSamples = 0U;
     _usableStreak  = 0U;
+    _freshStreak     = 0U;
+    _plausibleStreak = 0U;
 }
 
 void TofHealthMonitor::clearFilter()
@@ -266,6 +364,15 @@ void TofHealthMonitor::pushWindow(bool fresh, bool usable)
     else if (_usableStreak < 0xFFU)
     {
         ++_usableStreak;
+    }
+    if (!fresh)
+    {
+        _freshStreak     = 0U;
+        _plausibleStreak = 0U;
+    }
+    else if (_freshStreak < 0xFFU)
+    {
+        ++_freshStreak;
     }
 }
 

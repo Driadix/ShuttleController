@@ -228,6 +228,11 @@ static void                  retryRadioConfigIfIdle(uint32_t now);
 static inline bool           batteryIsHighLoad();
 static inline bool           batteryLowFaultLatched();
 static bool                  batteryIsMotionLikeStatus(uint8_t st);
+static const char           *tofNameForSensor(uint8_t sensorIndex);
+static uint8_t               tofSensorForDistanceSlot(uint8_t distanceSlot);
+static void                  latchTofMeasurementFault(uint8_t sensor, uint32_t now, const char *context);
+static bool                  ensureChannelTofReadyForMotion(bool forward, const char *context);
+static void                  enforceActiveMotionTofSafety(uint32_t now);
 
 static inline void preserveManualStopOnAbort();
 static inline bool shouldAbortLoop();
@@ -386,7 +391,7 @@ struct ConfigPageHeader
 constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
 constexpr uint8_t  kFirmwareVersionMajor       = 2;
 constexpr uint8_t  kFirmwareVersionMinor       = 0;
-constexpr uint8_t  kFirmwareVersionPatch       = 6;
+constexpr uint8_t  kFirmwareVersionPatch       = 7;
 constexpr uint32_t kBootLogSettleMs            = 250;
 constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
@@ -2199,6 +2204,10 @@ void motor_Speed(int spd)
 // Установка движения вперед
 void motor_Start_Forward()
 {
+    if (!ensureChannelTofReadyForMotion(true, "start_f"))
+    {
+        return;
+    }
     motorStart   = 1;
     motorReverse = 0;
 }
@@ -2206,6 +2215,10 @@ void motor_Start_Forward()
 // Установка движения назад
 void motor_Start_Reverse()
 {
+    if (!ensureChannelTofReadyForMotion(false, "start_r"))
+    {
+        return;
+    }
     motorStart   = 1;
     motorReverse = 1;
 }
@@ -3425,6 +3438,96 @@ static ShuttleFault tofFaultForSensor(uint8_t sensorIndex)
     }
 }
 
+static uint8_t tofSensorForDistanceSlot(uint8_t distanceSlot)
+{
+    if (!inverse)
+    {
+        return distanceSlot;
+    }
+
+    switch (distanceSlot)
+    {
+    case 0U:
+        return 1U;
+    case 1U:
+        return 0U;
+    case 2U:
+        return 3U;
+    case 3U:
+        return 2U;
+    default:
+        return 0xFFU;
+    }
+}
+
+static void latchTofMeasurementFault(uint8_t sensor, uint32_t now, const char *context)
+{
+    if (sensor >= 4U)
+    {
+        return;
+    }
+
+    const ShuttleFault fault             = tofFaultForSensor(sensor);
+    const uint32_t     usableAge         = tofHealth[sensor].usableSampleAgeMs(now);
+    const uint16_t     measurementStatus = tofHealth[sensor].lastMeasurementStatus();
+    const uint16_t     signalStrength     = tofHealth[sensor].lastSignalStrength();
+    if ((alertMan.getErrorCode() & (uint16_t)fault) == 0U)
+    {
+        tofHealth[sensor].markFaulted(now, TofFaultCause::Measurement);
+        setFault(fault);
+    }
+
+    if (!tofFaultLogged[sensor])
+    {
+        makeReliableLog(
+            LOG_ERROR,
+            "TOF %s measurement unavailable %s age=%lu st=%u sig=%u",
+            tofNameForSensor(sensor),
+            context != nullptr ? context : "motion",
+            (unsigned long)usableAge,
+            measurementStatus,
+            signalStrength);
+        tofFaultLogged[sensor] = true;
+    }
+}
+
+static bool ensureChannelTofReadyForMotion(bool forward, const char *context)
+{
+    if (sensorOff)
+    {
+        return true;
+    }
+
+    const uint8_t distanceSlot = forward ? 1U : 0U;
+    const uint8_t sensor       = tofSensorForDistanceSlot(distanceSlot);
+    const uint32_t now          = millis();
+    if (sensor < 4U && tofHealth[sensor].measurementReady(now))
+    {
+        return true;
+    }
+
+    latchTofMeasurementFault(sensor, now, context);
+    return false;
+}
+
+static void enforceActiveMotionTofSafety(uint32_t now)
+{
+    if (sensorOff || motorStart == 0U || motorReverse > 1U)
+    {
+        return;
+    }
+
+    const uint8_t distanceSlot = motorReverse == 0U ? 1U : 0U;
+    const uint8_t sensor       = tofSensorForDistanceSlot(distanceSlot);
+    if (sensor < 4U && tofHealth[sensor].outputValid(now))
+    {
+        return;
+    }
+
+    latchTofMeasurementFault(sensor, now, motorReverse == 0U ? "active_f" : "active_r");
+    motor_Force_Stop();
+}
+
 static const char *tofNameForSensor(uint8_t sensorIndex)
 {
     switch (sensorIndex)
@@ -3589,7 +3692,7 @@ static void checkTofStale(uint32_t now)
             const uint32_t staleAge   = tofHealth[sensor].freshFrameAgeMs(now);
             const uint8_t  freshRate  = tofHealth[sensor].freshRatePercent();
             const uint8_t  usableRate = tofHealth[sensor].usableRatePercent();
-            tofHealth[sensor].markFaulted(now);
+            tofHealth[sensor].markFaulted(now, TofFaultCause::Transport);
             setFault(tofFaultForSensor(sensor));
             if (!tofFaultLogged[sensor])
             {
@@ -3694,7 +3797,8 @@ static void updateTofDistance(uint8_t sensor, uint16_t filteredDistance)
 static void clearRecoveredTofFaultIfSafe(uint8_t sensor, uint32_t now)
 {
     const ShuttleFault fault = tofFaultForSensor(sensor);
-    if ((alertMan.getErrorCode() & (uint16_t)fault) == 0U || !tofHealth[sensor].recoveryQualified(now) ||
+    const TofRecoveryReason recoveryReason = tofHealth[sensor].recoveryReason(now);
+    if ((alertMan.getErrorCode() & (uint16_t)fault) == 0U || recoveryReason == TofRecoveryReason::None ||
         !isPhysicallyStationary())
     {
         return;
@@ -3702,20 +3806,26 @@ static void clearRecoveredTofFaultIfSafe(uint8_t sensor, uint32_t now)
 
     const uint8_t freshRate  = tofHealth[sensor].freshRatePercent();
     const uint8_t usableRate = tofHealth[sensor].usableRatePercent();
+    const char *reasonName =
+        recoveryReason == TofRecoveryReason::MeasurementQuality ? "quality" : "alive";
     alertMan.clearFault(fault);
     tofHealth[sensor].confirmRecovery();
     tofFaultLogged[sensor] = false;
     makeReliableLog(
         LOG_INFO,
-        "TOF %s fault auto-clear health=%u/%u streak=%u poll=%lu fail=%lu invalid=%lu reboot=%lu",
+        "TOF %s clear=%s health=%u/%u fs=%u us=%u poll=%lu fail=%lu invalid=%lu reboot=%lu st=%u sig=%u",
         tofNameForSensor(sensor),
+        reasonName,
         freshRate,
         usableRate,
+        tofHealth[sensor].freshStreak(),
         tofHealth[sensor].usableStreak(),
-        (unsigned long)tofHealth[sensor].totalPolls(),
-        (unsigned long)tofHealth[sensor].totalTransportFailures(),
-        (unsigned long)tofHealth[sensor].totalInvalidMeasurements(),
-        (unsigned long)tofHealth[sensor].totalSensorRestarts());
+        (unsigned long)tofHealth[sensor].pollsSinceFault(),
+        (unsigned long)tofHealth[sensor].transportFailuresSinceFault(),
+        (unsigned long)tofHealth[sensor].invalidMeasurementsSinceFault(),
+        (unsigned long)tofHealth[sensor].sensorRestartsSinceFault(),
+        tofHealth[sensor].lastMeasurementStatus(),
+        tofHealth[sensor].lastSignalStrength());
 
     if (alertMan.getErrorCode() == 0U)
     {
@@ -3747,6 +3857,7 @@ void get_Distance()
 
     if (!serviceTofBusMonitor(now))
     {
+        enforceActiveMotionTofSafety(now);
         return;
     }
 
@@ -3765,11 +3876,16 @@ void get_Distance()
         writeBreadcrumb(BC_TOF_READ, currentSensor, diag.status, diag.wireStatus);
         recordTofFailure(currentSensor, &diag);
         checkTofStale(now);
+        enforceActiveMotionTofSafety(now);
         return;
     }
 
-    const TofSampleResult sample =
-        tofHealth[currentSensor].noteMeasurement(now, sensor.system_time, sensor.dis_status, sensor.dis);
+    const TofSampleResult sample = tofHealth[currentSensor].noteMeasurement(
+        now,
+        sensor.system_time,
+        sensor.dis_status,
+        sensor.dis,
+        sensor.signal_strength);
     recordTofSuccess(currentSensor);
     writeBreadcrumb(BC_TOF_POLL, currentSensor, TOF_I2C_OK, (uint8_t)tofHealth[currentSensor].state());
     if (sample.sensorRestarted)
@@ -3785,6 +3901,7 @@ void get_Distance()
         updateTofDistance(currentSensor, sample.filteredDistanceMm);
     }
     checkTofStale(now);
+    enforceActiveMotionTofSafety(now);
     clearRecoveredTofFaultIfSafe(currentSensor, now);
 }
 
@@ -8403,7 +8520,7 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
     {
         for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
         {
-            tofHealth[sensor].markFaulted(now);
+            tofHealth[sensor].markFaulted(now, TofFaultCause::Transport);
             setFault(tofFaultForSensor(sensor));
             tofFaultLogged[sensor] = true;
         }
