@@ -153,6 +153,7 @@ static void                    requestBootloaderResetEntry();
 static void                    resetIntoBootloader();
 static E22Radio::EnsureOptions makeRadioEnsureOptions();
 static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId);
+static bool                    ensureRadioConfigNow(const char *reason);
 enum class RadioTxAuxPolicy : uint8_t
 {
     DropIfBusy,
@@ -216,14 +217,6 @@ static bool                  readAs5600AngleForMotion(uint16_t *rawAngle);
 static bool                  readAs5600AngleFresh(int *angleOut);
 static uint16_t              readAs5600AngleForTelemetry();
 static void                  logBootResetReplay();
-static void                  logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw);
-static void                  logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config);
-static void                  logRadioEnsureFailure(
-                     LogLevel level,
-                     const char *tag,
-                     const E22Radio::LogicalConfig &desired,
-                     const E22Radio::EnsureResult &result);
-static void                  formatRadioBaudMask(uint8_t mask, char *buffer, size_t bufferSize);
 static void                  retryRadioConfigIfIdle(uint32_t now);
 static inline bool           batteryIsHighLoad();
 static inline bool           batteryLowFaultLatched();
@@ -409,10 +402,12 @@ constexpr uint8_t  kAs5600AngleHighReg               = 0x0EU;
 constexpr uint8_t  kAs5600AngleReadLength            = 2U;
 constexpr uint8_t  kAs5600ExistingBeginPin           = 4U;
 static_assert(kAs5600ExistingBeginPin == 4U, "Keep the controller AS5600 begin pin at 4.");
-constexpr uint32_t kRadioConfigFailureWarnIntervalMs = 60000UL;
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
 constexpr uint32_t kRadioRuntimeAuxWaitMs             = 20UL;
+constexpr uint32_t kRadioLinkSilenceProbeMs           = 15000UL;
+constexpr uint32_t kRadioPresenceAuditIntervalMs      = 300000UL;
+constexpr uint32_t kRadioProbeRxQuietMs               = 10000UL;
 constexpr uint32_t kAs5600FailLogIntervalMs           = 30000UL;
 constexpr uint32_t kI2cDiagSummaryIntervalMs          = 30000UL;
 
@@ -438,11 +433,23 @@ bool       radioAppendedRssiEnabled       = false;
 bool       radioConfigOk                  = false;
 uint32_t   manualRadioHoldLastHeartbeatMs = 0;
 bool       serialLinksStarted             = false;
+enum class RadioLocalState : uint8_t
+{
+    Unverified = 0,
+    Ready,
+    NoResponse,
+    AuxTimeout,
+    BadResponse,
+    ConfigError
+};
 E22Radio::EnsureResult radioLastEnsureResult = {};
-uint32_t               radioLastRxFrameMs = 0;
-uint32_t               radioLastConfigRetryMs = 0;
-constexpr uint32_t     kRadioConfigRetryIntervalMs = 60000UL;
-constexpr uint32_t     kRadioConfigRetryRxQuietMs  = 10000UL;
+RadioLocalState         radioLocalState       = RadioLocalState::Unverified;
+bool                    radioModuleResponded  = false;
+uint8_t                 radioFailureStreak    = 0;
+uint32_t                radioLastRxFrameMs    = 0;
+uint32_t                radioLastLocalProbeMs = 0;
+uint32_t                radioLastConfirmedMs  = 0;
+uint32_t                radioRetryDelayMs     = 5000UL;
 
 HardwareSerial Serial1(PA10, PA9); // Порт для экранцика LilyGo
 HardwareSerial Serial2(PA3, PA2);  // Порт под RS485 для BMS батареи
@@ -3164,6 +3171,7 @@ uint8_t pollSerial(Stream &port, ProtocolParser &parser, bool isRadioPort)
             if (isRadioPort)
             {
                 radioLastRxFrameMs = now;
+                radioModuleResponded = true;
             }
             if (isRadioPort && radioAppendedRssiEnabled)
             {
@@ -6860,19 +6868,10 @@ void SystemYield()
     static uint32_t timerSensors   = 0;
     static uint32_t timerStats     = 0;
     static uint32_t timerUptime    = 0;
-    static uint32_t timerRadioDiag = 0;
     static uint32_t timerLinkHealth = 0;
     static bool     lastLinkHealthValid = false;
     static bool     lastLinkHealthValidInitialized = false;
 
-    if (!radioConfigOk && currentMillis >= kRadioConfigFailureWarnIntervalMs &&
-        currentMillis - timerRadioDiag >= kRadioConfigFailureWarnIntervalMs)
-    {
-        timerRadioDiag = currentMillis;
-        const uint8_t radioAddress =
-            (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
-        logRadioEnsureFailure(LOG_ERROR, "E22 60s", makeRadioDesiredConfig(radioAddress), radioLastEnsureResult);
-    }
     retryRadioConfigIfIdle(currentMillis);
 
     writeBreadcrumb(BC_BMS_TICK, 0xFF, 0, 0);
@@ -8035,54 +8034,27 @@ void blink()
 
 static void applyRadioConfigAtBoot()
 {
-    const bool    shuttleAddressValid = isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum);
-    const uint8_t radioAddress        = shuttleAddressValid ? shuttleNum : E22Radio::kAddressLowUnassigned;
+    const bool shuttleAddressValid = isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum);
     if (!shuttleAddressValid)
     {
         makeLog(LOG_WARN, "Radio ID %u invalid, using addr=0", shuttleNum);
     }
 
-    const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(radioAddress);
-    const E22Radio::EnsureOptions ensureOptions = makeRadioEnsureOptions();
-    const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
-
     e22Radio.init(&SerialLora, kRadioControlPins, E22Radio::uartBaudValue(kRadioHostBaud), NULL);
-    logRadioDesiredConfig(LOG_INFO, "E22 want", desiredConfig);
-
-    const E22Radio::EnsureResult ensureResult = e22Radio.ensureConfig(desiredConfig, ensureOptions);
-    radioLastEnsureResult                     = ensureResult;
-    radioConfigOk                             = ensureResult.ok();
-    radioAppendedRssiEnabled                  = radioConfigOk && desiredConfig.appendRssiEnabled;
-    if (ensureResult.ok())
-    {
-        makeLog(
-            LOG_INFO,
-            "E22 ok a=%u c=%u f=%lu.%03lu b=%lu",
-            radioAddress,
-            desiredConfig.channel,
-            (unsigned long)(freqKhz / 1000UL),
-            (unsigned long)(freqKhz % 1000UL),
-            (unsigned long)E22Radio::uartBaudValue(desiredConfig.uartBaud));
-        logRadioRawConfig(LOG_INFO, "E22 got", ensureResult.finalConfig);
-    }
-    else
-    {
-        logRadioEnsureFailure(LOG_WARN, "E22 fail", desiredConfig, ensureResult);
-    }
+    ensureRadioConfigNow("boot");
 }
 
 static E22Radio::EnsureOptions makeRadioEnsureOptions()
 {
     E22Radio::EnsureOptions ensureOptions = {};
-    ensureOptions.maxAttempts             = 3;
+    ensureOptions.maxAttempts             = 2;
     ensureOptions.modeSettleMs            = 100;
     ensureOptions.auxTimeoutMs            = 300;
-    ensureOptions.ioTimeoutMs             = 250;
+    ensureOptions.ioTimeoutMs             = 150;
     ensureOptions.readCmdSettleMs         = 30;
     ensureOptions.writeSettleMs           = 100;
     ensureOptions.baudSwitchSettleMs      = 30;
     ensureOptions.postModeGuardMs         = 20;
-    ensureOptions.configCommandBaud       = 9600;
     ensureOptions.packetRssiReadTimeoutMs = E22Radio::kDefaultPacketRssiTimeoutMs;
     return ensureOptions;
 }
@@ -8109,133 +8081,137 @@ static E22Radio::LogicalConfig makeRadioDesiredConfig(uint8_t nodeId)
 
 static void reapplyRadioConfigForShuttleId(uint8_t newId, uint8_t previousId)
 {
-    const E22Radio::LogicalConfig desiredConfig = makeRadioDesiredConfig(newId);
-    const E22Radio::EnsureResult  ensureResult  = e22Radio.ensureConfig(desiredConfig, makeRadioEnsureOptions());
-    const uint32_t                freqKhz       = E22Radio::channelFrequencyKhz(desiredConfig.channel);
-    logRadioDesiredConfig(LOG_INFO, "E22ID want", desiredConfig);
-    radioLastEnsureResult  = ensureResult;
-    radioConfigOk             = ensureResult.ok();
-    radioAppendedRssiEnabled  = radioConfigOk && desiredConfig.appendRssiEnabled;
-    if (ensureResult.ok())
+    (void)newId;
+    (void)previousId;
+    ensureRadioConfigNow("id_change");
+}
+
+static const char *radioLocalStateName(RadioLocalState state)
+{
+    switch (state)
     {
-        makeLog(
-            LOG_INFO,
-            "E22 ID ok a=%u c=%u f=%lu.%03lu",
-            desiredConfig.address.addl,
-            desiredConfig.channel,
-            (unsigned long)(freqKhz / 1000UL),
-            (unsigned long)(freqKhz % 1000UL));
-        logRadioRawConfig(LOG_INFO, "E22ID got", ensureResult.finalConfig);
-        return;
+    case RadioLocalState::Ready:
+        return "READY";
+    case RadioLocalState::NoResponse:
+        return "NO_RESPONSE";
+    case RadioLocalState::AuxTimeout:
+        return "AUX_TIMEOUT";
+    case RadioLocalState::BadResponse:
+        return "BAD_RESPONSE";
+    case RadioLocalState::ConfigError:
+        return "CONFIG_ERROR";
+    default:
+        return "UNVERIFIED";
     }
-
-    makeLog(LOG_WARN, "E22 ID change failed %u>%u", previousId, newId);
-    logRadioEnsureFailure(LOG_WARN, "E22ID fail", desiredConfig, ensureResult);
 }
 
-static void logRadioRawConfig(LogLevel level, const char *tag, const E22Radio::RawConfig &raw)
+static RadioLocalState radioLocalStateForResult(const E22Radio::EnsureResult &result)
 {
-    makeLog(level, "%s ah=%02X al=%02X net=%02X", tag, raw.addh, raw.addl, raw.netid);
-    makeLog(level, "%s r0=%02X r1=%02X ch=%02X r3=%02X", tag, raw.reg0, raw.reg1, raw.reg2, raw.reg3);
+    if (result.ok())
+        return RadioLocalState::Ready;
+    if (result.moduleResponded())
+        return RadioLocalState::ConfigError;
+    if (result.status == E22Radio::EnsureStatus::AuxTimeout)
+        return RadioLocalState::AuxTimeout;
+    if (result.status == E22Radio::EnsureStatus::NoResponse)
+        return RadioLocalState::NoResponse;
+    if (result.status == E22Radio::EnsureStatus::BadResponse)
+        return RadioLocalState::BadResponse;
+    return RadioLocalState::ConfigError;
 }
 
-static void logRadioDesiredConfig(LogLevel level, const char *tag, const E22Radio::LogicalConfig &config)
+static uint32_t radioRetryDelayForFailure(uint8_t streak)
 {
-    logRadioRawConfig(level, tag, E22Radio::encode(config));
+    if (streak <= 1)
+        return 5000UL;
+    if (streak == 2)
+        return 30000UL;
+    if (streak == 3)
+        return 120000UL;
+    return 600000UL;
 }
 
-static void formatRadioBaudMask(uint8_t mask, char *buffer, size_t bufferSize)
+static bool ensureRadioConfigNow(const char *reason)
 {
-    if (buffer == NULL || bufferSize == 0)
-        return;
+    const uint8_t radioAddress =
+        (isProvisionedShuttle() && E22Radio::isValidNodeId(shuttleNum)) ? shuttleNum : E22Radio::kAddressLowUnassigned;
+    const E22Radio::LogicalConfig desired = makeRadioDesiredConfig(radioAddress);
+    const RadioLocalState previousState = radioLocalState;
+    const E22Radio::EnsureResult result = e22Radio.ensureConfig(desired, makeRadioEnsureOptions());
+    const uint32_t now = millis();
 
-    buffer[0] = '\0';
-    static const uint32_t kBauds[8] = { 1200UL, 2400UL, 4800UL, 9600UL, 19200UL, 38400UL, 57600UL, 115200UL };
-    size_t used = 0;
-    for (uint8_t i = 0; i < 8 && used < bufferSize; ++i)
+    radioLastEnsureResult    = result;
+    radioLastLocalProbeMs    = now;
+    radioLocalState          = radioLocalStateForResult(result);
+    radioConfigOk            = result.ok();
+    radioModuleResponded     = result.moduleResponded();
+    radioAppendedRssiEnabled = radioConfigOk && desired.appendRssiEnabled;
+
+    if (radioModuleResponded)
+        radioLastConfirmedMs = now;
+
+    if (radioConfigOk)
     {
-        if ((mask & (1u << i)) == 0)
-            continue;
-        const int written = snprintf(
-            buffer + used,
-            bufferSize - used,
-            "%s%lu",
-            used == 0 ? "" : ",",
-            (unsigned long)kBauds[i]);
-        if (written < 0)
-            break;
-        used += static_cast<size_t>(written);
-        if (used >= bufferSize)
+        radioFailureStreak = 0;
+        radioRetryDelayMs  = 5000UL;
+        if (previousState != RadioLocalState::Ready || result.changed || strcmp(reason, "boot") == 0)
         {
-            buffer[bufferSize - 1] = '\0';
-            break;
+            makeReliableLog(
+                LOG_INFO,
+                "E22 READY reason=%s cfg=%s addr=%02X%02X baud=%lu",
+                reason,
+                result.changed ? "written" : "matched",
+                desired.address.addh,
+                desired.address.addl,
+                (unsigned long)E22Radio::uartBaudValue(desired.uartBaud));
         }
+        return true;
     }
-    if (buffer[0] == '\0')
-    {
-        snprintf(buffer, bufferSize, "none");
-    }
-}
 
-static void logRadioEnsureFailure(
-    LogLevel level,
-    const char *tag,
-    const E22Radio::LogicalConfig &desired,
-    const E22Radio::EnsureResult &result)
-{
-    char baudList[56];
-    formatRadioBaudMask(result.diag.triedBaudMask, baudList, sizeof(baudList));
-
-    makeLog(
-        level,
-        "%s %s a=%u c=%u attempts=%u bauds=%s last=%lu pins M0/M1/AUX=%u/%u/%u cnt aux/read/write/verify=%u/%u/%u/%u finalAux=%u",
-        tag,
-        E22Radio::statusToString(result.status),
-        desired.address.addl,
-        desired.channel,
-        result.attemptsUsed,
-        baudList,
-        (unsigned long)result.diag.lastBaud,
-        digitalRead(RADIO_E22_M0),
-        digitalRead(RADIO_E22_M1),
-        digitalRead(RADIO_E22_AUX),
-        result.diag.auxTimeoutCount,
-        result.diag.readTimeoutCount,
-        result.diag.writeFailureCount,
-        result.diag.verifyMismatchCount,
-        result.diag.finalAuxHigh ? 1 : 0);
-    logRadioDesiredConfig(level, "E22 desired", desired);
-    if (result.hasFinalConfig)
+    if (radioFailureStreak < 255)
+        radioFailureStreak++;
+    radioRetryDelayMs = radioRetryDelayForFailure(radioFailureStreak);
+    if (previousState != radioLocalState || strcmp(reason, "boot") == 0 || strcmp(reason, "id_change") == 0)
     {
-        logRadioRawConfig(level, "E22 final", result.finalConfig);
+        makeReliableLog(
+            LOG_WARN,
+            "E22 %s reason=%s rx=%u auxTO=%u tries=%u next=%lus",
+            radioLocalStateName(radioLocalState),
+            reason,
+            (unsigned)result.diag.rxBytesSeen,
+            (unsigned)result.diag.auxTimeoutCount,
+            (unsigned)result.attemptsUsed,
+            (unsigned long)(radioRetryDelayMs / 1000UL));
     }
-    else
-    {
-        makeLog(level, "E22 final config unreadable");
-    }
+    return false;
 }
 
 static void retryRadioConfigIfIdle(uint32_t now)
 {
-    if (radioConfigOk || pendingBootloaderEntry || !isPhysicallyStationary() || currentMode != CoreOpMode::IDLE ||
-        !isShuttleIdle())
-    {
-        return;
-    }
-    if (now - radioLastConfigRetryMs < kRadioConfigRetryIntervalMs)
-    {
-        return;
-    }
-    if (radioLastRxFrameMs != 0 && now - radioLastRxFrameMs < kRadioConfigRetryRxQuietMs)
+    if (pendingBootloaderEntry || !isPhysicallyStationary() || currentMode != CoreOpMode::IDLE || !isShuttleIdle())
     {
         return;
     }
 
-    radioLastConfigRetryMs = now;
-    makeLog(LOG_WARN, "E22 idle config retry");
+    const bool rxQuiet = radioLastRxFrameMs == 0 || now - radioLastRxFrameMs >= kRadioProbeRxQuietMs;
+    if (!rxQuiet)
+    {
+        return;
+    }
+
+    const bool retryDue = !radioConfigOk && now - radioLastLocalProbeMs >= radioRetryDelayMs;
+    const bool linkBecameSilent = radioConfigOk && radioLastRxFrameMs != 0 &&
+                                  radioLastRxFrameMs > radioLastConfirmedMs &&
+                                  now - radioLastRxFrameMs >= kRadioLinkSilenceProbeMs;
+    const bool auditDue = radioConfigOk && now - radioLastConfirmedMs >= kRadioPresenceAuditIntervalMs;
+    if (!retryDue && !linkBecameSilent && !auditDue)
+    {
+        return;
+    }
+
     beginTofSchedulerPause(now);
-    applyRadioConfigAtBoot();
-    endTofSchedulerPause(millis(), "E22 retry");
+    ensureRadioConfigNow(retryDue ? "retry" : (linkBecameSilent ? "link_silent" : "audit"));
+    endTofSchedulerPause(millis(), "E22 probe");
 }
 
 static ShuttleState mapCmdToOperation(uint8_t cmd)
@@ -8993,9 +8969,11 @@ static void populateLinkHealthPacket(LinkHealthPacket *pkt)
     if (radioConfigOk)
         pkt->flags |= LINK_HEALTH_RADIO_CONFIG_OK;
     if (e22Radio.hasAuxPin())
-        pkt->flags |= LINK_HEALTH_AUX_PRESENT;
+        pkt->flags |= LINK_HEALTH_AUX_PIN_CONFIGURED;
     if (e22Radio.hasAuxPin() && e22Radio.isAuxHigh())
         pkt->flags |= LINK_HEALTH_AUX_HIGH;
+    if (radioModuleResponded)
+        pkt->flags |= LINK_HEALTH_MODULE_RESPONDED;
 }
 
 static void sendLinkHealthPacket(Stream *port)

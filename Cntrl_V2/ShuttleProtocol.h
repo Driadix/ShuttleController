@@ -5,7 +5,7 @@
 
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
-constexpr uint8_t PROTOCOL_VER       = 5;
+constexpr uint8_t PROTOCOL_VER       = 6;
 
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
@@ -287,10 +287,11 @@ struct StatsPacket
     uint32_t lastResetFlags;
 };
 
-constexpr uint8_t LINK_HEALTH_RSSI_VALID      = (1 << 0);
-constexpr uint8_t LINK_HEALTH_RADIO_CONFIG_OK = (1 << 1);
-constexpr uint8_t LINK_HEALTH_AUX_HIGH        = (1 << 2);
-constexpr uint8_t LINK_HEALTH_AUX_PRESENT     = (1 << 3);
+constexpr uint8_t LINK_HEALTH_RSSI_VALID          = (1 << 0);
+constexpr uint8_t LINK_HEALTH_RADIO_CONFIG_OK     = (1 << 1);
+constexpr uint8_t LINK_HEALTH_AUX_HIGH            = (1 << 2);
+constexpr uint8_t LINK_HEALTH_AUX_PIN_CONFIGURED  = (1 << 3);
+constexpr uint8_t LINK_HEALTH_MODULE_RESPONDED    = (1 << 4);
 
 struct LinkHealthPacket
 {

@@ -17,7 +17,8 @@ namespace E22Radio
     constexpr uint8_t  kMaxChannel                = 83;
     constexpr uint8_t  kDefaultNetId              = 0;
     constexpr uint16_t kDefaultCryptKey           = 0;
-    constexpr uint8_t  kDefaultEnsureAttempts     = 3;
+    constexpr uint8_t  kDefaultEnsureAttempts     = 2;
+    constexpr uint32_t kConfigCommandBaud         = 9600;
     constexpr uint32_t kDefaultPacketRssiTimeoutMs = 20;
 
     struct ControlPins
@@ -163,7 +164,6 @@ namespace E22Radio
         uint32_t writeSettleMs           = 100;
         uint32_t baudSwitchSettleMs      = 30;
         uint32_t postModeGuardMs         = 20;
-        uint32_t configCommandBaud       = 9600;
         uint32_t packetRssiReadTimeoutMs = kDefaultPacketRssiTimeoutMs;
     };
 
@@ -172,6 +172,9 @@ namespace E22Radio
         OkAlreadyMatched = 0,
         OkWrittenAndVerified,
         Timeout,
+        AuxTimeout,
+        NoResponse,
+        BadResponse,
         WriteFail,
         VerifyMismatch,
         InvalidConfig,
@@ -186,6 +189,9 @@ namespace E22Radio
         uint8_t  readTimeoutCount    = 0;
         uint8_t  writeFailureCount   = 0;
         uint8_t  verifyMismatchCount = 0;
+        uint16_t rxBytesSeen         = 0;
+        uint8_t  invalidHeaderCount  = 0;
+        uint8_t  validResponseCount  = 0;
         bool     finalAuxHigh        = false;
     };
 
@@ -202,6 +208,11 @@ namespace E22Radio
         {
             return status == EnsureStatus::OkAlreadyMatched || status == EnsureStatus::OkWrittenAndVerified;
         }
+
+        bool moduleResponded() const
+        {
+            return diag.validResponseCount > 0;
+        }
     };
 
     inline const char *statusToString(EnsureStatus status)
@@ -214,6 +225,12 @@ namespace E22Radio
             return "ok_written_verified";
         case EnsureStatus::Timeout:
             return "timeout";
+        case EnsureStatus::AuxTimeout:
+            return "aux_timeout";
+        case EnsureStatus::NoResponse:
+            return "no_response";
+        case EnsureStatus::BadResponse:
+            return "bad_response";
         case EnsureStatus::WriteFail:
             return "write_fail";
         case EnsureStatus::VerifyMismatch:
@@ -563,95 +580,78 @@ namespace E22Radio
             }
 
             const uint8_t attempts = options.maxAttempts == 0 ? 1 : options.maxAttempts;
-            uint32_t      bauds[5];
-            const uint8_t baudCount = buildBaudCandidates(bauds, sizeof(bauds) / sizeof(bauds[0]), options, desired.reg0);
-
             EnsureStatus lastFail   = EnsureStatus::Timeout;
             bool         configured = false;
             bool         changed    = false;
 
+            recordTriedBaud(&result.diag, kConfigCommandBaud);
+            setHostBaud(kConfigCommandBaud, options);
             for (uint8_t attempt = 0; attempt < attempts && !configured; ++attempt)
             {
                 result.attemptsUsed = static_cast<uint8_t>(attempt + 1);
-                for (uint8_t baudIndex = 0; baudIndex < baudCount && !configured; ++baudIndex)
+                if (!setModeTracked(ModuleMode::Config, options, &result.diag))
                 {
-                    recordTriedBaud(&result.diag, bauds[baudIndex]);
-                    setHostBaud(bauds[baudIndex], options);
-                    if (!setModeTracked(ModuleMode::Config, options, &result.diag))
-                    {
-                        lastFail = EnsureStatus::Timeout;
-                        continue;
-                    }
-
-                    RawConfig current = {};
-                    const bool readOk = readRawConfigInternal(current, options, &result.diag);
-                    if (!readOk)
-                    {
-                        lastFail = EnsureStatus::Timeout;
-                        continue;
-                    }
-
-                    result.finalConfig    = current;
-                    result.hasFinalConfig = true;
-                    if (configsEqual(current, desired))
-                    {
-                        configured = true;
-                        lastFail   = EnsureStatus::OkAlreadyMatched;
-                        break;
-                    }
-
-                    if (!writePersistentConfig(desired, options, &result.diag))
-                    {
-                        lastFail = EnsureStatus::WriteFail;
-                        logf(
-                            "W",
-                            "config write failed (%u/%u)",
-                            static_cast<unsigned>(attempt + 1),
-                            static_cast<unsigned>(attempts));
-                        continue;
-                    }
-
-                    const uint32_t desiredBaud = uartBaudFromReg0(desired.reg0);
-                    recordTriedBaud(&result.diag, desiredBaud);
-                    setHostBaud(desiredBaud, options);
-                    if (!setModeTracked(ModuleMode::Config, options, &result.diag))
-                    {
-                        lastFail = EnsureStatus::Timeout;
-                        continue;
-                    }
-
-                    RawConfig verify = {};
-                    if (!readRawConfigInternal(verify, options, &result.diag))
-                    {
-                        lastFail = EnsureStatus::Timeout;
-                        logf(
-                            "W",
-                            "verify read timeout (%u/%u)",
-                            static_cast<unsigned>(attempt + 1),
-                            static_cast<unsigned>(attempts));
-                        continue;
-                    }
-
-                    result.finalConfig    = verify;
-                    result.hasFinalConfig = true;
-                    if (configsEqual(verify, desired))
-                    {
-                        configured = true;
-                        changed    = true;
-                        lastFail   = EnsureStatus::OkWrittenAndVerified;
-                        break;
-                    }
-
-                    lastFail = EnsureStatus::VerifyMismatch;
-                    countVerifyMismatch(&result.diag);
-                    logf("W", "verify mismatch (%u/%u)", static_cast<unsigned>(attempt + 1), static_cast<unsigned>(attempts));
+                    lastFail = EnsureStatus::AuxTimeout;
+                    continue;
                 }
+
+                RawConfig current = {};
+                const uint16_t readRxBefore = result.diag.rxBytesSeen;
+                const uint8_t readAuxBefore = result.diag.auxTimeoutCount;
+                if (!readRawConfigInternal(current, options, &result.diag))
+                {
+                    lastFail = classifyReadFailure(result.diag, readRxBefore, readAuxBefore);
+                    continue;
+                }
+
+                result.finalConfig    = current;
+                result.hasFinalConfig = true;
+                if (configsEqual(current, desired))
+                {
+                    configured = true;
+                    lastFail   = EnsureStatus::OkAlreadyMatched;
+                    break;
+                }
+
+                if (!writePersistentConfig(desired, options, &result.diag))
+                {
+                    lastFail = EnsureStatus::WriteFail;
+                    continue;
+                }
+
+                // Configuration commands remain at 9600/8N1 even when REG0
+                // selects another UART baud for normal mode.
+                RawConfig verify = {};
+                const uint16_t verifyRxBefore = result.diag.rxBytesSeen;
+                const uint8_t verifyAuxBefore = result.diag.auxTimeoutCount;
+                if (!readRawConfigInternal(verify, options, &result.diag))
+                {
+                    lastFail = classifyReadFailure(result.diag, verifyRxBefore, verifyAuxBefore);
+                    continue;
+                }
+
+                result.finalConfig    = verify;
+                result.hasFinalConfig = true;
+                if (configsEqual(verify, desired))
+                {
+                    configured = true;
+                    changed    = true;
+                    lastFail   = EnsureStatus::OkWrittenAndVerified;
+                    break;
+                }
+
+                lastFail = EnsureStatus::VerifyMismatch;
+                countVerifyMismatch(&result.diag);
             }
 
             setMode(ModuleMode::Normal, options);
             if (configured)
             {
                 setHostBaud(uartBaudFromReg0(desired.reg0), options);
+            }
+            else if (result.hasFinalConfig)
+            {
+                setHostBaud(uartBaudFromReg0(result.finalConfig.reg0), options);
             }
             else
             {
@@ -692,18 +692,13 @@ namespace E22Radio
                 return EnsureStatus::InvalidConfig;
             }
 
-            uint32_t      bauds[5];
-            const uint8_t baudCount = buildBaudCandidates(bauds, sizeof(bauds) / sizeof(bauds[0]), options, 0);
-            for (uint8_t i = 0; i < baudCount; ++i)
+            setHostBaud(kConfigCommandBaud, options);
+            if (setMode(ModuleMode::Config, options) &&
+                readRegistersInternal(startAddress, outRegisters, length, options))
             {
-                setHostBaud(bauds[i], options);
-                setMode(ModuleMode::Config, options);
-                if (readRegistersInternal(startAddress, outRegisters, length, options))
-                {
-                    setMode(ModuleMode::Normal, options);
-                    setHostBaud(_runtimeBaud, options);
-                    return EnsureStatus::OkAlreadyMatched;
-                }
+                setMode(ModuleMode::Normal, options);
+                setHostBaud(_runtimeBaud, options);
+                return EnsureStatus::OkAlreadyMatched;
             }
 
             setMode(ModuleMode::Normal, options);
@@ -727,15 +722,10 @@ namespace E22Radio
                 return EnsureStatus::InvalidConfig;
             }
 
-            uint32_t      bauds[5];
-            const uint8_t baudCount = buildBaudCandidates(bauds, sizeof(bauds) / sizeof(bauds[0]), options, 0);
-            bool          ok        = false;
-            for (uint8_t i = 0; i < baudCount && !ok; ++i)
-            {
-                setHostBaud(bauds[i], options);
-                setMode(ModuleMode::Config, options);
-                ok = writeRegistersInternal(startAddress, registers, length, persistent ? 0xC0 : 0xC2, options);
-            }
+            setHostBaud(kConfigCommandBaud, options);
+            const bool modeReady = setMode(ModuleMode::Config, options);
+            const bool ok = modeReady &&
+                            writeRegistersInternal(startAddress, registers, length, persistent ? 0xC0 : 0xC2, options);
             setMode(ModuleMode::Normal, options);
             setHostBaud(_runtimeBaud, options);
             return ok ? EnsureStatus::OkWrittenAndVerified : EnsureStatus::WriteFail;
@@ -874,36 +864,6 @@ namespace E22Radio
             return uartBaudValue(static_cast<UartBaud>((reg0 >> 5) & 0x07u));
         }
 
-        static void addBaudCandidate(uint32_t *bauds, uint8_t maxCount, uint8_t &count, uint32_t baud)
-        {
-            if (baud == 0 || count >= maxCount)
-            {
-                return;
-            }
-            for (uint8_t i = 0; i < count; ++i)
-            {
-                if (bauds[i] == baud)
-                {
-                    return;
-                }
-            }
-            bauds[count++] = baud;
-        }
-
-        uint8_t buildBaudCandidates(uint32_t *bauds, uint8_t maxCount, const EnsureOptions &options, uint8_t desiredReg0) const
-        {
-            uint8_t count = 0;
-            addBaudCandidate(bauds, maxCount, count, options.configCommandBaud);
-            addBaudCandidate(bauds, maxCount, count, _runtimeBaud);
-            if (desiredReg0 != 0)
-            {
-                addBaudCandidate(bauds, maxCount, count, uartBaudFromReg0(desiredReg0));
-            }
-            addBaudCandidate(bauds, maxCount, count, 9600);
-            addBaudCandidate(bauds, maxCount, count, 115200);
-            return count;
-        }
-
         bool setHostBaud(uint32_t baud, const EnsureOptions &options)
         {
             if (_serial == nullptr || baud == 0)
@@ -1023,6 +983,46 @@ namespace E22Radio
             }
         }
 
+        static void recordRxByte(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->rxBytesSeen < 0xFFFFu)
+            {
+                diag->rxBytesSeen++;
+            }
+        }
+
+        static void countInvalidHeader(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->invalidHeaderCount < 255)
+            {
+                diag->invalidHeaderCount++;
+            }
+        }
+
+        static void countValidResponse(EnsureDiagnostics *diag)
+        {
+            if (diag != nullptr && diag->validResponseCount < 255)
+            {
+                diag->validResponseCount++;
+            }
+        }
+
+        static EnsureStatus classifyReadFailure(
+            const EnsureDiagnostics &diag,
+            uint16_t rxBytesBefore,
+            uint8_t auxTimeoutsBefore)
+        {
+            if (diag.auxTimeoutCount > auxTimeoutsBefore)
+            {
+                return EnsureStatus::AuxTimeout;
+            }
+            if (diag.rxBytesSeen > rxBytesBefore)
+            {
+                return EnsureStatus::BadResponse;
+            }
+            return EnsureStatus::NoResponse;
+        }
+
         bool setModeTracked(ModuleMode mode, const EnsureOptions &options, EnsureDiagnostics *diag)
         {
             const bool ok = setMode(mode, options);
@@ -1031,6 +1031,58 @@ namespace E22Radio
                 countAuxTimeout(diag);
             }
             return ok;
+        }
+
+        bool readRegisterResponseInternal(
+            uint8_t startAddress,
+            uint8_t *outRegisters,
+            uint8_t length,
+            uint32_t timeoutMs,
+            EnsureDiagnostics *diag = nullptr)
+        {
+            if (_serial == nullptr || outRegisters == nullptr || length == 0)
+            {
+                return false;
+            }
+
+            uint8_t        header[3]    = { 0, 0, 0 };
+            uint8_t        headerIndex  = 0;
+            uint8_t        payloadIndex = 0;
+            const uint32_t start        = millis();
+
+            while (millis() - start < timeoutMs)
+            {
+                while (_serial->available())
+                {
+                    const uint8_t b = static_cast<uint8_t>(_serial->read());
+                    recordRxByte(diag);
+                    if (headerIndex < sizeof(header))
+                    {
+                        header[headerIndex++] = b;
+                        if (headerIndex == sizeof(header))
+                        {
+                            if (header[0] != 0xC1 || header[1] != startAddress || header[2] != length)
+                            {
+                                countInvalidHeader(diag);
+                                header[0]   = header[1];
+                                header[1]   = header[2];
+                                headerIndex = 2;
+                            }
+                        }
+                        continue;
+                    }
+
+                    outRegisters[payloadIndex++] = b;
+                    if (payloadIndex >= length)
+                    {
+                        countValidResponse(diag);
+                        return true;
+                    }
+                }
+                delay(1);
+            }
+            countReadTimeout(diag);
+            return false;
         }
 
         bool readRegistersInternal(
@@ -1055,42 +1107,7 @@ namespace E22Radio
             _serial->write(readCmd, sizeof(readCmd));
             _serial->flush();
             delay(options.readCmdSettleMs);
-
-            uint8_t        header[3]    = { 0, 0, 0 };
-            uint8_t        headerIndex  = 0;
-            uint8_t        payloadIndex = 0;
-            const uint32_t start        = millis();
-
-            while (millis() - start < options.ioTimeoutMs)
-            {
-                while (_serial->available())
-                {
-                    const uint8_t b = static_cast<uint8_t>(_serial->read());
-                    if (headerIndex < sizeof(header))
-                    {
-                        header[headerIndex++] = b;
-                        if (headerIndex == sizeof(header))
-                        {
-                            if (header[0] != 0xC1 || header[1] != startAddress || header[2] != length)
-                            {
-                                header[0]   = header[1];
-                                header[1]   = header[2];
-                                headerIndex = 2;
-                            }
-                        }
-                        continue;
-                    }
-
-                    outRegisters[payloadIndex++] = b;
-                    if (payloadIndex >= length)
-                    {
-                        return true;
-                    }
-                }
-                delay(1);
-            }
-            countReadTimeout(diag);
-            return false;
+            return readRegisterResponseInternal(startAddress, outRegisters, length, options.ioTimeoutMs, diag);
         }
 
         bool readRawConfigInternal(RawConfig &outConfig, const EnsureOptions &options, EnsureDiagnostics *diag = nullptr)
@@ -1138,7 +1155,16 @@ namespace E22Radio
             {
                 countAuxTimeout(diag);
             }
-            const bool ok = written == static_cast<size_t>(length + 3) && auxReady;
+            uint8_t response[9] = {};
+            const bool responseParsed = auxReady && length <= sizeof(response) &&
+                                        readRegisterResponseInternal(
+                                            startAddress, response, length, options.ioTimeoutMs, diag);
+            const bool responseOk = responseParsed && memcmp(response, registers, length) == 0;
+            if (responseParsed && !responseOk)
+            {
+                countInvalidHeader(diag);
+            }
+            const bool ok = written == static_cast<size_t>(length + 3) && auxReady && responseOk;
             if (!ok)
             {
                 countWriteFailure(diag);
