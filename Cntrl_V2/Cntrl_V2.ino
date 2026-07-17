@@ -192,11 +192,15 @@ static bool                  isRadioPacketRssiFresh(uint32_t now);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void                  batterySafetyCheck(uint32_t now);
 static void                  batterySafetyReset(uint32_t now);
+static void                  stopTofI2cBus();
 static void                  initTofI2cBus();
 static bool                  performTofSdaClockRecovery(const char *reason);
+static bool                  performTofSclReleaseRecovery(const char *reason);
 static bool                  performTofWireReinit(const char *reason);
+static bool                  recoverTofBusForManualClear();
 static bool                  serviceTofBusMonitor(uint32_t now);
 static inline bool           tofBusLinesHighNow();
+static void                  resetTofBusVote();
 static void                  beginTofSchedulerPause(uint32_t now);
 static void                  endTofSchedulerPause(uint32_t now, const char *reason);
 static void                  setTofI2cClock(uint32_t clockHz);
@@ -382,7 +386,7 @@ struct ConfigPageHeader
 constexpr uint8_t  NO_NEW_CMD                  = 0xFF;
 constexpr uint8_t  kFirmwareVersionMajor       = 2;
 constexpr uint8_t  kFirmwareVersionMinor       = 0;
-constexpr uint8_t  kFirmwareVersionPatch       = 5;
+constexpr uint8_t  kFirmwareVersionPatch       = 6;
 constexpr uint32_t kBootLogSettleMs            = 250;
 constexpr uint32_t kBootLogWriteTimeoutMs      = 250;
 constexpr uint32_t kManualSessionIdleTimeoutMs = 60000;
@@ -647,9 +651,11 @@ static bool     tofBusVoteAs5600Failed       = false;
 static TofHealthMonitor tofHealth[4];
 
 static TofBusState tofBusState               = TofBusState::Ready;
+static bool        tofWireActive              = false;
 static uint32_t    tofLineLowSinceMs          = 0U;
 static uint32_t    tofLinesHighSinceMs        = 0U;
 static uint32_t    tofLastBusStateLogMs       = 0U;
+static uint32_t    tofLastSclReleaseLogMs     = 0U;
 static bool        tofSdaRecoveryAttempted    = false;
 
 static uint16_t as5600LastGoodAngleRaw      = 0;
@@ -1069,12 +1075,25 @@ static void logTofI2cLines(const char *tag)
         digitalRead(TOF_I2C_SCL));
 }
 
+static void stopTofI2cBus()
+{
+    if (!tofWireActive)
+    {
+        return;
+    }
+#if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
+    Wire.end();
+#endif
+    tofWireActive = false;
+}
+
 static void initTofI2cBus()
 {
     Wire.setSDA(TOF_I2C_SDA);
     Wire.setSCL(TOF_I2C_SCL);
     Wire.begin();
     setTofI2cClock(tofI2cClockHz);
+    tofWireActive = true;
 }
 
 
@@ -1186,9 +1205,7 @@ static bool performTofWireReinit(const char *reason)
     setWarning(WARN_I2C_RECOVERY, 3000);
     setTofBusState(TofBusState::Recovering, reason);
 
-#if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
-    Wire.end();
-#endif
+    stopTofI2cBus();
     initTofI2cBus();
 
     const uint8_t sdaAfter = digitalRead(TOF_I2C_SDA);
@@ -1226,9 +1243,7 @@ static bool performTofSdaClockRecovery(const char *reason)
     setWarning(WARN_I2C_RECOVERY, 3000);
     setTofBusState(TofBusState::Recovering, reason);
 
-#if defined(TWOWIRE_HAS_END) || defined(WIRE_HAS_END)
-    Wire.end();
-#endif
+    stopTofI2cBus();
 
     tofReleaseLine(TOF_I2C_SDA);
     tofReleaseLine(TOF_I2C_SCL);
@@ -1268,6 +1283,100 @@ static bool performTofSdaClockRecovery(const char *reason)
     tofLineLowSinceMs = now;
     setTofBusState(sclAfter == LOW ? TofBusState::SclBlocked : TofBusState::SdaStuck, reason);
     return false;
+}
+
+static bool performTofSclReleaseRecovery(const char *reason)
+{
+    const uint32_t now       = millis();
+    const uint8_t  sdaBefore = digitalRead(TOF_I2C_SDA);
+    const uint8_t  sclBefore = digitalRead(TOF_I2C_SCL);
+    tofLastI2cRecoveryAttemptMs = now;
+    tofI2cRecoveryCount++;
+    writeBreadcrumb(BC_TOF_RECOVERY, 0xFF, 0, 2);
+    setWarning(WARN_I2C_RECOVERY, 3000);
+    setTofBusState(TofBusState::Recovering, reason);
+
+    stopTofI2cBus();
+    tofReleaseLine(TOF_I2C_SDA);
+    tofReleaseLine(TOF_I2C_SCL);
+    delay(2);
+
+    const uint8_t sdaReleased = digitalRead(TOF_I2C_SDA);
+    const uint8_t sclReleased = digitalRead(TOF_I2C_SCL);
+    bool          recovered   = false;
+    if (sdaReleased == HIGH && sclReleased == HIGH)
+    {
+        initTofI2cBus();
+        recovered = tofBusLinesHighNow();
+    }
+
+    const uint8_t sdaAfter = digitalRead(TOF_I2C_SDA);
+    const uint8_t sclAfter = digitalRead(TOF_I2C_SCL);
+    if (tofLastSclReleaseLogMs == 0U || now - tofLastSclReleaseLogMs >= kTofI2cRecoveryMinIntervalMs)
+    {
+        makeReliableLog(
+            recovered ? LOG_INFO : LOG_WARN,
+            "TOF SCL release #%lu %s io=%u/%u>%u/%u",
+            (unsigned long)tofI2cRecoveryCount,
+            reason != nullptr ? reason : "?",
+            sdaBefore,
+            sclBefore,
+            sdaAfter,
+            sclAfter);
+        tofLastSclReleaseLogMs = (now == 0U) ? 1U : now;
+    }
+
+    if (recovered)
+    {
+        setTofBusState(TofBusState::Ready, reason);
+        tofLineLowSinceMs       = 0U;
+        tofLinesHighSinceMs     = 0U;
+        tofSdaRecoveryAttempted = false;
+        resetTofBusVote();
+        return true;
+    }
+
+    tofLineLowSinceMs       = now;
+    tofLinesHighSinceMs     = 0U;
+    tofSdaRecoveryAttempted = true;
+    setTofBusState(sclAfter == LOW ? TofBusState::SclBlocked : TofBusState::SdaStuck, reason);
+    return false;
+}
+
+static bool recoverTofBusForManualClear()
+{
+    const bool sdaHigh = digitalRead(TOF_I2C_SDA) == HIGH;
+    const bool sclHigh = digitalRead(TOF_I2C_SCL) == HIGH;
+    bool       electricalRecoveryOk;
+    if (!sclHigh)
+    {
+        electricalRecoveryOk = performTofSclReleaseRecovery("manual_reset");
+    }
+    else if (!sdaHigh)
+    {
+        electricalRecoveryOk = performTofSdaClockRecovery("manual_reset");
+    }
+    else
+    {
+        electricalRecoveryOk = performTofWireReinit("manual_reset");
+    }
+
+    if (!electricalRecoveryOk || !tofWireActive || !tofBusLinesHighNow())
+    {
+        return false;
+    }
+
+    const uint8_t tofAckMask = scanTofAddressMask();
+    const bool    as5600Ack  = i2cProbeAddress(kAs5600I2cAddress) == 0U;
+    const bool    busVerified = tofAckMask != 0U || as5600Ack;
+    makeReliableLog(
+        busVerified ? LOG_INFO : LOG_WARN,
+        "TOF manual verify mask=%X as=%u io=%u/%u",
+        tofAckMask,
+        as5600Ack ? 1U : 0U,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+    return busVerified;
 }
 
 static bool serviceTofBusMonitor(uint32_t now)
@@ -1315,6 +1424,10 @@ static bool serviceTofBusMonitor(uint32_t now)
 
     if (tofBusState == TofBusState::SclBlocked)
     {
+        if (tofRecoveryCooldownElapsed(now))
+        {
+            return performTofSclReleaseRecovery("scl_release");
+        }
         return false;
     }
 
@@ -8269,9 +8382,14 @@ static inline void performSystemReset()
 
 static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
 {
+    const uint16_t tofFaultMask = (uint16_t)FAULT_TOF_CH_F | (uint16_t)FAULT_TOF_CH_R |
+                                  (uint16_t)FAULT_TOF_PAL_F | (uint16_t)FAULT_TOF_PAL_R;
+    const bool tofRecoveryNeeded = (alertMan.getErrorCode() & tofFaultMask) != 0U ||
+                                   tofBusState != TofBusState::Ready || !tofBusLinesHighNow();
     alertMan.clearAllFaults();
     alertMan.clearAllWarnings();
     batterySafetyReset(now);
+    const bool tofBusRecovered = !tofRecoveryNeeded || recoverTofBusForManualClear();
     resetTofDiagnostics();
     clearManualRadioHold();
     pendingDisplayManualModeBypass = false;
@@ -8280,6 +8398,23 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
     currentOperation               = STATE_IDLE;
     digitalWrite(RED_LED, LOW);
     currentMode = CoreOpMode::IDLE;
+
+    if (!tofBusRecovered)
+    {
+        for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
+        {
+            tofHealth[sensor].markFaulted(now);
+            setFault(tofFaultForSensor(sensor));
+            tofFaultLogged[sensor] = true;
+        }
+        currentOperation = STATE_ERROR;
+        currentMode      = CoreOpMode::ERROR;
+        makeReliableLog(
+            LOG_ERROR,
+            "Reset error: TOF bus recovery not verified io=%u/%u",
+            digitalRead(TOF_I2C_SDA),
+            digitalRead(TOF_I2C_SCL));
+    }
 }
 
 static inline void resetTofDiagnostics()
@@ -8304,6 +8439,7 @@ static inline void resetTofDiagnostics()
     tofI2cRecoveryLogged    = false;
     tofLastI2cRecoveryLogMs = 0;
     tofLastRecoverySummaryLogMs = 0;
+    tofLastSclReleaseLogMs = 0U;
     resetTofBusVote();
 }
 
