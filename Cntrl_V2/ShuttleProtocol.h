@@ -248,6 +248,10 @@ constexpr uint16_t HW_FLAG_BUMPER_R1   = (1U << 6);
 constexpr uint16_t HW_FLAG_BUMPER_R2   = (1U << 7);
 constexpr uint16_t HW_FLAG_LIFTER_UP   = (1U << 8);
 constexpr uint16_t HW_FLAG_LIFTER_DOWN = (1U << 9);
+constexpr uint16_t HW_FLAG_TOF_CH_F_VALID  = (1U << 10);
+constexpr uint16_t HW_FLAG_TOF_CH_R_VALID  = (1U << 11);
+constexpr uint16_t HW_FLAG_TOF_PAL_F_VALID = (1U << 12);
+constexpr uint16_t HW_FLAG_TOF_PAL_R_VALID = (1U << 13);
 
 struct SensorPacket
 {

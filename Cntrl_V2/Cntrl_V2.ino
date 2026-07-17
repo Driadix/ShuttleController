@@ -7,6 +7,7 @@
 #include "ShuttleProtocol.h"
 #include "TOF_Sense.h"
 #include "TofBusMonitor.h"
+#include "TofHealthMonitor.h"
 #include <IWatchdog.h>
 #include <STM32RTC.h>
 #include <String.h>
@@ -392,7 +393,6 @@ constexpr uint32_t kTofI2cFastProbeClockHz      = 400000U;
 constexpr uint32_t kTofI2cRecoveryMinIntervalMs      = 5000U;
 constexpr uint32_t kTofLineLowConfirmMs               = 2U;
 constexpr uint32_t kTofLineReleaseConfirmMs           = 2U;
-constexpr uint32_t kTofStaleTimeoutMs                 = 300U;
 constexpr uint32_t kTofFailureLogIntervalMs           = 5000U;
 constexpr uint32_t kBmsTofQuietGuardMs                = 5U;
 constexpr uint8_t  kAs5600I2cAddress                 = 0x36U;
@@ -637,16 +637,14 @@ static uint32_t tofLastRecoverySummaryLogMs = 0;
 static uint32_t tofLastI2cRecoveryAttemptMs = 0;
 static bool     tofFailureWarnLogged[4]     = { false, false, false, false };
 static bool     tofFaultLogged[4]           = { false, false, false, false };
-static uint32_t tofLastTransportSuccessMs[4] = { 0, 0, 0, 0 };
-static bool     tofHasTransportSuccess[4]    = { false, false, false, false };
 static uint8_t  tofConsecutiveTransportFailures[4] = { 0, 0, 0, 0 };
 static uint32_t tofLastFailureLogMs[4]       = { 0, 0, 0, 0 };
-static uint32_t tofRuntimeStartMs            = 0;
 static bool     tofRuntimeStarted            = false;
 static bool     tofSchedulerPaused           = false;
 static uint32_t tofSchedulerPauseStartedMs    = 0U;
 static uint8_t  tofBusVoteMask               = 0U;
 static bool     tofBusVoteAs5600Failed       = false;
+static TofHealthMonitor tofHealth[4];
 
 static TofBusState tofBusState               = TofBusState::Ready;
 static uint32_t    tofLineLowSinceMs          = 0U;
@@ -1506,14 +1504,6 @@ int      countCrush = 0;
 int      startDiff  = 0;
 
 uint8_t  sensorIndex = 0;
-uint16_t dist;
-uint8_t  tofFilterIndex[4] = { 0, 0, 0, 0 };
-uint16_t data[4][5] = {
-    { 0, 0, 0, 0, 0 }, // data[0]
-    { 0, 0, 0, 0, 0 }, // data[1]
-    { 0, 0, 0, 0, 0 }, // data[2]
-    { 0, 0, 0, 0, 0 }  // data[3]
-};
 
 #pragma endregion
 
@@ -1651,11 +1641,11 @@ void setup()
     logBootResetReplay();
     batteryBms.begin(millis());
     batteryCharge = batteryBms.socPercent();
-    tofRuntimeStartMs = millis();
-    tofRuntimeStarted = true;
+    const uint32_t tofStartMs = millis();
+    tofRuntimeStarted         = true;
     for (uint8_t i = 0U; i < 4U; ++i)
     {
-        tofLastTransportSuccessMs[i] = tofRuntimeStartMs;
+        tofHealth[i].reset(tofStartMs);
     }
 }
 
@@ -3431,6 +3421,7 @@ static void recordTofBusVoteFailure(uint8_t sensor)
 static void recordTofFailure(uint8_t sensor, const TofI2cDiagnostics *diag)
 {
     const uint32_t now = millis();
+    tofHealth[sensor].noteTransportFailure(now);
     incrementTofFailureCounter(tofSensorErrors[sensor]);
     incrementTofFailureCounter(tofReadErrors[sensor]);
     incrementTofFailureCounter(tofConsecutiveTransportFailures[sensor]);
@@ -3480,20 +3471,22 @@ static void checkTofStale(uint32_t now)
 
     for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
     {
-        const uint32_t referenceMs =
-            tofHasTransportSuccess[sensor] ? tofLastTransportSuccessMs[sensor] : tofRuntimeStartMs;
-        const uint32_t staleAge = now - referenceMs;
-        if (staleAge >= kTofStaleTimeoutMs)
+        if (tofHealth[sensor].shouldDeclareFault(now))
         {
+            const uint32_t staleAge   = tofHealth[sensor].freshFrameAgeMs(now);
+            const uint8_t  freshRate  = tofHealth[sensor].freshRatePercent();
+            const uint8_t  usableRate = tofHealth[sensor].usableRatePercent();
+            tofHealth[sensor].markFaulted(now);
             setFault(tofFaultForSensor(sensor));
             if (!tofFaultLogged[sensor])
             {
                 makeReliableLog(
                     LOG_ERROR,
-                    "TOF %s stale age=%lu last=%s n=%u st=%s io=%u/%u",
+                    "TOF %s stale age=%lu health=%u/%u n=%u st=%s io=%u/%u",
                     tofNameForSensor(sensor),
                     (unsigned long)staleAge,
-                    tofHasTransportSuccess[sensor] ? "valid" : "none",
+                    freshRate,
+                    usableRate,
                     tofConsecutiveTransportFailures[sensor],
                     TOF_I2C_Status_Name((TofI2cStatus)tofLastDiagStatus[sensor]),
                     digitalRead(TOF_I2C_SDA),
@@ -3528,10 +3521,9 @@ static void endTofSchedulerPause(uint32_t now, const char *reason)
         // Exclude only this explicit maintenance interval.  Age accumulated
         // before it is preserved, so a genuinely failing sensor still becomes
         // stale after its remaining part of the 300 ms timeout.
-        tofRuntimeStartMs += pausedMs;
         for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
         {
-            tofLastTransportSuccessMs[sensor] += pausedMs;
+            tofHealth[sensor].excludePausedTime(pausedMs);
         }
     }
     makeLog(
@@ -3544,8 +3536,6 @@ static void endTofSchedulerPause(uint32_t now, const char *reason)
 static void recordTofSuccess(uint8_t sensor)
 {
     const uint32_t now = millis();
-    tofLastTransportSuccessMs[sensor]       = now;
-    tofHasTransportSuccess[sensor]          = true;
     tofConsecutiveTransportFailures[sensor] = 0U;
     resetTofBusVote();
 
@@ -3574,6 +3564,59 @@ static void recordTofSuccess(uint8_t sensor)
     tofFailureWarnLogged[sensor] = false;
 }
 
+static void updateTofDistance(uint8_t sensor, uint16_t filteredDistance)
+{
+    if (inverse && sensor == 0U)
+        distance[1] = filteredDistance;
+    else if (inverse && sensor == 1U)
+        distance[0] = filteredDistance;
+    else if (inverse && sensor == 2U)
+        distance[3] = filteredDistance;
+    else if (inverse && sensor == 3U)
+        distance[2] = filteredDistance;
+    else
+        distance[sensor] = filteredDistance;
+}
+
+static void clearRecoveredTofFaultIfSafe(uint8_t sensor, uint32_t now)
+{
+    const ShuttleFault fault = tofFaultForSensor(sensor);
+    if ((alertMan.getErrorCode() & (uint16_t)fault) == 0U || !tofHealth[sensor].recoveryQualified(now) ||
+        !isPhysicallyStationary())
+    {
+        return;
+    }
+
+    const uint8_t freshRate  = tofHealth[sensor].freshRatePercent();
+    const uint8_t usableRate = tofHealth[sensor].usableRatePercent();
+    alertMan.clearFault(fault);
+    tofHealth[sensor].confirmRecovery();
+    tofFaultLogged[sensor] = false;
+    makeReliableLog(
+        LOG_INFO,
+        "TOF %s fault auto-clear health=%u/%u streak=%u poll=%lu fail=%lu invalid=%lu reboot=%lu",
+        tofNameForSensor(sensor),
+        freshRate,
+        usableRate,
+        tofHealth[sensor].usableStreak(),
+        (unsigned long)tofHealth[sensor].totalPolls(),
+        (unsigned long)tofHealth[sensor].totalTransportFailures(),
+        (unsigned long)tofHealth[sensor].totalInvalidMeasurements(),
+        (unsigned long)tofHealth[sensor].totalSensorRestarts());
+
+    if (alertMan.getErrorCode() == 0U)
+    {
+        clearManualRadioHold();
+        pendingDisplayManualModeBypass = false;
+        statusSourceRadio              = false;
+        status                         = 0;
+        currentOperation               = STATE_IDLE;
+        digitalWrite(RED_LED, LOW);
+        currentMode = CoreOpMode::IDLE;
+        makeLog(LOG_INFO, "All faults cleared after stable TOF recovery -> idle");
+    }
+}
+
 // Опрос всех сенсоров расстояния
 void get_Distance()
 {
@@ -3599,63 +3642,37 @@ void get_Distance()
 
     uint8_t currentSensor = sensorIndex;
     sensorIndex           = (sensorIndex + 1) % 4;
-    const uint8_t filterIndex = tofFilterIndex[currentSensor];
 
     const uint8_t sensorId = currentSensor + 1;
-    writeBreadcrumb(BC_TOF_POLL, currentSensor, 0, filterIndex);
+    writeBreadcrumb(BC_TOF_POLL, currentSensor, 0, (uint8_t)tofHealth[currentSensor].state());
     TofI2cDiagnostics diag = {};
-    writeBreadcrumb(BC_TOF_READ, currentSensor, 0, filterIndex);
+    writeBreadcrumb(BC_TOF_READ, currentSensor, 0, (uint8_t)tofHealth[currentSensor].state());
     if (!TOF_Inquire_I2C_Decoding_ByID(sensorId, &sensor, &diag))
     {
         writeBreadcrumb(BC_TOF_READ, currentSensor, diag.status, diag.wireStatus);
         recordTofFailure(currentSensor, &diag);
+        checkTofStale(now);
         return;
     }
 
+    const TofSampleResult sample =
+        tofHealth[currentSensor].noteMeasurement(now, sensor.system_time, sensor.dis_status, sensor.dis);
     recordTofSuccess(currentSensor);
-    writeBreadcrumb(BC_TOF_POLL, currentSensor, TOF_I2C_OK, filterIndex);
-    uint16_t dist = 1500;
-    if (sensor.dis_status == 1U && sensor.dis > 0U && sensor.dis <= 1500U)
+    writeBreadcrumb(BC_TOF_POLL, currentSensor, TOF_I2C_OK, (uint8_t)tofHealth[currentSensor].state());
+    if (sample.sensorRestarted)
     {
-        dist = (uint16_t)sensor.dis;
+        makeReliableLog(
+            LOG_WARN,
+            "TOF %s restart detected time=%lu",
+            tofNameForSensor(currentSensor),
+            (unsigned long)sensor.system_time);
     }
-
-    data[currentSensor][filterIndex] = dist;
-    tofFilterIndex[currentSensor]    = (uint8_t)((filterIndex + 1U) % 5U);
-    const uint16_t filteredDistance  = filter_Distance(data[currentSensor]);
-    if (inverse && currentSensor == 0)
-        distance[1] = filteredDistance;
-    else if (inverse && currentSensor == 1)
-        distance[0] = filteredDistance;
-    else if (inverse && currentSensor == 2)
-        distance[3] = filteredDistance;
-    else if (inverse && currentSensor == 3)
-        distance[2] = filteredDistance;
-    else
-        distance[currentSensor] = filteredDistance;
-}
-
-uint16_t filter_Distance(uint16_t arr[5])
-{
-    uint16_t minVal = arr[0];
-    uint16_t maxVal = arr[0];
-    uint32_t sum    = 0;
-
-    // Находим min и max, а также сумму всех элементов
-    for (int i = 0; i < 5; i++)
+    if (sample.filterUpdated)
     {
-        if (arr[i] < minVal)
-            minVal = arr[i];
-        if (arr[i] > maxVal)
-            maxVal = arr[i];
-        sum += arr[i];
+        updateTofDistance(currentSensor, sample.filteredDistanceMm);
     }
-
-    // Вычитаем min и max из суммы
-    sum = sum - minVal - maxVal;
-
-    // Возвращаем среднее арифметическое оставшихся 3 значений
-    return (uint16_t)(sum / 3);
+    checkTofStale(now);
+    clearRecoveredTofFaultIfSafe(currentSensor, now);
 }
 
 // Определяет текущую позицию шаттла в канале по переднему фронту (передней панели)
@@ -8279,13 +8296,11 @@ static inline void resetTofDiagnostics()
         tofLastDiagStatus[i] = TOF_I2C_OK;
         tofFailureWarnLogged[i] = false;
         tofFaultLogged[i]       = false;
-        tofLastTransportSuccessMs[i]       = now;
-        tofHasTransportSuccess[i]          = false;
         tofConsecutiveTransportFailures[i] = 0U;
         tofLastFailureLogMs[i]             = 0U;
+        tofHealth[i].reset(now);
     }
-    tofRuntimeStartMs          = now;
-    tofRuntimeStarted          = true;
+    tofRuntimeStarted       = true;
     tofI2cRecoveryLogged    = false;
     tofLastI2cRecoveryLogMs = 0;
     tofLastRecoverySummaryLogMs = 0;
@@ -8622,6 +8637,15 @@ void sendSensorPacket(Stream *port)
         pkt.hardwareFlags |= HW_FLAG_LIFTER_UP;
     if (!digitalRead(DL_DOWN))
         pkt.hardwareFlags |= HW_FLAG_LIFTER_DOWN;
+    const uint32_t now = millis();
+    if (tofHealth[inverse ? 0U : 1U].outputValid(now))
+        pkt.hardwareFlags |= HW_FLAG_TOF_CH_F_VALID;
+    if (tofHealth[inverse ? 1U : 0U].outputValid(now))
+        pkt.hardwareFlags |= HW_FLAG_TOF_CH_R_VALID;
+    if (tofHealth[inverse ? 2U : 3U].outputValid(now))
+        pkt.hardwareFlags |= HW_FLAG_TOF_PAL_F_VALID;
+    if (tofHealth[inverse ? 3U : 2U].outputValid(now))
+        pkt.hardwareFlags |= HW_FLAG_TOF_PAL_R_VALID;
 
     FrameHeader *header       = (FrameHeader *)localTxBuffer;
     header->sync1             = PROTOCOL_SYNC_1_V2;
