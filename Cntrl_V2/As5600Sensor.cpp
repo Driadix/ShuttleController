@@ -249,9 +249,19 @@ uint32_t As5600Sensor::totalReadFailures() const
     return _health.totalFailures();
 }
 
+uint32_t As5600Sensor::totalRecoveries() const
+{
+    return _health.totalRecoveries();
+}
+
 uint8_t As5600Sensor::consecutiveFailures() const
 {
     return _health.consecutiveFailures();
+}
+
+uint8_t As5600Sensor::consecutiveSuccesses() const
+{
+    return _health.consecutiveSuccesses();
 }
 
 uint8_t As5600Sensor::lastI2cStatus() const

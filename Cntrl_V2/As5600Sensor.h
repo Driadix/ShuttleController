@@ -31,7 +31,9 @@ class As5600Sensor
     uint8_t  reportedState() const;
 
     uint32_t totalReadFailures() const;
+    uint32_t totalRecoveries() const;
     uint8_t  consecutiveFailures() const;
+    uint8_t  consecutiveSuccesses() const;
     uint8_t  lastI2cStatus() const;
     uint32_t lastGoodSampleAgeMs(uint32_t nowMs) const;
     uint16_t lastGoodAngleRaw() const;

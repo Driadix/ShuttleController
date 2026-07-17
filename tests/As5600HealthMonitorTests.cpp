@@ -44,6 +44,15 @@ static void testFreshnessAndForcedMotionFault()
     assert(health.state() == As5600HealthState::Faulted);
     assert(health.consecutiveFailures() == As5600HealthMonitor::kFailureThreshold);
     assert(health.lastI2cStatus() == 0xFEU);
+
+    health.noteSuccess(1201U);
+    health.noteSuccess(1202U);
+    assert(health.state() == As5600HealthState::Recovering);
+    assert(!health.outputValid(1202U));
+    health.noteSuccess(1203U);
+    assert(health.state() == As5600HealthState::Healthy);
+    assert(health.outputValid(1203U));
+    assert(health.totalRecoveries() == 1U);
 }
 
 int main()

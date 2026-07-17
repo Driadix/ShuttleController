@@ -217,6 +217,7 @@ static bool                  ensureAs5600BusReady(uint32_t now);
 static void                  serviceAs5600Safety(uint32_t now);
 static void                  logAs5600FailureIfDue(uint32_t now);
 static void                  latchAs5600Fault(const char *context, uint8_t i2cStatus);
+static void                  clearRecoveredAs5600FaultIfSafe(uint32_t now);
 static bool                  readAs5600AngleForMotion(uint16_t *rawAngle);
 static bool                  readAs5600AngleFresh(int *angleOut);
 static void                  logBootResetReplay();
@@ -1010,9 +1011,41 @@ static void serviceAs5600Safety(uint32_t now)
     {
         logAs5600FailureIfDue(now);
     }
+    clearRecoveredAs5600FaultIfSafe(now);
     if (as5600Sensor.shouldDeclareFault(now))
     {
         latchAs5600Fault("health_monitor", as5600Sensor.lastI2cStatus());
+    }
+}
+
+static void clearRecoveredAs5600FaultIfSafe(uint32_t now)
+{
+    if ((alertMan.getErrorCode() & (uint16_t)FAULT_AS5600) == 0U ||
+        !as5600Sensor.angleValid(now) || !isPhysicallyStationary())
+    {
+        return;
+    }
+
+    alertMan.clearFault(FAULT_AS5600);
+    makeReliableLog(
+        LOG_INFO,
+        "AS5600 clear=alive ok=%u rec=%lu fail=%lu angle=%u age=%lu",
+        as5600Sensor.consecutiveSuccesses(),
+        (unsigned long)as5600Sensor.totalRecoveries(),
+        (unsigned long)as5600Sensor.totalReadFailures(),
+        as5600Sensor.lastGoodAngleRaw(),
+        (unsigned long)as5600Sensor.lastGoodSampleAgeMs(now));
+
+    if (alertMan.getErrorCode() == 0U)
+    {
+        clearManualRadioHold();
+        pendingDisplayManualModeBypass = false;
+        statusSourceRadio              = false;
+        status                         = 0;
+        currentOperation               = STATE_IDLE;
+        digitalWrite(RED_LED, LOW);
+        currentMode = CoreOpMode::IDLE;
+        makeLog(LOG_INFO, "All faults cleared after stable AS5600 recovery -> idle");
     }
 }
 
