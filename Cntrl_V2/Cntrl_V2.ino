@@ -1,4 +1,4 @@
-#include "AS5600.h"
+#include "As5600Sensor.h"
 #include "AlertManager.h"
 #include "BmsDdA5FirmwareAdapter.hpp"
 #include "E22Radio.hpp"
@@ -189,6 +189,7 @@ static void                  sendSensorPacket(Stream *port);
 static void                  sendStatsPacket(Stream *port);
 static void                  sendLinkHealthPacket(Stream *port);
 static void                  populateLinkHealthPacket(LinkHealthPacket *pkt);
+static void                  sendAs5600HealthPacket(Stream *port);
 static bool                  isRadioPacketRssiFresh(uint32_t now);
 static BmsDdA5::ActivityHint mapBatteryActivity();
 static void                  batterySafetyCheck(uint32_t now);
@@ -212,10 +213,12 @@ static void                  logTofI2cLines(const char *tag);
 static void                  logI2cBootScan();
 static void                  logTofBootSnapshot();
 static void                  logI2cDiagSummaryIfDue(uint32_t now);
-static bool                  readAs5600AngleChecked(uint16_t *rawAngle);
+static bool                  ensureAs5600BusReady(uint32_t now);
+static void                  serviceAs5600Safety(uint32_t now);
+static void                  logAs5600FailureIfDue(uint32_t now);
+static void                  latchAs5600Fault(const char *context, uint8_t i2cStatus);
 static bool                  readAs5600AngleForMotion(uint16_t *rawAngle);
 static bool                  readAs5600AngleFresh(int *angleOut);
-static uint16_t              readAs5600AngleForTelemetry();
 static void                  logBootResetReplay();
 static void                  retryRadioConfigIfIdle(uint32_t now);
 static inline bool           batteryIsHighLoad();
@@ -397,18 +400,12 @@ constexpr uint32_t kTofLineLowConfirmMs               = 2U;
 constexpr uint32_t kTofLineReleaseConfirmMs           = 2U;
 constexpr uint32_t kTofFailureLogIntervalMs           = 5000U;
 constexpr uint32_t kBmsTofQuietGuardMs                = 5U;
-constexpr uint8_t  kAs5600I2cAddress                 = 0x36U;
-constexpr uint8_t  kAs5600AngleHighReg               = 0x0EU;
-constexpr uint8_t  kAs5600AngleReadLength            = 2U;
-constexpr uint8_t  kAs5600ExistingBeginPin           = 4U;
-static_assert(kAs5600ExistingBeginPin == 4U, "Keep the controller AS5600 begin pin at 4.");
 constexpr uint32_t kRadioPacketRssiFreshMs            = 10000UL;
 constexpr uint32_t kLinkHealthPublishMs               = 5000UL;
 constexpr uint32_t kRadioRuntimeAuxWaitMs             = 20UL;
 constexpr uint32_t kRadioLinkSilenceProbeMs           = 15000UL;
 constexpr uint32_t kRadioPresenceAuditIntervalMs      = 300000UL;
 constexpr uint32_t kRadioProbeRxQuietMs               = 10000UL;
-constexpr uint32_t kAs5600FailLogIntervalMs           = 30000UL;
 constexpr uint32_t kI2cDiagSummaryIntervalMs          = 30000UL;
 
 #pragma endregion
@@ -564,7 +561,6 @@ void clearAllWarnings()
     alertMan.clearAllWarnings();
 }
 
-AS5600       as5600;               // Магнитный энкодер на свободном колесе
 uint8_t      status           = 0; // Командный статус
 ShuttleState currentOperation = STATE_IDLE;
 uint8_t      shuttleNum       = 0; // Номер шаттла -сохранять-
@@ -670,11 +666,8 @@ static uint32_t    tofLastBusStateLogMs       = 0U;
 static uint32_t    tofLastSclReleaseLogMs     = 0U;
 static bool        tofSdaRecoveryAttempted    = false;
 
-static uint16_t as5600LastGoodAngleRaw      = 0;
-static bool     as5600LastGoodAngleValid    = false;
-static bool     as5600Present               = false;
-static uint32_t as5600ReadFailCount         = 0;
-static uint32_t as5600LastReadFailLogMs     = 0;
+static As5600Sensor as5600Sensor(Wire, ensureAs5600BusReady);
+static uint32_t     as5600LastReadFailLogMs = 0U;
 
 constexpr uint8_t CRASH_SRC_F1 = 0x01;
 constexpr uint8_t CRASH_SRC_F2 = 0x02;
@@ -929,7 +922,7 @@ static void logI2cBootScanAtClock(uint32_t clockHz)
     const uint8_t err0A = i2cProbeAddress((uint8_t)0x0AU);
     const uint8_t err0B = i2cProbeAddress((uint8_t)0x0BU);
     const uint8_t err0C = i2cProbeAddress((uint8_t)0x0CU);
-    const uint8_t err36 = i2cProbeAddress(kAs5600I2cAddress);
+    const uint8_t err36 = as5600Sensor.probeAddress(millis());
 
     makeReliableLog(
         LOG_INFO,
@@ -961,61 +954,66 @@ static void logI2cBootScan()
     setTofI2cClock(tofI2cClockHz);
 }
 
-static bool readAs5600AngleChecked(uint16_t *rawAngle)
+static bool ensureAs5600BusReady(uint32_t now)
 {
-    if (rawAngle == nullptr || !as5600Present)
+    return serviceTofBusMonitor(now);
+}
+
+static void logAs5600FailureIfDue(uint32_t now)
+{
+    if (as5600LastReadFailLogMs != 0U &&
+        now - as5600LastReadFailLogMs < As5600Sensor::kFailureLogIntervalMs)
     {
-        return false;
+        return;
     }
 
-    uint8_t txStatus       = 0xFFU;
-    uint8_t requestedBytes = 0U;
-    uint8_t availableBytes = 0U;
+    makeReliableLog(
+        LOG_WARN,
+        "AS5600 read fail st=%u n=%u total=%lu last=%u valid=%u io=%u/%u",
+        as5600Sensor.lastI2cStatus(),
+        as5600Sensor.consecutiveFailures(),
+        (unsigned long)as5600Sensor.totalReadFailures(),
+        as5600Sensor.lastGoodAngleRaw(),
+        as5600Sensor.hasLastGoodAngle() ? 1U : 0U,
+        digitalRead(TOF_I2C_SDA),
+        digitalRead(TOF_I2C_SCL));
+    as5600LastReadFailLogMs = (now == 0U) ? 1U : now;
+}
 
-    if (serviceTofBusMonitor(millis()))
+static void latchAs5600Fault(const char *context, uint8_t i2cStatus)
+{
+    as5600Sensor.forceFault(i2cStatus);
+    if ((alertMan.getErrorCode() & (uint16_t)FAULT_AS5600) == 0U)
     {
-        Wire.beginTransmission(kAs5600I2cAddress);
-        Wire.write(kAs5600AngleHighReg);
-        txStatus = Wire.endTransmission(true);
-        if (txStatus == 0U)
-        {
-            requestedBytes = Wire.requestFrom(kAs5600I2cAddress, kAs5600AngleReadLength);
-            availableBytes = (uint8_t)Wire.available();
-            if (requestedBytes == kAs5600AngleReadLength && availableBytes >= kAs5600AngleReadLength)
-            {
-                const uint16_t high = (uint16_t)Wire.read();
-                const uint16_t low  = (uint16_t)Wire.read();
-                *rawAngle = (uint16_t)(((high << 8) | low) & 0x0FFFU);
-                as5600LastGoodAngleRaw   = *rawAngle;
-                as5600LastGoodAngleValid = true;
-                return true;
-            }
-
-            while (Wire.available() > 0)
-            {
-                (void)Wire.read();
-            }
-        }
-    }
-
-    as5600ReadFailCount++;
-    const uint32_t now = millis();
-    if (as5600LastReadFailLogMs == 0U || now - as5600LastReadFailLogMs >= kAs5600FailLogIntervalMs)
-    {
+        setFault(FAULT_AS5600);
         makeReliableLog(
-            LOG_WARN,
-            "AS5600 fail tx=%u got=%u av=%u cnt=%lu last=%u v=%u io=%u/%u",
-            txStatus,
-            requestedBytes,
-            availableBytes,
-            (unsigned long)as5600ReadFailCount,
-            as5600LastGoodAngleRaw,
-            as5600LastGoodAngleValid ? 1U : 0U,
+            LOG_ERROR,
+            "AS5600 unavailable %s st=%u n=%u age=%lu io=%u/%u",
+            context != nullptr ? context : "runtime",
+            i2cStatus,
+            as5600Sensor.consecutiveFailures(),
+            (unsigned long)as5600Sensor.lastGoodSampleAgeMs(millis()),
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
-        as5600LastReadFailLogMs = (now == 0U) ? 1U : now;
     }
-    return false;
+    if (motorStart != 0U)
+    {
+        motor_Force_Stop();
+    }
+}
+
+static void serviceAs5600Safety(uint32_t now)
+{
+    const uint32_t failuresBefore = as5600Sensor.totalReadFailures();
+    as5600Sensor.service(now);
+    if (as5600Sensor.totalReadFailures() != failuresBefore)
+    {
+        logAs5600FailureIfDue(now);
+    }
+    if (as5600Sensor.shouldDeclareFault(now))
+    {
+        latchAs5600Fault("health_monitor", as5600Sensor.lastI2cStatus());
+    }
 }
 
 static bool readAs5600AngleForMotion(uint16_t *rawAngle)
@@ -1024,17 +1022,17 @@ static bool readAs5600AngleForMotion(uint16_t *rawAngle)
     {
         return false;
     }
-    if (readAs5600AngleChecked(rawAngle))
+    const uint32_t failuresBefore = as5600Sensor.totalReadFailures();
+    if (as5600Sensor.readAngle(rawAngle))
     {
         return true;
     }
-    if (!as5600LastGoodAngleValid)
+    if (as5600Sensor.totalReadFailures() != failuresBefore)
     {
-        return false;
+        logAs5600FailureIfDue(millis());
     }
-
-    *rawAngle = as5600LastGoodAngleRaw;
-    return true;
+    latchAs5600Fault("motion_read", as5600Sensor.lastI2cStatus());
+    return false;
 }
 
 static bool readAs5600AngleFresh(int *angleOut)
@@ -1045,24 +1043,19 @@ static bool readAs5600AngleFresh(int *angleOut)
     }
 
     uint16_t rawAngle = 0;
-    if (!readAs5600AngleChecked(&rawAngle))
+    const uint32_t failuresBefore = as5600Sensor.totalReadFailures();
+    if (!as5600Sensor.readAngle(&rawAngle))
     {
+        if (as5600Sensor.totalReadFailures() != failuresBefore)
+        {
+            logAs5600FailureIfDue(millis());
+        }
+        latchAs5600Fault("calibration_read", as5600Sensor.lastI2cStatus());
         return false;
     }
 
     *angleOut = rawAngle;
     return true;
-}
-
-static uint16_t readAs5600AngleForTelemetry()
-{
-    uint16_t rawAngle = as5600LastGoodAngleRaw;
-    if (readAs5600AngleChecked(&rawAngle))
-    {
-        return rawAngle;
-    }
-
-    return as5600LastGoodAngleValid ? as5600LastGoodAngleRaw : 0U;
 }
 
 static void logBootResetReplay()
@@ -1379,7 +1372,7 @@ static bool recoverTofBusForManualClear()
     }
 
     const uint8_t tofAckMask = scanTofAddressMask();
-    const bool    as5600Ack  = i2cProbeAddress(kAs5600I2cAddress) == 0U;
+    const bool    as5600Ack  = as5600Sensor.probeAddress(millis()) == 0U;
     const bool    busVerified = tofAckMask != 0U || as5600Ack;
     makeReliableLog(
         busVerified ? LOG_INFO : LOG_WARN,
@@ -1563,7 +1556,8 @@ static void logI2cDiagSummaryIfDue(uint32_t now)
     const uint16_t tofFaultMask = (uint16_t)FAULT_TOF_CH_F | (uint16_t)FAULT_TOF_CH_R |
                                   (uint16_t)FAULT_TOF_PAL_F | (uint16_t)FAULT_TOF_PAL_R;
     const bool hasI2cEvidence = ((alertMan.getWarningCode() & (uint16_t)WARN_I2C_RECOVERY) != 0U) ||
-                                ((alertMan.getErrorCode() & tofFaultMask) != 0U) || as5600ReadFailCount != 0U ||
+                                ((alertMan.getErrorCode() & tofFaultMask) != 0U) ||
+                                as5600Sensor.totalReadFailures() != 0U ||
                                 tofI2cRecoveryCount != 0U;
     if (!hasI2cEvidence)
     {
@@ -1594,7 +1588,7 @@ static void logI2cDiagSummaryIfDue(uint32_t now)
         tofSharedBusErrors[2],
         tofSharedBusErrors[3],
         (unsigned long)tofI2cRecoveryCount,
-        (unsigned long)as5600ReadFailCount,
+        (unsigned long)as5600Sensor.totalReadFailures(),
         digitalRead(TOF_I2C_SDA),
         digitalRead(TOF_I2C_SCL));
 #else
@@ -1713,16 +1707,16 @@ void setup()
     initTofI2cBus();
     logTofI2cLines("after init");
 
-    // Инициируем магнитный энкодер
-    const bool encoderOk = as5600.begin(4);
-    as5600Present = encoderOk;
-    as5600.setDirection(AS5600_CLOCK_WISE);
+    const bool encoderOk = as5600Sensor.begin(millis());
+    if (!encoderOk)
+    {
+        logAs5600FailureIfDue(millis());
+    }
     if (encoderOk)
         makeBootLog(LOG_INFO, "Init encoder success...");
     else
         makeBootLog(LOG_ERROR, "Init encoder failed...");
 
-    initTofI2cBus();
     logTofI2cLines("after encoder");
     logI2cBootScan();
     logTofBootSnapshot();
@@ -2740,6 +2734,13 @@ uint8_t processPacket(FrameHeader *header, uint8_t *payload, Stream *replyPort)
         countReplyTiming(replyPort, micros() - startUs);
         return NO_NEW_CMD;
     }
+    else if (realMsgID == MSG_REQ_AS5600_HEALTH)
+    {
+        uint32_t startUs = micros();
+        sendAs5600HealthPacket(replyPort);
+        countReplyTiming(replyPort, micros() - startUs);
+        return NO_NEW_CMD;
+    }
     else if (realMsgID == MSG_CMD_SIMPLE || realMsgID == MSG_CMD_WITH_ARG)
     {
         uint8_t reqCmd =
@@ -3573,33 +3574,7 @@ static bool probeAs5600ForBusVote()
     {
         return false;
     }
-
-    Wire.beginTransmission(kAs5600I2cAddress);
-    if (Wire.write(kAs5600AngleHighReg) != 1U || Wire.endTransmission(true) != 0U)
-    {
-        return false;
-    }
-
-    const uint8_t requested = Wire.requestFrom(kAs5600I2cAddress, kAs5600AngleReadLength);
-    uint8_t received = 0U;
-    uint8_t bytes[kAs5600AngleReadLength] = { 0U, 0U };
-    while (Wire.available() > 0 && received < kAs5600AngleReadLength)
-    {
-        bytes[received++] = (uint8_t)Wire.read();
-    }
-    while (Wire.available() > 0)
-    {
-        (void)Wire.read();
-    }
-
-    if (requested != kAs5600AngleReadLength || received != kAs5600AngleReadLength)
-    {
-        return false;
-    }
-
-    as5600LastGoodAngleRaw = (uint16_t)((((uint16_t)bytes[0] << 8) | bytes[1]) & 0x0FFFU);
-    as5600LastGoodAngleValid = true;
-    return true;
+    return as5600Sensor.probeForBusVote();
 }
 
 static void recordTofBusVoteFailure(uint8_t sensor)
@@ -3742,9 +3717,6 @@ static void endTofSchedulerPause(uint32_t now, const char *reason)
     tofSchedulerPaused      = false;
     if (tofRuntimeStarted)
     {
-        // Exclude only this explicit maintenance interval.  Age accumulated
-        // before it is preserved, so a genuinely failing sensor still becomes
-        // stale after its remaining part of the 300 ms timeout.
         for (uint8_t sensor = 0U; sensor < 4U; ++sensor)
         {
             tofHealth[sensor].excludePausedTime(pausedMs);
@@ -4807,7 +4779,6 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)
     uint16_t startAngle = 0;
     if (!readAs5600AngleForMotion(&startAngle))
     {
-        setFault(FAULT_MOVE_TIMEOUT);
         return;
     }
     uint16_t currentAngle = startAngle;
@@ -4847,7 +4818,6 @@ void moove_Distance_F(int dist, int maxSpeed, int minSpeed)
             set_Position();
             if (!readAs5600AngleForMotion(&currentAngle))
             {
-                setFault(FAULT_MOVE_TIMEOUT);
                 motor_Stop();
                 status = CMD_STOP;
                 return;
@@ -5010,7 +4980,6 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)
     uint16_t startAngle = 0;
     if (!readAs5600AngleForMotion(&startAngle))
     {
-        setFault(FAULT_MOVE_TIMEOUT);
         return;
     }
     uint16_t currentAngle = startAngle;
@@ -5050,7 +5019,6 @@ void moove_Distance_R(int dist, int maxSpeed, int minSpeed)
             set_Position();
             if (!readAs5600AngleForMotion(&currentAngle))
             {
-                setFault(FAULT_MOVE_TIMEOUT);
                 motor_Stop();
                 status = CMD_STOP;
                 return;
@@ -6869,8 +6837,13 @@ void SystemYield()
     static uint32_t timerStats     = 0;
     static uint32_t timerUptime    = 0;
     static uint32_t timerLinkHealth = 0;
+    static uint32_t timerAs5600Health = 0;
     static bool     lastLinkHealthValid = false;
     static bool     lastLinkHealthValidInitialized = false;
+    static uint8_t  lastAs5600State = AS5600_STATE_STARTING;
+    static bool     lastAs5600StateInitialized = false;
+
+    serviceAs5600Safety(currentMillis);
 
     retryRadioConfigIfIdle(currentMillis);
 
@@ -6919,6 +6892,19 @@ void SystemYield()
             lastLinkHealthValidInitialized   = true;
             writeBreadcrumb(BC_TX_LINK_HEALTH, 0xFF, linkHealthValid ? 1 : 0, 0);
             sendLinkHealthPacket(&SerialDisplay);
+        }
+    }
+    const uint8_t as5600State = as5600Sensor.reportedState();
+    const bool as5600StateChanged = !lastAs5600StateInitialized || as5600State != lastAs5600State;
+    if (as5600StateChanged ||
+        currentMillis - timerAs5600Health >= As5600Sensor::kHealthPublishIntervalMs)
+    {
+        if (SerialDisplay.availableForWrite() >= (int)(sizeof(As5600HealthPacket) + sizeof(FrameHeader) + 2U))
+        {
+            timerAs5600Health          = currentMillis;
+            lastAs5600State            = as5600State;
+            lastAs5600StateInitialized = true;
+            sendAs5600HealthPacket(&SerialDisplay);
         }
     }
     if (currentMillis - timerUptime >= 60000)
@@ -7212,7 +7198,6 @@ void calibrate_Encoder_R()
     makeLog(LOG_INFO, "Start calibrating encoder to Reverse");
     if (!readAs5600AngleFresh(&angle))
     {
-        setFault(FAULT_MOVE_TIMEOUT);
         motor_Stop();
         return;
     }
@@ -7235,7 +7220,6 @@ void calibrate_Encoder_R()
     // Выставляем 0 на энкодере
     if (!readAs5600AngleFresh(&angle))
     {
-        setFault(FAULT_MOVE_TIMEOUT);
         motor_Stop();
         return;
     }
@@ -7267,7 +7251,6 @@ void calibrate_Encoder_R()
         {
             if (!readAs5600AngleFresh(&angle))
             {
-                setFault(FAULT_MOVE_TIMEOUT);
                 motor_Stop();
                 return;
             }
@@ -7295,7 +7278,6 @@ void calibrate_Encoder_R()
         }
         if (!readAs5600AngleFresh(&angle))
         {
-            setFault(FAULT_MOVE_TIMEOUT);
             motor_Stop();
             return;
         }
@@ -7353,7 +7335,6 @@ void calibrate_Encoder_F()
     // Выставляем 0 на энкодере
     if (!readAs5600AngleFresh(&angle))
     {
-        setFault(FAULT_MOVE_TIMEOUT);
         motor_Stop();
         return;
     }
@@ -7385,7 +7366,6 @@ void calibrate_Encoder_F()
         {
             if (!readAs5600AngleFresh(&angle))
             {
-                setFault(FAULT_MOVE_TIMEOUT);
                 motor_Stop();
                 return;
             }
@@ -7413,7 +7393,6 @@ void calibrate_Encoder_F()
         }
         if (!readAs5600AngleFresh(&angle))
         {
-            setFault(FAULT_MOVE_TIMEOUT);
             motor_Stop();
             return;
         }
@@ -8479,10 +8458,12 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
                                   (uint16_t)FAULT_TOF_PAL_F | (uint16_t)FAULT_TOF_PAL_R;
     const bool tofRecoveryNeeded = (alertMan.getErrorCode() & tofFaultMask) != 0U ||
                                    tofBusState != TofBusState::Ready || !tofBusLinesHighNow();
+    const bool as5600RecoveryNeeded = (alertMan.getErrorCode() & (uint16_t)FAULT_AS5600) != 0U;
+    const bool tofBusRecovered = !tofRecoveryNeeded || recoverTofBusForManualClear();
+    const bool as5600Recovered = !as5600RecoveryNeeded || as5600Sensor.verifyRecovery(now);
     alertMan.clearAllFaults();
     alertMan.clearAllWarnings();
     batterySafetyReset(now);
-    const bool tofBusRecovered = !tofRecoveryNeeded || recoverTofBusForManualClear();
     resetTofDiagnostics();
     clearManualRadioHold();
     pendingDisplayManualModeBypass = false;
@@ -8507,6 +8488,13 @@ static inline void clearLatchedAlertsAndReturnToIdle(uint32_t now)
             "Reset error: TOF bus recovery not verified io=%u/%u",
             digitalRead(TOF_I2C_SDA),
             digitalRead(TOF_I2C_SCL));
+    }
+    if (!as5600Recovered)
+    {
+        latchAs5600Fault("manual_reset_verify", as5600Sensor.lastI2cStatus());
+        currentOperation = STATE_ERROR;
+        currentMode      = CoreOpMode::ERROR;
+        makeReliableLog(LOG_ERROR, "Reset error: AS5600 recovery not verified");
     }
 }
 
@@ -8833,6 +8821,7 @@ void sendSensorPacket(Stream *port)
         return;
     uint8_t localTxBuffer[sizeof(FrameHeader) + sizeof(SensorPacket) + 2];
     temp = 25 + ((float)(analogRead(ATEMP) * 3200) / 4096 - 760) / 2.5;
+    const uint32_t now = millis();
 
     SensorPacket pkt;
     pkt.distanceF      = distance[1];
@@ -8840,7 +8829,7 @@ void sendSensorPacket(Stream *port)
     pkt.distancePltF   = distance[3];
     pkt.distancePltR   = distance[2];
     writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 0);
-    pkt.angle          = readAs5600AngleForTelemetry();
+    pkt.angle          = as5600Sensor.telemetryAngle(now);
     writeBreadcrumb(BC_AS5600_ANGLE, 0xFF, 0, 1);
     pkt.lifterCurrent  = lifterCurrent;
     pkt.temperature_dC = (int16_t)(temp * 10);
@@ -8866,7 +8855,6 @@ void sendSensorPacket(Stream *port)
         pkt.hardwareFlags |= HW_FLAG_LIFTER_UP;
     if (!digitalRead(DL_DOWN))
         pkt.hardwareFlags |= HW_FLAG_LIFTER_DOWN;
-    const uint32_t now = millis();
     if (tofHealth[inverse ? 0U : 1U].outputValid(now))
         pkt.hardwareFlags |= HW_FLAG_TOF_CH_F_VALID;
     if (tofHealth[inverse ? 1U : 0U].outputValid(now))
@@ -8875,6 +8863,8 @@ void sendSensorPacket(Stream *port)
         pkt.hardwareFlags |= HW_FLAG_TOF_PAL_F_VALID;
     if (tofHealth[inverse ? 3U : 2U].outputValid(now))
         pkt.hardwareFlags |= HW_FLAG_TOF_PAL_R_VALID;
+    if (as5600Sensor.angleValid(now))
+        pkt.hardwareFlags |= HW_FLAG_AS5600_VALID;
 
     FrameHeader *header       = (FrameHeader *)localTxBuffer;
     header->sync1             = PROTOCOL_SYNC_1_V2;
@@ -9000,6 +8990,36 @@ static void sendLinkHealthPacket(Stream *port)
     ProtocolUtils::appendCRC(localTxBuffer, totalLen);
 
     if (writeTransportPayload(port, localTxBuffer, totalLen + 2, NULL) == totalLen + 2)
+    {
+        countTxFrame(port);
+    }
+}
+
+static void sendAs5600HealthPacket(Stream *port)
+{
+    if (port == nullptr || pendingBootloaderEntry)
+        return;
+
+    uint8_t            localTxBuffer[sizeof(FrameHeader) + sizeof(As5600HealthPacket) + 2U];
+    As5600HealthPacket pkt;
+    as5600Sensor.populateHealthPacket(
+        &pkt,
+        millis(),
+        (alertMan.getErrorCode() & (uint16_t)FAULT_AS5600) != 0U);
+
+    FrameHeader *header       = (FrameHeader *)localTxBuffer;
+    header->sync1             = PROTOCOL_SYNC_1_V2;
+    header->sync2             = PROTOCOL_SYNC_2_V2;
+    header->length            = sizeof(As5600HealthPacket);
+    header->targetID          = TARGET_ID_NONE;
+    static uint8_t seqCounter = 0U;
+    header->seq               = seqCounter++;
+    header->msgID             = MSG_AS5600_HEALTH;
+
+    memcpy(localTxBuffer + sizeof(FrameHeader), &pkt, sizeof(As5600HealthPacket));
+    uint16_t totalLen = sizeof(FrameHeader) + header->length;
+    ProtocolUtils::appendCRC(localTxBuffer, totalLen);
+    if (writeTransportPayload(port, localTxBuffer, totalLen + 2U, NULL) == totalLen + 2U)
     {
         countTxFrame(port);
     }

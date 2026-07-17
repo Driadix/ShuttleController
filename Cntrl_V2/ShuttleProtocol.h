@@ -5,7 +5,7 @@
 
 constexpr uint8_t PROTOCOL_SYNC_1_V2 = 0xBB;
 constexpr uint8_t PROTOCOL_SYNC_2_V2 = 0xCC;
-constexpr uint8_t PROTOCOL_VER       = 6;
+constexpr uint8_t PROTOCOL_VER       = 7;
 
 constexpr uint8_t TARGET_ID_NONE      = 0x00; // Direct UART line
 constexpr uint8_t TARGET_ID_BROADCAST = 0xFF; // Global command
@@ -43,6 +43,8 @@ enum MsgID : uint8_t
     MSG_REQ_STATS     = 0x06, // Pult -> Shuttle: Request Stats
     MSG_LINK_HEALTH     = 0x07, // Shuttle -> Display/backend/remote: radio link diagnostics
     MSG_REQ_LINK_HEALTH = 0x08, // Pult -> Shuttle: Request radio link diagnostics
+    MSG_AS5600_HEALTH     = 0x09, // Shuttle -> Display/backend/remote: encoder diagnostics
+    MSG_REQ_AS5600_HEALTH = 0x0A, // Pult -> Shuttle: Request encoder diagnostics
 
     // Asynchronous
     MSG_LOG = 0x10, // Shuttle/Display -> backend: bounded log string frame
@@ -177,6 +179,7 @@ enum ShuttleFault : uint16_t
     FAULT_LIFTER_TIMEOUT = (1 << 9),
     FAULT_MOTOR_STALL    = (1 << 10),
     FAULT_LOW_BATTERY    = (1 << 11),
+    FAULT_AS5600         = (1 << 12),
     FAULT_MOVE_TIMEOUT   = (1 << 13)
 };
 
@@ -252,6 +255,7 @@ constexpr uint16_t HW_FLAG_TOF_CH_F_VALID  = (1U << 10);
 constexpr uint16_t HW_FLAG_TOF_CH_R_VALID  = (1U << 11);
 constexpr uint16_t HW_FLAG_TOF_PAL_F_VALID = (1U << 12);
 constexpr uint16_t HW_FLAG_TOF_PAL_R_VALID = (1U << 13);
+constexpr uint16_t HW_FLAG_AS5600_VALID     = (1U << 14);
 
 struct SensorPacket
 {
@@ -299,6 +303,38 @@ struct LinkHealthPacket
     uint8_t  packetRssiRaw;
     uint8_t  flags;
     uint32_t packetRssiAgeMs;
+};
+
+enum As5600ReportedState : uint8_t
+{
+    AS5600_STATE_STARTING = 0,
+    AS5600_STATE_HEALTHY,
+    AS5600_STATE_DEGRADED,
+    AS5600_STATE_FAULTED,
+    AS5600_STATE_RECOVERING
+};
+
+constexpr uint8_t AS5600_FLAG_RESPONDING      = (1U << 0);
+constexpr uint8_t AS5600_FLAG_ANGLE_VALID     = (1U << 1);
+constexpr uint8_t AS5600_FLAG_MAGNET_DETECTED = (1U << 2); // Advisory only.
+constexpr uint8_t AS5600_FLAG_MAGNET_TOO_WEAK = (1U << 3); // Advisory only.
+constexpr uint8_t AS5600_FLAG_MAGNET_TOO_STRONG = (1U << 4); // Advisory only.
+constexpr uint8_t AS5600_FLAG_FAULT_LATCHED   = (1U << 5);
+
+struct As5600HealthPacket
+{
+    uint32_t lastGoodSampleAgeMs;
+    uint32_t totalReadFailures;
+    uint16_t angleRaw;
+    uint16_t magnitude;
+    uint16_t recoveryCount;
+    uint8_t  state;
+    uint8_t  flags;
+    uint8_t  statusRegister;
+    uint8_t  agc;
+    uint8_t  consecutiveFailures;
+    uint8_t  consecutiveSuccesses;
+    uint8_t  lastI2cStatus;
 };
 
 struct FullConfigPacket
@@ -371,6 +407,8 @@ struct AckTelemPacket
 
 static_assert(sizeof(LinkHealthPacket) == 8, "LinkHealthPacket wire size changed");
 static_assert(sizeof(FrameHeader) + sizeof(LinkHealthPacket) + 2 <= 64, "LinkHealthPacket exceeds parser buffer");
+static_assert(sizeof(As5600HealthPacket) == 21, "As5600HealthPacket wire size changed");
+static_assert(sizeof(FrameHeader) + sizeof(As5600HealthPacket) + 2 <= 64, "As5600HealthPacket exceeds parser buffer");
 static_assert(sizeof(TelemetryPacket) == 16, "TelemetryPacket wire size changed");
 static_assert(sizeof(SensorPacket) == 16, "SensorPacket wire size changed");
 static_assert(sizeof(StatsPacket) == 54, "StatsPacket wire size changed");
